@@ -1,0 +1,9 @@
+Neuroglancer Mini viewer
+
+This folder contains code derived from Neuroglancer
+(https://github.com/google/neuroglancer), Copyright Google Inc., licensed under the
+Apache License, Version 2.0 (see LICENSE).
+
+The files in src/ have been modified from the original: most of the original code has
+been removed, and the remaining code has been rewritten and simplified. Files that
+carry a "Copyright ... Google Inc." notice are derived from Neuroglancer.

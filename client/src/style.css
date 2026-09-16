@@ -1,0 +1,283 @@
+@import "tailwindcss";
+
+/* The board fills the page below the header and clips the cards that are scrolled off it. */
+#board {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background-color: #0b0d12;
+  background-image: radial-gradient(#ffffff14 1px, transparent 1px);
+  background-size: 24px 24px;
+  touch-action: none;
+  cursor: grab;
+  user-select: none;
+}
+
+/* Carries the board's pan and zoom; the cards are laid out inside it in board coordinates. */
+#board-layer {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+}
+
+.card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #ffffff26;
+  border-radius: 8px;
+  background-color: #14161c;
+  box-shadow: 0 6px 20px #00000080;
+  overflow: hidden;
+  cursor: default;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+  font-size: 12px;
+  font-family: monospace;
+  color: #cfd3dc;
+  background-color: #1b1e26;
+  cursor: move;
+  user-select: none;
+}
+
+.card-orientation {
+  background-color: #0b0d12;
+  border: 1px solid #ffffff26;
+  border-radius: 4px;
+  padding: 0 2px;
+  font-family: monospace;
+  font-size: 11px;
+  color: #cfd3dc;
+  cursor: pointer;
+}
+
+.card-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #8b90a0;
+}
+
+.card-link {
+  padding: 0 4px;
+  border-radius: 4px;
+  color: #8b90a0;
+  cursor: pointer;
+}
+
+.card-link:hover {
+  color: white;
+  background-color: #ffffff1a;
+}
+
+.card-link.linked {
+  color: hsl(var(--group-hue) 70% 70%);
+}
+
+/* A linked card is marked in its group's colour. */
+.card.grouped {
+  border-color: hsl(var(--group-hue) 60% 45%);
+}
+
+.card.grouped .card-header {
+  background-color: hsl(var(--group-hue) 30% 18%);
+}
+
+/* While linking, the cards that can be linked to stand out and the source card is marked. */
+#board.linking .card {
+  outline: 1px dashed #ffffff59;
+  cursor: alias;
+}
+
+#board.linking .card.link-from {
+  outline: 2px solid #5b7cff;
+}
+
+/* The card waiting to be linked, and the badge of a card that can be linked to it. */
+#board.linking .card-link {
+  color: #a8bcff;
+}
+
+#board.linking .card.link-from .card-link {
+  color: #5b7cff;
+}
+
+.card-close {
+  padding: 0 6px;
+  border-radius: 4px;
+  color: #8b90a0;
+  cursor: pointer;
+}
+
+.card-close:hover {
+  color: white;
+  background-color: #ffffff1a;
+}
+
+/* The view's element: the viewer puts its canvas inside it, so it has no border and no padding. */
+.card-slice {
+  flex: 1;
+  position: relative;
+  min-height: 0;
+  touch-action: none;
+}
+
+.card-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  background: linear-gradient(135deg, transparent 50%, #ffffff40 50%);
+}
+
+/* The source form, or how the volume is doing, on top of the slice. */
+.card-overlay {
+  position: absolute;
+  inset: 28px 0 0 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  background-color: #14161c;
+  font-size: 12px;
+  color: #cfd3dc;
+  overflow: auto;
+}
+
+.card-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  color: #8b90a0;
+}
+
+.card-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.card-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: #8b90a0;
+}
+
+.card-form input {
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid #ffffff26;
+  border-radius: 4px;
+  background-color: #0b0d12;
+  color: #e6e7ea;
+  font-family: monospace;
+  font-size: 11px;
+}
+
+.card-form input:focus {
+  outline: 1px solid #5b7cff;
+}
+
+.card-form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-form button,
+.card-message button {
+  padding: 3px 10px;
+  border: 1px solid #ffffff26;
+  border-radius: 4px;
+  background-color: #1b1e26;
+  color: #e6e7ea;
+  cursor: pointer;
+}
+
+.card-form button:hover,
+.card-message button:hover {
+  background-color: #262a34;
+}
+
+.source-error {
+  color: rgb(248, 113, 113);
+}
+
+.source-known {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: #8b90a0;
+}
+
+#board-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4a5160;
+  font-size: 14px;
+  pointer-events: none;
+}
+
+#position {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-family: monospace;
+  font-size: 12px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+#position .pointer {
+  color: rgb(241, 227, 98);
+}
+
+#position .pointer:not(:empty) {
+  margin-right: 1em;
+}
+
+#status.error {
+  color: rgb(248, 113, 113);
+}
+
+#missing-chunks {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  max-width: 260px;
+  padding: 5px 10px;
+  border-radius: 4px;
+  background-color: rgba(0, 0, 0, 0.7);
+  color: white;
+  font-family: monospace;
+  font-size: 12px;
+  z-index: 1;
+}
+
+#missing-chunks ol {
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 4px;
+  color: #bbb;
+}

@@ -1,0 +1,22 @@
+{
+  "name": "viewer",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "es-toolkit": "^1.36.0",
+    "gl-matrix": "^3.4.3",
+    "numcodecs": "^0.3.2"
+  },
+  "devDependencies": {
+    "typescript": "~5.7.2"
+  },
+  "imports": {
+    "#src/*.js": "./src/*.ts",
+    "#src/*": "./src/*",
+    "#datasource/zarr/backend": {
+      "default": "./src/datasource/zarr/backend.ts"
+    }
+  }
+}

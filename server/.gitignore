@@ -1,0 +1,8 @@
+/node_modules
+.env
+
+/db/json/settings.json
+/db/json/sources.json
+/db/json/board.json
+/db/cache
+/dist
