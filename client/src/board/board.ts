@@ -11,7 +11,7 @@ import { LinkGroup } from "./links";
 import type { Source, VolumeRegistry } from "./sources";
 import { sourceLabel } from "./sources";
 import type { StoredBoard } from "./storage";
-import type { BoardTransform } from "./transform";
+import type { BoardTransform, Point2D } from "./transform";
 import { cssTransform, fitTo, toBoard } from "./transform";
 
 // Size of a new card, and the space left between cards put down together, in board units.
@@ -35,15 +35,20 @@ export class Board {
   // Called whenever anything the saved board holds has changed.  Set once the board has been put
   // back, so that putting it back does not save it again.
   onChanged: (() => void) | undefined;
-  // The card the keyboard acts on, if the user has clicked one.
-  selected: Card | undefined;
-  // What was copied, and the group a pasted card joins (see `copySelected`).
+  // The cards the keyboard and a drag act on: one clicked, or a whole area picked out.
+  readonly selection = new Set<Card>();
+  // What was copied, and the group each pasted card joins (see `copySelected`).
   private copied:
     | {
-        source: Source | undefined;
-        orientation: ViewOrientation;
-        rect: CardRect;
-        group: LinkGroup;
+        cards: {
+          source: Source | undefined;
+          orientation: ViewOrientation;
+          rect: CardRect;
+          group: LinkGroup;
+        }[];
+        // How far to the right the next paste goes, so that pasting twice does not stack.
+        offset: number;
+        step: number;
       }
     | undefined;
   private appliedScale = 1;
@@ -118,47 +123,93 @@ export class Board {
     );
   }
 
-  // The card the keyboard acts on; clicking one selects it and clicking the board selects nothing.
-  selectCard(card: Card | undefined) {
-    if (card === this.selected) return;
-    this.selected?.element.classList.remove("selected");
-    this.selected = card;
-    card?.element.classList.add("selected");
+  isSelected(card: Card) {
+    return this.selection.has(card);
   }
 
-  // Remembers the selected card for `pasteCopy`.  Returns false if there is nothing selected.
+  // Selects this card alone, or nothing.  Clicking a card does this, and clicking the board clears.
+  selectOnly(card: Card | undefined) {
+    this.selection.clear();
+    if (card !== undefined) this.selection.add(card);
+    this.showSelection();
+  }
+
+  clearSelection() {
+    if (this.selection.size === 0) return;
+    this.selection.clear();
+    this.showSelection();
+  }
+
+  // Adds or removes one card, which is what a click with Shift does.
+  toggleSelected(card: Card) {
+    if (!this.selection.delete(card)) this.selection.add(card);
+    this.showSelection();
+  }
+
+  // Selects every card the area between two board points touches, however little.
+  selectWithin(from: Point2D, to: Point2D) {
+    const left = Math.min(from.x, to.x);
+    const right = Math.max(from.x, to.x);
+    const top = Math.min(from.y, to.y);
+    const bottom = Math.max(from.y, to.y);
+    this.selection.clear();
+    for (const card of this.cards) {
+      const { x, y, width, height } = card.rect;
+      if (x < right && x + width > left && y < bottom && y + height > top) {
+        this.selection.add(card);
+      }
+    }
+    this.showSelection();
+  }
+
+  // Moves everything selected, which is how a selected card is dragged.
+  moveSelectionBy(deltaX: number, deltaY: number) {
+    for (const card of this.selection) card.moveBy(deltaX, deltaY);
+  }
+
+  private showSelection() {
+    for (const card of this.cards) {
+      card.element.classList.toggle("selected", this.selection.has(card));
+    }
+  }
+
+  // Remembers the selected cards for `pasteCopy`.  Returns false if nothing is selected.
   copySelected() {
-    const card = this.selected;
-    if (card === undefined) return false;
-    this.copied = {
+    if (this.selection.size === 0) return false;
+    const cards = [...this.selection].map((card) => ({
       source: card.source,
       orientation: card.orientation,
       rect: { ...card.rect },
       group: card.group,
-    };
+    }));
+    const left = Math.min(...cards.map((card) => card.rect.x));
+    const right = Math.max(...cards.map((card) => card.rect.x + card.rect.width));
+    const step = right - left + CARD_GAP;
+    this.copied = { cards, offset: step, step };
     return true;
   }
 
   /**
-   * Adds a card beside the copied one and linked to it, showing the same scan, the same plane and
-   * the same place.  Changing the new card's plane is then the way to see that place another way,
-   * which is what linked cards are for.  Pasting again puts the next card beside this one.
+   * Adds a copy of each card that was copied, beside the originals and linked to them: same scan,
+   * same plane, same place.  Changing a copy's plane is then the way to see that place another way,
+   * which is what linked cards are for.  Pasting again puts the next copies further along.
    */
   pasteCopy() {
     const copied = this.copied;
     if (copied === undefined) return false;
-    // Nothing is left of the group if the copied card has since been removed.
-    const group =
-      copied.group.members.size > 0 ? copied.group : new LinkGroup();
-    const rect = {
-      ...copied.rect,
-      x: copied.rect.x + copied.rect.width + CARD_GAP,
-    };
-    const card = this.addCard(rect, copied.orientation, group, rect);
-    if (copied.source !== undefined) card.setSource(copied.source);
-    this.copied = { ...copied, group, rect };
-    this.selectCard(card);
-    return card;
+    const pasted = copied.cards.map((card) => {
+      // Nothing is left of a group whose cards have all been removed since the copy.
+      const group = card.group.members.size > 0 ? card.group : new LinkGroup();
+      const rect = { ...card.rect, x: card.rect.x + copied.offset };
+      const added = this.addCard(rect, card.orientation, group, rect);
+      if (card.source !== undefined) added.setSource(card.source);
+      return added;
+    });
+    copied.offset += copied.step;
+    this.selection.clear();
+    for (const card of pasted) this.selection.add(card);
+    this.showSelection();
+    return pasted;
   }
 
   // Takes `card` out of its group, leaving it where it is.
@@ -183,7 +234,7 @@ export class Board {
   removeCard(card: Card) {
     const index = this.cards.indexOf(card);
     if (index < 0) return;
-    if (this.selected === card) this.selectCard(undefined);
+    this.selection.delete(card);
     this.cards.splice(index, 1);
     const { group } = card;
     card.dispose();

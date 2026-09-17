@@ -17,14 +17,15 @@ const GESTURES: [string, string][] = [
   ["Drag the data", "pan the slice"],
   ["Wheel over the data", "step through the slices"],
   ["Ctrl and wheel over the data", "zoom the slice"],
-  ["Drag a card's lines, or Alt and drag", "move the card"],
+  ["Click a card, Shift click another", "select them"],
+  ["Drag the board", "select an area of cards"],
+  ["Drag a card's lines, or Alt and drag", "move what is selected"],
   ["Drag a card's corner", "resize it"],
-  ["Drag the board, or middle drag", "pan the board"],
+  ["Copy, then paste", "add linked copies beside them"],
+  ["The ⛓ in a card", "stop it moving with the others"],
+  ["Space and drag, or middle drag", "pan the board"],
   ["Two fingers, or the wheel", "pan the board"],
   ["Pinch, or Ctrl and the wheel", "zoom the board"],
-  ["Click a card", "select it"],
-  ["Copy, then paste", "add a linked card beside it"],
-  ["The ⛓ in a card", "stop it moving with the others"],
 ];
 
 export function createMenu(board: Board, parent: HTMLElement) {

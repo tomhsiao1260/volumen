@@ -12,22 +12,26 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
 
 ## What it does
 
-- **A board of cards.** Double click the board to add a card, and click one to select it. Dragging
-  the data pans the slice, the wheel steps through the slices and Ctrl and the wheel zooms one; a
-  card is moved by the lines above and below it, or Alt and a drag, and resized by its corner. The
-  board is panned by dragging the background or with two fingers, and zoomed with a pinch (or Ctrl
-  and the wheel) — the cards get larger without showing more data.
+- **A board of cards.** Double click the board to add a card. Dragging the data pans the slice, the
+  wheel steps through the slices and Ctrl and the wheel zooms one; a card is moved by the lines above
+  and below it, or Alt and a drag, and resized by its corner. The board is panned with two fingers,
+  Space and a drag, or a middle drag, and zoomed with a pinch (or Ctrl and the wheel) — the cards get
+  larger without showing more data.
+- **Selecting cards.** Click a card to select it, Shift click to add another, or drag the board to
+  pick out an area and take every card it touches. Dragging any of them then moves them all, and what
+  is selected is what copy and paste acts on.
 - **Pick a scroll in two clicks.** A new card lists the samples of the Vesuvius Challenge, read from
   its open data bucket, then the scans of the one you pick — finest first, with the voxel size and
   the energy. Clicking a scan shows it, with the server keeping what you look at; the folder button
   on a scan keeps the files in a folder of yours instead, chosen by clicking through this machine's
   folders. Data outside the bucket can still be given by hand. Cards naming the same scan share one
   volume, one download and one set of textures.
-- **Linked cards, by copy and paste.** Click a card to select it, then copy and paste: the new card
-  sits beside it showing the same scan at the same place, and the two move together — change the
-  copy's plane from XY to YZ and you have that place seen another way, with the slices of both moving
-  as one. Paste again for a third. The ⛓ on a card says how many move with it, and a click takes it
-  out. **+ linked x/y/z** puts all three planes down at once.
+- **Linked cards, by copy and paste.** Select a card and paste it: the copy sits beside it showing
+  the same scan at the same place, and the two move together — change the copy's plane from XY to YZ
+  and you have that place seen another way, with the slices of both moving as one. Paste again for a
+  third; paste several selected cards and each copy is linked to the card it came from. The ⛓ on a
+  card says how many move with it, and a click takes it out. **+ linked x/y/z** puts all three planes
+  down at once.
 - **A card says what it is.** A card's frame is the data and nothing else, so it can be made square;
   the plane it shows, the scan it shows and the voxel it is looking at are written just above and
   just below the frame, over the board rather than over the data. All of it stays on screen, so a

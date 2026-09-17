@@ -69,14 +69,30 @@ main {
   background-image: radial-gradient(#ffffff12 1px, transparent 1px);
   background-size: 26px 26px;
   touch-action: none;
-  cursor: grab;
   user-select: none;
+}
+
+/* Dragging the board picks out an area; it is panned with Space held, or two fingers, or a middle
+   drag. */
+#board.panning {
+  cursor: grab;
+}
+
+/* Behind the cards, so that it never tints the data it is picking out. */
+#board-marquee {
+  position: absolute;
+  z-index: 0;
+  border: 1px solid var(--accent);
+  border-radius: 2px;
+  background-color: #5b7cff2b;
+  pointer-events: none;
 }
 
 /* Carries the board's pan and zoom; the cards are laid out inside it in board coordinates. */
 #board-layer {
   position: absolute;
   inset: 0;
+  z-index: 1;
   transform-origin: 0 0;
 }
 

@@ -1,21 +1,25 @@
 /**
  * @file Mouse, trackpad and keyboard input on the board:
  *
- *   - click a card: select it, which is what the keyboard then acts on
+ *   - click a card: select it, which is what the keyboard and a drag then act on; Shift adds one
+ *   - drag the background: pick out an area, selecting every card it touches
  *   - drag the data: pan the slice, which the view does itself
- *   - drag a card's lines, or Alt and drag it anywhere: move the card
+ *   - drag a card's lines, or Alt and drag it anywhere: move it, and everything else selected
  *   - drag a card's corner: resize it
- *   - drag the background, or middle drag anywhere: pan the board
+ *   - middle drag, or Space and drag, anywhere: pan the board
  *   - two fingers, or the wheel, outside the data: pan the board
  *   - pinch, or Control and the wheel, outside the data: zoom the board around the pointer
  *   - wheel over the data: step through the slices; with Control: zoom the slice (both the view's)
  *   - double click on the background: add a card there
- *   - copy and paste: add a card beside the selected one and linked to it
+ *   - copy and paste: add a copy of everything selected beside it, and linked to it
  */
 
 import type { Board } from "./board";
 import { CARD_HEIGHT, CARD_WIDTH } from "./board";
 import { zoomAbout } from "./transform";
+
+// How far the pointer has to move before a press on the board is a drag rather than a click.
+const DRAG_THRESHOLD = 3;
 
 /**
  * Zoom factor for a pinch, or for the wheel with Control held.  A trackpad's pinch arrives as a
@@ -65,6 +69,60 @@ function typing(target: EventTarget | null) {
 export function bindGestures(board: Board) {
   const { element } = board;
 
+  // The area being picked out, in pixels of the board element: it is not part of the board's own
+  // layer, so the board's transform does not stretch it.
+  const marquee = document.createElement("div");
+  marquee.id = "board-marquee";
+  marquee.hidden = true;
+  element.append(marquee);
+
+  // Space and a drag pans, as the board itself no longer does: dragging it picks out an area.
+  let spaceHeld = false;
+
+  const panBoardBy = (deltaX: number, deltaY: number) => {
+    board.transform.x += deltaX;
+    board.transform.y += deltaY;
+    board.applyTransform();
+  };
+
+  /**
+   * Draws the area being picked out, and selects what it touches when the button is released.  A
+   * press that does not move is a click on the board, which selects nothing.
+   */
+  const startMarquee = (event: PointerEvent) => {
+    const bounds = element.getBoundingClientRect();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const from = board.pointAt(startX, startY);
+    let dragging = false;
+    const onMove = (e: PointerEvent) => {
+      if (
+        !dragging &&
+        Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY) <
+          DRAG_THRESHOLD
+      ) {
+        return;
+      }
+      dragging = true;
+      marquee.hidden = false;
+      marquee.style.left = `${Math.min(startX, e.clientX) - bounds.left}px`;
+      marquee.style.top = `${Math.min(startY, e.clientY) - bounds.top}px`;
+      marquee.style.width = `${Math.abs(e.clientX - startX)}px`;
+      marquee.style.height = `${Math.abs(e.clientY - startY)}px`;
+      board.selectWithin(from, board.pointAt(e.clientX, e.clientY));
+    };
+    const stop = () => {
+      if (!dragging) board.clearSelection();
+      marquee.hidden = true;
+      document.removeEventListener("pointermove", onMove, true);
+      document.removeEventListener("pointerup", stop, true);
+      document.removeEventListener("pointercancel", stop, true);
+    };
+    document.addEventListener("pointermove", onMove, true);
+    document.addEventListener("pointerup", stop, true);
+    document.addEventListener("pointercancel", stop, true);
+  };
+
   // `preventDefault` is deliberately not called here: it would suppress the `click` and `dblclick`
   // that follow, which create a card and close one.  `user-select: none` on the board keeps a drag
   // from selecting text instead.
@@ -73,18 +131,19 @@ export function bindGestures(board: Board) {
     // Buttons in a card's chrome keep their click.
     if (target.closest("button") !== null) return;
     const card = board.cardAt(event.target);
-    if (event.button === 0) board.selectCard(card);
-    const panBoard =
-      event.button === 1 || (event.button === 0 && card === undefined);
-    if (panBoard) {
-      drag(event, 1, (deltaX, deltaY) => {
-        board.transform.x += deltaX;
-        board.transform.y += deltaY;
-        board.applyTransform();
-      });
+    if (event.button === 1 || (event.button === 0 && spaceHeld)) {
+      drag(event, 1, panBoardBy);
       return;
     }
-    if (event.button !== 0 || card === undefined) return;
+    if (event.button !== 0) return;
+    if (card === undefined) {
+      startMarquee(event);
+      return;
+    }
+    // A card already selected keeps the rest of the selection with it, so that several can be
+    // dragged or copied at once.
+    if (event.shiftKey) board.toggleSelected(card);
+    else if (!board.isSelected(card)) board.selectOnly(card);
     board.bringToFront(card);
     if (target.closest(".card-resize") !== null) {
       drag(event, board.transform.scale, (deltaX, deltaY) =>
@@ -98,7 +157,7 @@ export function bindGestures(board: Board) {
       target.closest(".card-bottom") !== null;
     if (onBar || event.altKey) {
       drag(event, board.transform.scale, (deltaX, deltaY) =>
-        card.moveBy(deltaX, deltaY),
+        board.moveSelectionBy(deltaX, deltaY),
       );
     }
     // Anywhere else is the data, which the view pans itself.
@@ -132,7 +191,25 @@ export function bindGestures(board: Board) {
   );
 
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") board.selectCard(undefined);
+    if (event.key === "Escape") board.clearSelection();
+    if (event.code === "Space" && !typing(event.target)) {
+      spaceHeld = true;
+      element.classList.add("panning");
+      // Otherwise the page takes the space for scrolling.
+      event.preventDefault();
+    }
+  });
+
+  window.addEventListener("keyup", (event) => {
+    if (event.code !== "Space") return;
+    spaceHeld = false;
+    element.classList.remove("panning");
+  });
+
+  // A window that loses focus never sees the key come back up.
+  window.addEventListener("blur", () => {
+    spaceHeld = false;
+    element.classList.remove("panning");
   });
 
   /*

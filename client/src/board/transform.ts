@@ -4,6 +4,12 @@
  * measures to draw each card's slice magnified rather than showing more data (see `RenderViewport`).
  */
 
+// A point in board coordinates.
+export interface Point2D {
+  x: number;
+  y: number;
+}
+
 export interface BoardTransform {
   // Where the board's origin sits, in pixels of the board element.
   x: number;
@@ -20,7 +26,11 @@ export function cssTransform({ x, y, scale }: BoardTransform) {
 }
 
 // The board point shown at `x`, `y` in the board element.
-export function toBoard({ x, y, scale }: BoardTransform, elementX: number, elementY: number) {
+export function toBoard(
+  { x, y, scale }: BoardTransform,
+  elementX: number,
+  elementY: number,
+): Point2D {
   return { x: (elementX - x) / scale, y: (elementY - y) / scale };
 }
 
