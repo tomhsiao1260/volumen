@@ -94,13 +94,27 @@ The analysis the changes above were made from, roughly in order of effort.
    (`viewer.ts`).  Thirty cards looking at thirty regions would otherwise fight over them.
 
    The GPU limit is deliberately well below what a browser would allow, because the cards' own
-   canvases come out of the same budget: a card magnified by the board is drawn with as many pixels
-   as it covers, and a canvas of tens of megapixels — or one reallocated on every frame of a zoom —
-   is how a tab loses its WebGL context.  Hence `SliceViewPanel.maxSize` (the most pixels a card is
-   drawn with along either side) and `fitRenderScale` (a card's pixels per layout pixel only ever
-   halve or double, so a smooth zoom from 1 to 10 reallocates five times rather than fifty).  A card
-   drawn with fewer pixels than it is shown with is simply stretched over its element, so the data it
-   shows is unchanged; mouse positions are scaled back into drawn pixels in `offsetFromCenter`.
+   canvases come out of the same budget: a canvas of tens of megapixels — or one reallocated on every
+   frame of a zoom — is how a tab loses its WebGL context.  `fitRenderScale` in `render/panel.ts`
+   therefore decides how many pixels a card is drawn with, and it is deliberately blunt: the number
+   only ever halves or doubles (a smooth zoom from 1 to 10 reallocates five times rather than fifty),
+   never exceeds twice the card's own layout (`MAX_RENDER_SCALE`, since a board that magnifies a card
+   shows the same data over more of the screen — looking closer at the data is what the card's own
+   zoom is for), and never exceeds `SliceViewPanel.maxSize` pixels along a side.  A card drawn with
+   fewer pixels than it is shown with is simply stretched over its element, so the data it shows is
+   unchanged; mouse positions are scaled back into drawn pixels in `offsetFromCenter`.
+
+   None of that is a guarantee — a browser may take the context away because of another tab — so
+   losing one must not end the session.  `draw()` stops at `display.lost` and chunk uploads stop at
+   `gl.isContextLost()`, so nothing is called against a context that is gone (thousands of
+   `object does not belong to this context` errors otherwise), `viewer.onContextLost` reports it, and
+   the app puts the board back on a new viewer: `Board.restart` serializes the cards, lets them go of
+   their views, takes the new viewer and volumes and restores itself, so the cards, their links,
+   their positions and the board's own pan and zoom survive.  Three losses in two minutes and it
+   stops trying, since rebuilding a context that is taken away again only makes things worse.
+   Rebuilding the GPU side of the *library* instead (`webglcontextrestored`, recreating every shader,
+   buffer and chunk texture in place) would be the smaller hammer, and is the thing to do if the
+   board ever has more state than it can serialize.
 4. **Card chrome, overlap and clipping.**  One canvas behind the cards cannot do rounded corners,
    shadows, cards overlapping each other, or a card clipped by a scrolling container: the view draws
    its full rectangle regardless of what the DOM does on top of it.  Three ways out:

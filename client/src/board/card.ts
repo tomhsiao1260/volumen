@@ -33,20 +33,9 @@ let nextCardId = 0;
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
 
-/*
- * A scan is named for the card without saying that it is masked, which nearly all of them are, and
- * with its voxel size cut to a decimal or two (`45.5 µm`, `1.13 µm`) — a name saved before that rule
- * existed still carries every digit the folder name had.
- */
+// A scan is named for the card without saying that it is masked, which nearly all of them are.
 function shorten(name: string) {
-  return name
-    .replace(/\s*·\s*masked$/, "")
-    .replace(/([\d.]+) µm/, (all, size) => {
-      const value = Number(size);
-      return Number.isNaN(value)
-        ? all
-        : `${Number(value.toFixed(value >= 10 ? 1 : 2))} µm`;
-    });
+  return name.replace(/\s*·\s*masked$/, "");
 }
 
 export class Card {

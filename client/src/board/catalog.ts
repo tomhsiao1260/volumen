@@ -67,7 +67,7 @@ export async function createFolder(parent: string, name: string) {
 }
 
 // `45.5` for 45.532, `1.13` for 1.129: enough to tell the scans of one scroll apart.
-function round(micrometres: number) {
+export function round(micrometres: number) {
   return String(Number(micrometres.toFixed(micrometres >= 10 ? 1 : 2)));
 }
 

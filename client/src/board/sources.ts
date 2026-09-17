@@ -6,10 +6,11 @@
 
 import type { Viewer, Volume } from "viewer";
 import { SERVER_API_ENDPOINT } from "../config";
+import { round } from "./catalog";
 
 export interface Source {
   id: string;
-  // What to call it on a card, e.g. `Scroll 1 · 45.5 µm`; empty for a source given by hand.
+  // What to call it on a card, e.g. `PHercParis4 · 45.5 µm`; empty for a source given by hand.
   name: string;
   local: string;
   http: string;
@@ -18,13 +19,24 @@ export interface Source {
 }
 
 /**
- * What to call a source: the name it was chosen under, or the folder or scan it reads.  A scan of
- * the Vesuvius Challenge bucket is named after its sample and the size of a voxel.
+ * What to call a source: a scan of the Vesuvius Challenge bucket by its sample and its own numbers,
+ * as the data itself names it (`PHercParis4 · 45.5 µm · 110 keV`), otherwise the name it was chosen
+ * under or the folder it reads.  The url is read rather than trusted to the stored name, which an
+ * older version of this app may have written as `Scroll 1`.
  */
 export function sourceLabel({ name, local, http }: Source) {
+  // `.../PHercParis4/volumes/20260310173927-45.532um-11.0m-110keV-masked.zarr`, as the server reads
+  // it too (`describe` in `server/src/utils/scrolls.ts`).
+  const sample = http.match(/\/([^/]+)\/volumes\//);
+  if (sample !== null) {
+    const voxelSize = http.match(/-([\d.]+)um-/);
+    const energy = http.match(/-([\d.]+)keV/);
+    const parts = [sample[1]];
+    if (voxelSize !== null) parts.push(`${round(Number(voxelSize[1]))} µm`);
+    if (energy !== null) parts.push(`${Number(energy[1])} keV`);
+    return parts.join(" · ");
+  }
   if (name !== "") return name;
-  const bucket = http.match(/\/([^/]+)\/volumes\/[^/]*?-([\d.]+)um-/);
-  if (bucket !== null) return `${bucket[1]} · ${Number(bucket[2])} µm`;
   const path = local !== "" ? local : http;
   return path.replace(/\/+$/, "").split(/[/\\]/).pop() || path;
 }

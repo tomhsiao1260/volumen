@@ -35,7 +35,9 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
   and the same menu on a right click.
 - **The board is kept.** Where the cards are, what they show, which are linked and where the board
   is panned to are stored in `server/db/json/board.json`, and are there again next time. Chunks
-  neither store has (sparse scrolls have many) are simply drawn empty.
+  neither store has (sparse scrolls have many) are simply drawn empty. If the browser takes the
+  page's graphics away — it may, and everything on the GPU goes with them — the board builds itself
+  a new viewer and puts the cards back where they were instead of asking for a reload.
 
 ## Running it
 

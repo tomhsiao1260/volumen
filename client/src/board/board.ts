@@ -288,6 +288,26 @@ export class Board {
    * showed, and each set of linked cards where it was looking.  Cards whose source the server no
    * longer knows ask for one again.
    */
+  /**
+   * Puts the cards back on a new viewer, which is what a lost WebGL context needs: everything on the
+   * GPU belonged to the old one.  `replace` is called once the cards have let go of their views, and
+   * returns the viewer and volumes to draw on instead; the cards, their links and the board's own
+   * position come back as they were, and none of it counts as a change to save.
+   */
+  restart(replace: () => { viewer: Viewer; volumes: VolumeRegistry }) {
+    const state = this.serialize();
+    const sources = new Map<string, Source>();
+    for (const card of this.cards) {
+      if (card.source !== undefined) sources.set(card.source.id, card.source);
+    }
+    for (const card of [...this.cards]) this.removeCard(card);
+    const { onChanged } = this;
+    this.onChanged = undefined;
+    this.options = { ...this.options, ...replace() };
+    this.restore(state, sources);
+    this.onChanged = onChanged;
+  }
+
   restore(board: StoredBoard, sources: Map<string, Source>) {
     for (const card of [...this.cards]) this.removeCard(card);
     this.transform = { ...board.view };

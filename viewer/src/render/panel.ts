@@ -49,12 +49,19 @@ export class DisplayContext extends RefCounted {
     this.surface.addEventListener("webglcontextlost", (event) => {
       // Without this the context cannot come back at all.
       event.preventDefault();
+      // Giving the context up is how this one is disposed of, and is nothing to report.
+      if (this.wasDisposed) return;
       console.error("The WebGL context was lost.");
       this.lost = true;
       this.contextLost.dispatch();
     });
     this.resizeObserver.observe(container);
     this.registerDisposer(() => this.resizeObserver.disconnect());
+    // Hand the context back rather than waiting to be collected, so that a viewer built to replace
+    // this one is not the browser's second live context.
+    this.registerDisposer(() => {
+      this.gl.getExtension("WEBGL_lose_context")?.loseContext();
+    });
   }
 
   addPanel(panel: SliceViewPanel) {
@@ -146,6 +153,15 @@ function hasOnlyControl(event: MouseEvent) {
 const NEAR_SCREEN_MARGIN = "200px";
 
 /**
+ * Never more than this many pixels per pixel of a panel's own layout.  A board that magnifies a panel
+ * shows the same data over more of the screen (`pixelScale` in `RenderViewport`), so drawing more
+ * than twice the panel's own pixels adds no detail — it only asks the GPU for memory and for a larger
+ * copy every frame, which is what loses a context.  Looking closer at the data is what the panel's
+ * own zoom is for; that asks for finer chunks instead.
+ */
+const MAX_RENDER_SCALE = 2;
+
+/**
  * The pixels to draw one of a panel's own pixels with, given how much it is magnified on screen and
  * how large it is.  Halving and doubling keeps the shape of what is drawn exactly, so the panel's
  * canvas can simply be stretched over it, and leaves the size alone until the magnification has
@@ -153,6 +169,7 @@ const NEAR_SCREEN_MARGIN = "200px";
  */
 function fitRenderScale(magnification: number, layoutSize: number) {
   let scale = 2 ** Math.round(Math.log2(Math.max(magnification, 1e-3)));
+  scale = Math.min(scale, MAX_RENDER_SCALE);
   const most = SliceViewPanel.maxSize / layoutSize;
   while (scale > most && scale > 1 / 8) scale /= 2;
   return Math.max(1 / 8, scale);

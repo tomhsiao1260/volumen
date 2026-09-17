@@ -22,14 +22,11 @@ const layer = document.querySelector<HTMLDivElement>("#board-layer")!;
 const hint = document.querySelector<HTMLElement>("#board-hint")!;
 const conflict = document.querySelector<HTMLElement>("#board-conflict")!;
 
-const viewer = new Viewer({ container: element });
-const volumes = new VolumeRegistry(viewer);
+let viewer = startViewer();
+let volumes = new VolumeRegistry(viewer);
 const board = new Board({ viewer, volumes, element, layer });
 
 createMenu(board, element);
-
-// Each card shows the voxel under the pointer while it is over that card.
-viewer.onPointerMove((point, view) => board.showPointer(view, point));
 
 // While a card waits to be linked, a line at the top says what to do next.
 const linkHint = document.querySelector<HTMLElement>("#link-hint")!;
@@ -56,12 +53,59 @@ for (const button of document.querySelectorAll<HTMLButtonElement>(
   button.addEventListener("click", () => window.location.reload());
 }
 
-// A lost WebGL context takes every texture and shader with it, so the page has to be loaded again;
-// say so rather than leaving the cards frozen.
+/*
+ * A browser may take a page's WebGL context away at any time, usually because it or another tab
+ * asked for too much of the GPU, and everything on the GPU goes with it.  Rather than making the
+ * user reload and lose what is on screen, the board starts again on a new viewer and puts its cards
+ * back where they were; only if that keeps happening does it stop and say so, since rebuilding a
+ * context that is about to be taken away again would only make things worse.
+ */
 const lost = document.querySelector<HTMLElement>("#board-lost")!;
-viewer.onContextLost(() => {
+const lostText = document.querySelector<HTMLElement>("#board-lost-text")!;
+const lostReload = lost.querySelector<HTMLButtonElement>(".notice-reload")!;
+const RECOVERIES = 3;
+let recoveries = 0;
+let recoveryTimer: number | undefined;
+let lostTimer: number | undefined;
+
+// Says what happened, for a while if there is nothing left to do about it.
+function sayLost(text: string, reload: boolean) {
+  lostText.textContent = text;
+  lostReload.hidden = !reload;
   lost.hidden = false;
-});
+  window.clearTimeout(lostTimer);
+  if (!reload) lostTimer = window.setTimeout(() => (lost.hidden = true), 6000);
+}
+
+function startViewer() {
+  const started = new Viewer({ container: element });
+  // Each card shows the voxel under the pointer while it is over that card.
+  started.onPointerMove((point, view) => board.showPointer(view, point));
+  started.onContextLost(() => recover());
+  return started;
+}
+
+function recover() {
+  if (++recoveries > RECOVERIES) {
+    sayLost(
+      "The browser keeps taking this page's graphics away. Reload to carry on.",
+      true,
+    );
+    return;
+  }
+  // One loss an hour is the browser being the browser, not a board that cannot be drawn: the count
+  // is only there to catch a context that goes as soon as it is built.
+  window.clearTimeout(recoveryTimer);
+  recoveryTimer = window.setTimeout(() => (recoveries = 0), 120000);
+  const previous = viewer;
+  board.restart(() => {
+    previous.dispose();
+    viewer = startViewer();
+    volumes = new VolumeRegistry(viewer);
+    return { viewer, volumes };
+  });
+  sayLost("The browser reset this page's graphics; the cards are back.", false);
+}
 
 // The board on the server, with the sources its cards name.
 function putBack(stored: StoredBoard, sources: Source[]) {
