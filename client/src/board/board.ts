@@ -11,7 +11,7 @@ import type { Source, VolumeRegistry } from "./sources";
 import { sourceLabel } from "./sources";
 import type { StoredBoard } from "./storage";
 import type { BoardTransform } from "./transform";
-import { cssTransform, toBoard } from "./transform";
+import { cssTransform, fitTo, toBoard } from "./transform";
 
 // Size of a new card, in board units.
 export const CARD_WIDTH = 340;
@@ -21,8 +21,6 @@ export interface BoardOptions {
   viewer: Viewer;
   // The volumes of the sources the cards name.
   volumes: VolumeRegistry;
-  // What a new card's source form starts with.
-  sourceDefaults: () => { local: string; http: string };
   // The viewer's container, which the board fills.
   element: HTMLElement;
   // The element inside it that carries the board's transform; the cards are its children.
@@ -61,10 +59,6 @@ export class Board {
 
   get layer() {
     return this.options.layer;
-  }
-
-  sourceDefaults() {
-    return this.options.sourceDefaults();
   }
 
   sourceName(source: Source) {
@@ -204,6 +198,17 @@ export class Board {
 
   cardOfView(view: View) {
     return this.cards.find((card) => card.view === view);
+  }
+
+  // Moves the board so that every card is in view.
+  fitToCards() {
+    if (this.cards.length === 0) return;
+    const bounds = this.element.getBoundingClientRect();
+    this.transform = fitTo(
+      this.cards.map((card) => card.rect),
+      { width: bounds.width, height: bounds.height },
+    );
+    this.applyTransform();
   }
 
   // The board point at a position on the page.

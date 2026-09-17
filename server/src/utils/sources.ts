@@ -14,6 +14,8 @@ export interface Source {
   // Hash of the pair below, so that the same pair is always the same source: two cards that name it
   // share one download and one set of textures, and its cache folder is the same after a restart.
   id: string;
+  // What to call it on a card, e.g. `Scroll 1 · 45.5 µm`; empty for a source given by hand.
+  name: string;
   // The `.zarr` folder on this machine, or empty.
   local: string;
   // The remote `.zarr` store, or empty.
@@ -31,23 +33,27 @@ let writing: Promise<unknown> = Promise.resolve();
 interface StoredSource {
   local: string;
   http: string;
+  name?: string;
 }
 
-function makeSource(id: string, { local, http }: StoredSource): Source {
+function makeSource(id: string, { local, http, name }: StoredSource): Source {
   return {
     id,
+    name: name ?? "",
     local,
     http,
     root: local === "" ? path.join(DB_PATH, "cache", id) : path.resolve(local),
   };
 }
 
-// Trailing slashes and a relative local path would otherwise make the same data two sources.
-function normalize({ local, http }: StoredSource): StoredSource {
+// Trailing slashes and a relative local path would otherwise make the same data two sources.  The
+// name is not part of what identifies a source.
+function normalize({ local, http, name }: StoredSource): StoredSource {
   local = local.trim();
   return {
     local: local === "" ? "" : path.resolve(local),
     http: http.trim().replace(/\/+$/, ""),
+    name: name?.trim() ?? "",
   };
 }
 
@@ -56,9 +62,9 @@ async function readStored(): Promise<Record<string, StoredSource>> {
     const stored = JSON.parse(await fsp.readFile(SOURCE_PATH, "utf-8"));
     const sources: Record<string, StoredSource> = {};
     for (const [id, value] of Object.entries(stored)) {
-      const { local, http } = value as StoredSource;
+      const { local, http, name } = value as StoredSource;
       if (typeof local === "string" && typeof http === "string") {
-        sources[id] = { local, http };
+        sources[id] = { local, http, name: typeof name === "string" ? name : "" };
       }
     }
     return sources;
@@ -84,7 +90,7 @@ export async function getSource(id: string): Promise<Source | undefined> {
  * returns the same source.
  */
 export async function upsertSource(pair: StoredSource): Promise<Source> {
-  const { local, http } = normalize(pair);
+  const { local, http, name } = normalize(pair);
   const id = crypto
     .createHash("sha256")
     .update(`${local}\0${http}`)
@@ -92,13 +98,24 @@ export async function upsertSource(pair: StoredSource): Promise<Source> {
     .slice(0, 12);
   writing = writing.then(async () => {
     const stored = await readStored();
-    if (stored[id] !== undefined) return;
-    stored[id] = { local, http };
-    await fsp.mkdir(path.dirname(SOURCE_PATH), { recursive: true });
-    await fsp.writeFile(SOURCE_PATH, JSON.stringify(stored, null, 2), "utf-8");
+    if (stored[id] !== undefined) {
+      // A source added by hand before gains the name the page now knows for it.
+      if (stored[id].name === "" && name !== "") {
+        stored[id].name = name;
+        await write(stored);
+      }
+      return;
+    }
+    stored[id] = { local, http, name };
+    await write(stored);
   });
   await writing;
-  return makeSource(id, { local, http });
+  return makeSource(id, { local, http, name });
+}
+
+async function write(stored: Record<string, StoredSource>) {
+  await fsp.mkdir(path.dirname(SOURCE_PATH), { recursive: true });
+  await fsp.writeFile(SOURCE_PATH, JSON.stringify(stored, null, 2), "utf-8");
 }
 
 /**

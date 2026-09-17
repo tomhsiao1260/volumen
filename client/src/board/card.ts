@@ -8,7 +8,7 @@
 import type { View, ViewOrientation, Volume } from "viewer";
 import type { Board } from "./board";
 import type { LinkGroup } from "./links";
-import { createSourcePanel } from "./source_panel";
+import { createScrollPicker } from "./scroll_picker";
 import type { Source } from "./sources";
 
 export interface CardRect {
@@ -186,10 +186,7 @@ export class Card {
 
   private showForm() {
     this.setOverlay(
-      createSourcePanel({
-        defaults: this.board.sourceDefaults(),
-        onChosen: (source) => this.setSource(source),
-      }),
+      createScrollPicker({ onChosen: (source) => this.setSource(source) }),
     );
   }
 

@@ -4,8 +4,10 @@
  * downloaded from the remote store, so only the parts of a scroll that are looked at are downloaded,
  * and only once.
  *
- * The board itself is kept in `db/json/board.json`, the sources in `db/json/sources.json` and the
- * values a new card starts with in `db/json/settings.json`; all three can be changed from the page.
+ * It also lists what the Vesuvius Challenge data bucket holds (`utils/scrolls.ts`) and this
+ * machine's folders (`utils/folders.ts`), so that a card's source can be chosen by clicking.
+ *
+ * The board itself is kept in `db/json/board.json` and the sources in `db/json/sources.json`.
  */
 
 import express from "express";
@@ -14,6 +16,8 @@ import dotenv from "dotenv";
 import settingsRouter from "./routes/settings";
 import sourcesRouter from "./routes/sources";
 import boardRouter from "./routes/board";
+import scrollsRouter from "./routes/scrolls";
+import foldersRouter from "./routes/folders";
 import dataRouter from "./routes/data";
 import { createSettingsFileIfMissing } from "./utils/settings";
 
@@ -36,6 +40,8 @@ app.use(express.json());
 app.use("/api/settings", settingsRouter);
 app.use("/api/sources", sourcesRouter);
 app.use("/api/board", boardRouter);
+app.use("/api/scrolls", scrollsRouter);
+app.use("/api/folders", foldersRouter);
 app.use("/api/data", dataRouter);
 
 // For the same reason, the server listens on this machine only.

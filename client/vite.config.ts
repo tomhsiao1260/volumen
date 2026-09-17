@@ -1,5 +1,4 @@
 import { defineConfig } from "vite";
-import tailwindcss from "@tailwindcss/vite";
 import { dirname, resolve } from "path";
 import { fileURLToPath } from "url";
 
@@ -17,7 +16,6 @@ export default defineConfig({
       viewer: resolve(__dirname, "../viewer/src/index.ts"),
     },
   },
-  plugins: [tailwindcss()],
   worker: {
     format: "es",
   },

@@ -9,14 +9,22 @@ import { SERVER_API_ENDPOINT } from "../config";
 
 export interface Source {
   id: string;
+  // What to call it on a card, e.g. `Scroll 1 · 45.5 µm`; empty for a source given by hand.
+  name: string;
   local: string;
   http: string;
   // Where the server keeps this source's files: its folder, or a cache folder of its own.
   root: string;
 }
 
-// A short name for a source: the folder it reads, or the remote store it downloads from.
-export function sourceLabel({ local, http }: Source) {
+/**
+ * What to call a source: the name it was chosen under, or the folder or scan it reads.  A scan of
+ * the Vesuvius Challenge bucket is named after its sample and the size of a voxel.
+ */
+export function sourceLabel({ name, local, http }: Source) {
+  if (name !== "") return name;
+  const bucket = http.match(/\/([^/]+)\/volumes\/[^/]*?-([\d.]+)um-/);
+  if (bucket !== null) return `${bucket[1]} · ${Number(bucket[2])} µm`;
   const path = local !== "" ? local : http;
   return path.replace(/\/+$/, "").split(/[/\\]/).pop() || path;
 }
@@ -28,11 +36,11 @@ export async function listSources(): Promise<Source[]> {
 }
 
 // Returns the source for this pair of paths, adding it if the server does not have it yet.
-export async function upsertSource(local: string, http: string) {
+export async function upsertSource(local: string, http: string, name = "") {
   const response = await fetch(`${SERVER_API_ENDPOINT}/api/sources`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ local, http }),
+    body: JSON.stringify({ local, http, name }),
   });
   if (!response.ok) {
     throw new Error(((await response.json()) as { error: string }).error);

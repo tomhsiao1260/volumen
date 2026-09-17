@@ -42,3 +42,33 @@ export function zoomAbout(
     y: elementY - (elementY - transform.y) * ratio,
   };
 }
+
+/**
+ * The transform that brings every rectangle into a viewport of `size`, with a margin around them.
+ * Used by "fit to the cards", so that a board panned far away can be found again.
+ */
+export function fitTo(
+  rects: { x: number; y: number; width: number; height: number }[],
+  size: { width: number; height: number },
+  margin = 48,
+): BoardTransform {
+  const left = Math.min(...rects.map((rect) => rect.x));
+  const top = Math.min(...rects.map((rect) => rect.y));
+  const right = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const bottom = Math.max(...rects.map((rect) => rect.y + rect.height));
+  const scale = Math.min(
+    MAX_SCALE,
+    Math.max(
+      MIN_SCALE,
+      Math.min(
+        (size.width - 2 * margin) / Math.max(1, right - left),
+        (size.height - 2 * margin) / Math.max(1, bottom - top),
+      ),
+    ),
+  );
+  return {
+    scale,
+    x: (size.width - (right - left) * scale) / 2 - left * scale,
+    y: (size.height - (bottom - top) * scale) / 2 - top * scale,
+  };
+}

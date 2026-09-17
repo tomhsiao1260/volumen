@@ -10,10 +10,11 @@ router.get("/", async (_req: Request, res: Response) => {
 
 // Adds a source, or returns the existing one for the same pair of paths.
 router.post("/", async (req: Request, res: Response) => {
-  const { local, http } = req.body ?? {};
+  const { local, http, name } = req.body ?? {};
   const pair = {
     local: typeof local === "string" ? local : "",
     http: typeof http === "string" ? http : "",
+    name: typeof name === "string" ? name : "",
   };
   if (pair.local.trim() === "" && pair.http.trim() === "") {
     res.status(400).json({ error: "A source needs a folder, a URL, or both" });
