@@ -40,7 +40,9 @@ one set of textures.
 
 Cards can also be linked: the cards of a group share one `NavigationGroup`, so they move together,
 and the group is created from the first volume one of its members shows, which is what the shared
-position is clamped against (`client/src/board/links.ts`).
+position is clamped against (`client/src/board/links.ts`).  Linking is not its own mode — copying a
+selected card and pasting it adds a card to that card's group (`Board.copySelected`, `pasteCopy`),
+which is the only way to make one, and the ⛓ on a card is how it leaves.
 
 The board itself is kept on the server (`client/src/board/storage.ts`,
 `server/src/utils/board.ts`): the cards, their sources and planes, the linked sets and where each is

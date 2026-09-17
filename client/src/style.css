@@ -244,8 +244,7 @@ main {
 }
 
 .card:hover .card-link,
-.card:hover .card-close,
-#board.linking .card-link {
+.card:hover .card-close {
   opacity: 1;
 }
 
@@ -256,7 +255,7 @@ main {
 }
 
 /* A linked card keeps its badge, since it says something about the card itself. */
-.card-link.linked {
+.card-link {
   color: hsl(var(--group-hue) 70% 72%);
   opacity: 1;
 }
@@ -278,13 +277,18 @@ main {
   opacity: 1;
 }
 
-#board.linking .card-body {
-  outline: 1px dashed #ffffff59;
-  cursor: alias;
+/* The selected card is what the keyboard acts on: copy it, and paste a linked card beside it. */
+.card.selected .card-body {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px var(--accent),
+    0 10px 30px #00000073;
 }
 
-#board.linking .card.link-from .card-body {
-  outline: 2px solid var(--accent);
+.card.selected .card-link,
+.card.selected .card-close,
+.card.selected .card-resize {
+  opacity: 1;
 }
 
 /* What a card shows until it has data ---------------------------------------------------------- */
@@ -564,7 +568,6 @@ button:focus-visible,
 
 /* Things that appear only when they have something to say ------------------------------------- */
 
-#link-hint,
 .notice {
   position: absolute;
   left: 50%;
@@ -577,10 +580,6 @@ button:focus-visible,
   background-color: #14161cf2;
   backdrop-filter: blur(6px);
   white-space: nowrap;
-}
-
-#link-hint {
-  color: #a8bcff;
 }
 
 .notice {

@@ -4,6 +4,7 @@
 
 import type { Point, View, ViewOrientation } from "viewer";
 import type { Viewer } from "viewer";
+import type { CardRect } from "./card";
 import { Card } from "./card";
 import { bindGestures } from "./gestures";
 import { LinkGroup } from "./links";
@@ -13,9 +14,10 @@ import type { StoredBoard } from "./storage";
 import type { BoardTransform } from "./transform";
 import { cssTransform, fitTo, toBoard } from "./transform";
 
-// Size of a new card, in board units.
+// Size of a new card, and the space left between cards put down together, in board units.
 export const CARD_WIDTH = 340;
 export const CARD_HEIGHT = 300;
+export const CARD_GAP = 16;
 
 export interface BoardOptions {
   viewer: Viewer;
@@ -33,12 +35,20 @@ export class Board {
   // Called whenever anything the saved board holds has changed.  Set once the board has been put
   // back, so that putting it back does not save it again.
   onChanged: (() => void) | undefined;
-  // The card waiting to be linked to the next one clicked, if the user is linking.
-  linkFrom: Card | undefined;
+  // The card the keyboard acts on, if the user has clicked one.
+  selected: Card | undefined;
+  // What was copied, and the group a pasted card joins (see `copySelected`).
+  private copied:
+    | {
+        source: Source | undefined;
+        orientation: ViewOrientation;
+        rect: CardRect;
+        group: LinkGroup;
+      }
+    | undefined;
   private appliedScale = 1;
   private nextZIndex = 1;
   private viewChangedListeners: (() => void)[] = [];
-  private linkingListeners: ((linking: boolean) => void)[] = [];
 
   constructor(private options: BoardOptions) {
     this.applyTransform();
@@ -99,59 +109,56 @@ export class Board {
    */
   addLinkedCards({ x, y }: { x: number; y: number }) {
     const group = new LinkGroup();
-    const gap = 16;
     return (["yz", "xy", "xz"] as ViewOrientation[]).map((orientation, index) =>
       this.addCard(
-        { x: x + index * (CARD_WIDTH + gap), y },
+        { x: x + index * (CARD_WIDTH + CARD_GAP), y },
         orientation,
         group,
       ),
     );
   }
 
-  // Starts linking `card`: the next card clicked joins it.
-  startLinking(card: Card) {
-    this.linkFrom = card;
-    this.element.classList.add("linking");
-    card.element.classList.add("link-from");
-    this.showLinks();
-    this.reportLinkingChanged();
+  // The card the keyboard acts on; clicking one selects it and clicking the board selects nothing.
+  selectCard(card: Card | undefined) {
+    if (card === this.selected) return;
+    this.selected?.element.classList.remove("selected");
+    this.selected = card;
+    card?.element.classList.add("selected");
   }
 
-  stopLinking() {
-    if (this.linkFrom === undefined) return;
-    this.linkFrom.element.classList.remove("link-from");
-    this.linkFrom = undefined;
-    this.element.classList.remove("linking");
-    this.showLinks();
-    this.reportLinkingChanged();
-  }
-
-  // Calls `callback` when the board starts or stops waiting for a card to link to.
-  onLinkingChanged(callback: (linking: boolean) => void) {
-    this.linkingListeners.push(callback);
-  }
-
-  private reportLinkingChanged() {
-    for (const callback of this.linkingListeners) {
-      callback(this.linkFrom !== undefined);
-    }
+  // Remembers the selected card for `pasteCopy`.  Returns false if there is nothing selected.
+  copySelected() {
+    const card = this.selected;
+    if (card === undefined) return false;
+    this.copied = {
+      source: card.source,
+      orientation: card.orientation,
+      rect: { ...card.rect },
+      group: card.group,
+    };
+    return true;
   }
 
   /**
-   * Puts both cards, and everything already linked to either of them, in one group.  They then show
-   * the same place: the larger group's position and zoom win, so the smaller set jumps to it.
+   * Adds a card beside the copied one and linked to it, showing the same scan, the same plane and
+   * the same place.  Changing the new card's plane is then the way to see that place another way,
+   * which is what linked cards are for.  Pasting again puts the next card beside this one.
    */
-  linkCards(first: Card, second: Card) {
-    this.stopLinking();
-    if (first === second || first.group === second.group) return;
-    const [target, leaving] =
-      first.group.members.size >= second.group.members.size
-        ? [first.group, second.group]
-        : [second.group, first.group];
-    for (const card of [...leaving.members]) card.setGroup(target);
-    leaving.dispose();
-    this.showLinks();
+  pasteCopy() {
+    const copied = this.copied;
+    if (copied === undefined) return false;
+    // Nothing is left of the group if the copied card has since been removed.
+    const group =
+      copied.group.members.size > 0 ? copied.group : new LinkGroup();
+    const rect = {
+      ...copied.rect,
+      x: copied.rect.x + copied.rect.width + CARD_GAP,
+    };
+    const card = this.addCard(rect, copied.orientation, group, rect);
+    if (copied.source !== undefined) card.setSource(copied.source);
+    this.copied = { ...copied, group, rect };
+    this.selectCard(card);
+    return card;
   }
 
   // Takes `card` out of its group, leaving it where it is.
@@ -176,7 +183,7 @@ export class Board {
   removeCard(card: Card) {
     const index = this.cards.indexOf(card);
     if (index < 0) return;
-    if (this.linkFrom === card) this.stopLinking();
+    if (this.selected === card) this.selectCard(undefined);
     this.cards.splice(index, 1);
     const { group } = card;
     card.dispose();

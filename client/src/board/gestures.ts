@@ -1,6 +1,7 @@
 /**
- * @file Mouse and trackpad input on the board:
+ * @file Mouse, trackpad and keyboard input on the board:
  *
+ *   - click a card: select it, which is what the keyboard then acts on
  *   - drag the data: pan the slice, which the view does itself
  *   - drag a card's lines, or Alt and drag it anywhere: move the card
  *   - drag a card's corner: resize it
@@ -9,7 +10,7 @@
  *   - pinch, or Control and the wheel, outside the data: zoom the board around the pointer
  *   - wheel over the data: step through the slices; with Control: zoom the slice (both the view's)
  *   - double click on the background: add a card there
- *   - click a card while linking: link it to the card the link started from
+ *   - copy and paste: add a card beside the selected one and linked to it
  */
 
 import type { Board } from "./board";
@@ -52,6 +53,15 @@ function drag(
   document.addEventListener("pointercancel", stop, true);
 }
 
+// Whether the event is meant for a form, where copy and paste are the browser's own.
+function typing(target: EventTarget | null) {
+  return (
+    target instanceof HTMLElement &&
+    (target.closest("input, textarea") !== null ||
+      (window.getSelection()?.isCollapsed === false))
+  );
+}
+
 export function bindGestures(board: Board) {
   const { element } = board;
 
@@ -63,6 +73,7 @@ export function bindGestures(board: Board) {
     // Buttons in a card's chrome keep their click.
     if (target.closest("button") !== null) return;
     const card = board.cardAt(event.target);
+    if (event.button === 0) board.selectCard(card);
     const panBoard =
       event.button === 1 || (event.button === 0 && card === undefined);
     if (panBoard) {
@@ -74,10 +85,6 @@ export function bindGestures(board: Board) {
       return;
     }
     if (event.button !== 0 || card === undefined) return;
-    if (board.linkFrom !== undefined) {
-      board.linkCards(board.linkFrom, card);
-      return;
-    }
     board.bringToFront(card);
     if (target.closest(".card-resize") !== null) {
       drag(event, board.transform.scale, (deltaX, deltaY) =>
@@ -124,15 +131,23 @@ export function bindGestures(board: Board) {
     { passive: false },
   );
 
-  // A click on the background, and Escape, give up on linking.
-  element.addEventListener("pointerdown", (event) => {
-    if (board.linkFrom !== undefined && board.cardAt(event.target) === undefined) {
-      board.stopLinking();
-    }
+  window.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") board.selectCard(undefined);
   });
 
-  window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") board.stopLinking();
+  /*
+   * Copy and paste a card, which is how linked cards are made: the pasted card shows the same scan
+   * at the same place and moves with the card it came from, and its plane is then changed to see
+   * that place another way.  Nothing is written to the system clipboard — `preventDefault` leaves
+   * whatever is in it alone — so this only pastes within the page.
+   */
+  document.addEventListener("copy", (event) => {
+    if (!typing(event.target) && board.copySelected()) event.preventDefault();
+  });
+
+  document.addEventListener("paste", (event) => {
+    if (typing(event.target)) return;
+    if (board.pasteCopy() !== false) event.preventDefault();
   });
 
   element.addEventListener("dblclick", (event) => {

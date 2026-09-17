@@ -22,8 +22,9 @@ const GESTURES: [string, string][] = [
   ["Drag the board, or middle drag", "pan the board"],
   ["Two fingers, or the wheel", "pan the board"],
   ["Pinch, or Ctrl and the wheel", "zoom the board"],
-  ["The ⛓ in a card, then another card", "link them, so they move together"],
-  ["Escape", "give up linking"],
+  ["Click a card", "select it"],
+  ["Copy, then paste", "add a linked card beside it"],
+  ["The ⛓ in a card", "stop it moving with the others"],
 ];
 
 export function createMenu(board: Board, parent: HTMLElement) {

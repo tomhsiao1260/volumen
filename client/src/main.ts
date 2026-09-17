@@ -28,12 +28,6 @@ const board = new Board({ viewer, volumes, element, layer });
 
 createMenu(board, element);
 
-// While a card waits to be linked, a line at the top says what to do next.
-const linkHint = document.querySelector<HTMLElement>("#link-hint")!;
-board.onLinkingChanged((linking) => {
-  linkHint.hidden = !linking;
-});
-
 // The hint stands in for the cards while the board is empty.
 board.onViewChanged(() => {
   hint.hidden = board.cards.length > 0;

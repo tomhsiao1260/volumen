@@ -97,15 +97,8 @@ export class Card {
     const name = document.createElement("span");
     name.className = "card-name";
     this.link.className = "card-link";
-    this.link.addEventListener("click", () => {
-      // While another card is waiting to be linked, this one is the target, whichever part of it is
-      // clicked; clicking the waiting card's own badge gives up instead.
-      const { linkFrom } = board;
-      if (linkFrom === this) board.stopLinking();
-      else if (linkFrom !== undefined) board.linkCards(linkFrom, this);
-      else if (this.group.linked) board.unlinkCard(this);
-      else board.startLinking(this);
-    });
+    // The badge is there only while the card is linked, and a click is how it stops being.
+    this.link.addEventListener("click", () => board.unlinkCard(this));
     const close = document.createElement("button");
     close.className = "card-close";
     close.textContent = "✕";
@@ -184,16 +177,11 @@ export class Card {
   // Shows whether this card is linked, and to how many others.
   showLink() {
     const { linked, hue, members } = this.group;
-    this.link.textContent = linked ? `\u26D3 ${members.size}` : "\u26D3";
-    this.link.title =
-      this.board.linkFrom === this
-        ? "Click another card to link it to this one, or click here again to give up"
-        : this.board.linkFrom !== undefined
-          ? "Link this card to the one waiting"
-          : linked
-            ? `Linked to ${members.size - 1} other card${members.size === 2 ? "" : "s"}; click to unlink`
-            : "Link this card to another, so that they move together";
-    this.link.classList.toggle("linked", linked);
+    this.link.textContent = `\u26D3 ${members.size}`;
+    this.link.title = `Moves with ${members.size - 1} other card${
+      members.size === 2 ? "" : "s"
+    }; click to leave them`;
+    this.link.hidden = !linked;
     this.element.style.setProperty("--group-hue", String(hue));
     this.element.classList.toggle("grouped", linked);
   }
