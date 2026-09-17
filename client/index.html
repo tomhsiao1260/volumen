@@ -7,20 +7,7 @@
     <link href="/src/style.css" rel="stylesheet" />
   </head>
   <body>
-    <main>
-      <div id="board">
-        <div id="board-layer"></div>
-        <div id="board-hint">Double click anywhere to add a card</div>
-      </div>
-      <div id="board-conflict" class="notice" hidden>
-        This board was changed elsewhere; this page is no longer saving it.
-        <button class="notice-reload">Reload</button>
-      </div>
-      <div id="board-lost" class="notice" hidden>
-        <span id="board-lost-text"></span>
-        <button class="notice-reload" hidden>Reload</button>
-      </div>
-    </main>
-    <script type="module" src="/src/main.ts"></script>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

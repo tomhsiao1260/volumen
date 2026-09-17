@@ -23,9 +23,9 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
 - **Pick a scroll in two clicks.** A new card lists the samples of the Vesuvius Challenge, read from
   its open data bucket, then the scans of the one you pick — finest first, with the voxel size and
   the energy. Clicking a scan shows it, with the server keeping what you look at; the folder button
-  on a scan keeps the files in a folder of yours instead, chosen by clicking through this machine's
-  folders. Data outside the bucket can still be given by hand. Cards naming the same scan share one
-  volume, one download and one set of textures.
+  on a scan downloads it to a folder of yours instead, chosen by clicking through this machine's
+  folders. **Custom source** takes a local store, a remote one, or both, for data outside the bucket.
+  Cards naming the same scan share one volume, one download and one set of textures.
 - **Linked cards, by copy and paste.** Select a card and paste it: the copy sits beside it showing
   the same scan at the same place, and the two move together — change the copy's plane from XY to YZ
   and you have that place seen another way, with the slices of both moving as one. Paste again for a
@@ -60,11 +60,13 @@ start; the finest scans are hundreds of gigabytes, of which you only ever downlo
 
 ## Project structure
 
-- `client/`: the page (Vite, plain DOM, one stylesheet). `src/board/` is the board — the cards
-  (`card.ts`), their layout and pan and zoom (`board.ts`, `transform.ts`), the mouse input
-  (`gestures.ts`), the board's own menu (`menu.ts`), the linked sets (`links.ts`), choosing what to
-  show (`scroll_picker.ts`, `catalog.ts`, `sources.ts`), the symbols (`icons.ts`) and the saved board
-  (`storage.ts`).
+- `client/`: the page (React, Vite, one stylesheet). `src/board/` holds the board itself — its state
+  and every change that can be made to it (`state.ts`), the mouse, trackpad and keyboard input
+  (`gestures.ts`), the pan and zoom (`transform.ts`), the linked sets (`links.ts`) and the viewer,
+  volumes and groups that outlive a render (`session.ts`). `src/components/` draws it (`App.tsx`,
+  `CardView.tsx`, `SourcePicker.tsx`, `BoardMenu.tsx`), and `src/api/` talks to the server (the data
+  bucket and this machine's folders in `catalog.ts`, the sources in `sources.ts`, the saved board in
+  `storage.ts`).
 - `server/`: the zarr stores (Node, Express). `GET /api/data/<sourceId>/<key>` serves a file of a
   source, downloading it first if its folder does not have it; `/api/scrolls` lists the data bucket,
   `/api/folders` this machine's folders, and `/api/sources` and `/api/board` keep the sources and the
@@ -78,3 +80,6 @@ start; the finest scans are hundreds of gigabytes, of which you only ever downlo
 
 `viewer/` is derived from [Neuroglancer](https://github.com/google/neuroglancer) and licensed under
 the Apache License 2.0 (`viewer/LICENSE`, `viewer/NOTICE`).
+
+The symbol marking a scroll in the source list is drawn after the Vesuvius Challenge's own scroll
+mark (scrollprize.org), so that a sample is recognisable from the site the data comes from.

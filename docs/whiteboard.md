@@ -41,10 +41,20 @@ one set of textures.
 Cards can also be linked: the cards of a group share one `NavigationGroup`, so they move together,
 and the group is created from the first volume one of its members shows, which is what the shared
 position is clamped against (`client/src/board/links.ts`).  Linking is not its own mode — copying a
-selected card and pasting it adds a card to that card's group (`Board.copySelected`, `pasteCopy`),
-which is the only way to make one, and the ⛓ on a card is how it leaves.
+selected card and pasting it adds a card to that card's group (the `copy` and `paste` actions in
+`client/src/board/state.ts`), which is the only way to make one, and the ⛓ on a card is how it
+leaves.  Which cards are in a group is board state; a group itself holds only the viewer's
+`NavigationGroup`, and a new one is told where to look by `App`, which is also how a board read from
+the server and a viewer built after a lost context get their places back.
 
-The board itself is kept on the server (`client/src/board/storage.ts`,
+The client is React, and the line between it and the viewer is worth stating: a card's position,
+size, plane, source and group are board state (`state.ts`, one reducer, shaped like the board the
+server keeps), while the view drawing the card, its volume and its group's shared position live in
+`session.ts` behind a ref — they have lifetimes of their own, and a volume is downloaded once however
+often a card re-renders.  One effect per card adds its view when the card mounts or when any of those
+change and disposes it on cleanup, so rendering never touches the viewer otherwise.
+
+The board itself is kept on the server (`client/src/api/storage.ts`,
 `server/src/utils/board.ts`): the cards, their sources and planes, the linked sets and where each is
 looking, and the board's pan and zoom.
 
