@@ -14,13 +14,14 @@ interface MenuItem {
 
 const GESTURES: [string, string][] = [
   ["Double click the board", "add a card"],
-  ["Drag a card", "move it"],
+  ["Drag the data", "pan the slice"],
+  ["Wheel over the data", "step through the slices"],
+  ["Ctrl and wheel over the data", "zoom the slice"],
+  ["Drag a card's lines, or Alt and drag", "move the card"],
   ["Drag a card's corner", "resize it"],
-  ["Alt and drag a card", "pan its slice"],
-  ["Wheel over a card", "step through the slices"],
-  ["Ctrl and wheel over a card", "zoom the slice"],
   ["Drag the board, or middle drag", "pan the board"],
-  ["Wheel over the board", "zoom the board"],
+  ["Two fingers, or the wheel", "pan the board"],
+  ["Pinch, or Ctrl and the wheel", "zoom the board"],
   ["The ⛓ in a card, then another card", "link them, so they move together"],
   ["Escape", "give up linking"],
 ];

@@ -90,9 +90,17 @@ The analysis the changes above were made from, roughly in order of effort.
    Neuroglancer has a mechanism for this (its `visibility_priority`: an invisible view requests
    nothing, and a partly relevant one requests at the PREFETCH tier instead of VISIBLE).  It is back
    (`SliceViewPanel.visibility`: a card off the board requests nothing), but the shared limits are
-   still global: 100 downloads at a time, 2 GB of system memory and
-   1 GB of GPU memory (`viewer.ts`).  Thirty cards looking at thirty regions would otherwise fight
-   over them.
+   still global: 100 downloads at a time, 1.5 GB of system memory and 400 MB of GPU memory
+   (`viewer.ts`).  Thirty cards looking at thirty regions would otherwise fight over them.
+
+   The GPU limit is deliberately well below what a browser would allow, because the cards' own
+   canvases come out of the same budget: a card magnified by the board is drawn with as many pixels
+   as it covers, and a canvas of tens of megapixels — or one reallocated on every frame of a zoom —
+   is how a tab loses its WebGL context.  Hence `SliceViewPanel.maxSize` (the most pixels a card is
+   drawn with along either side) and `fitRenderScale` (a card's pixels per layout pixel only ever
+   halve or double, so a smooth zoom from 1 to 10 reallocates five times rather than fifty).  A card
+   drawn with fewer pixels than it is shown with is simply stretched over its element, so the data it
+   shows is unchanged; mouse positions are scaled back into drawn pixels in `offsetFromCenter`.
 4. **Card chrome, overlap and clipping.**  One canvas behind the cards cannot do rounded corners,
    shadows, cards overlapping each other, or a card clipped by a scrolling container: the view draws
    its full rectangle regardless of what the DOM does on top of it.  Three ways out:

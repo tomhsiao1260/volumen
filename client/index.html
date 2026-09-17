@@ -15,9 +15,13 @@
       <div id="link-hint" hidden>
         Click another card to link it · Esc to give up
       </div>
-      <div id="board-conflict" hidden>
+      <div id="board-conflict" class="notice" hidden>
         This board was changed elsewhere; this page is no longer saving it.
-        <button id="board-reload">Reload</button>
+        <button class="notice-reload">Reload</button>
+      </div>
+      <div id="board-lost" class="notice" hidden>
+        The browser took this page's graphics away, so nothing is being drawn.
+        <button class="notice-reload">Reload</button>
       </div>
     </main>
     <script type="module" src="/src/main.ts"></script>

@@ -309,9 +309,13 @@ export class Viewer extends RefCounted {
     );
     const rpc = new RPC(this.worker, true);
     const chunkQueueManager = this.registerDisposer(
+      // A browser gives a tab only so much GPU memory, and the canvases the panels are drawn in
+      // come out of the same budget; asking for more than this is how a context gets lost.  Chunks
+      // dropped from the GPU are still decoded in system memory, so getting one back is a re-upload
+      // rather than a download.
       new ChunkQueueManager(rpc, this.display.gl, {
-        gpuMemory: { itemLimit: 1e6, sizeLimit: 1e9 },
-        systemMemory: { itemLimit: 1e7, sizeLimit: 2e9 },
+        gpuMemory: { itemLimit: 1e4, sizeLimit: 4e8 },
+        systemMemory: { itemLimit: 1e5, sizeLimit: 1.5e9 },
         download: { itemLimit: 100, sizeLimit: Number.POSITIVE_INFINITY },
       }),
     );
@@ -387,6 +391,15 @@ export class Viewer extends RefCounted {
       onPointerLeave();
     });
     return view;
+  }
+
+  /**
+   * Calls `callback` if the browser takes the WebGL context away, which it does when too much of its
+   * memory is asked for.  Nothing is drawn after that, so the page has to be loaded again.  Returns
+   * a function that stops the calls.
+   */
+  onContextLost(callback: () => void) {
+    return this.display.contextLost.add(callback);
   }
 
   /**

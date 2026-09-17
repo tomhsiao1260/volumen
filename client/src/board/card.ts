@@ -1,11 +1,16 @@
 /**
  * @file One card: a frame in board coordinates showing a cross-section of the source it names.  A
- * card with no source shows a form instead (see `source_panel.ts`), and each card has its own
- * navigation group, so it steps through slices on its own; a later round links cards so that their
- * coordinates move together.
+ * card with no source asks which one to show instead (see `scroll_picker.ts`).
+ *
+ * The card's frame is the data and nothing else, so it can be made square; what the card says about
+ * itself — the plane, the scan, the voxel it is looking at — floats just above and just below the
+ * frame, over the board rather than over the data.  All of it stays on screen, because that is what
+ * makes a card readable while working and worth a screenshot.  The controls — the link, the close and
+ * the resize corner — appear under the pointer.  The lines are also what the card is dragged by;
+ * dragging the data pans the slice.
  */
 
-import type { View, ViewOrientation, Volume } from "viewer";
+import type { Point, View, ViewOrientation, Volume } from "viewer";
 import type { Board } from "./board";
 import type { LinkGroup } from "./links";
 import { createScrollPicker } from "./scroll_picker";
@@ -20,9 +25,29 @@ export interface CardRect {
 
 export const MIN_CARD_SIZE = 140;
 
+function formatVoxel({ x, y, z }: Point) {
+  return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
+}
+
 let nextCardId = 0;
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
+
+/*
+ * A scan is named for the card without saying that it is masked, which nearly all of them are, and
+ * with its voxel size cut to a decimal or two (`45.5 µm`, `1.13 µm`) — a name saved before that rule
+ * existed still carries every digit the folder name had.
+ */
+function shorten(name: string) {
+  return name
+    .replace(/\s*·\s*masked$/, "")
+    .replace(/([\d.]+) µm/, (all, size) => {
+      const value = Number(size);
+      return Number.isNaN(value)
+        ? all
+        : `${Number(value.toFixed(value >= 10 ? 1 : 2))} µm`;
+    });
+}
 
 export class Card {
   readonly element = document.createElement("div");
@@ -30,8 +55,12 @@ export class Card {
   readonly slice = document.createElement("div");
   // Shows the source form, or how the volume is doing, on top of the slice.
   private overlay = document.createElement("div");
-  private orientationSelect = document.createElement("select");
+  private plane = document.createElement("button");
+  private planeMenu = document.createElement("div");
   private link = document.createElement("button");
+  // Where the card is looking, and the voxel under the pointer while there is one.
+  private centre = document.createElement("span");
+  private pointer = document.createElement("span");
   private viewChangedListener: (() => void) | undefined;
   source: Source | undefined;
   view: View | undefined;
@@ -45,25 +74,37 @@ export class Card {
     // Names the card in the saved board.
     readonly id = `c${nextCardId++}`,
   ) {
-    const { element, slice, overlay, orientationSelect } = this;
+    const { element, slice, overlay, plane, planeMenu } = this;
     element.className = "card";
     slice.className = "card-slice";
     overlay.className = "card-overlay";
 
     const header = document.createElement("div");
-    header.className = "card-header";
+    header.className = "card-top";
+    plane.className = "card-plane";
+    plane.title = "The plane this card shows";
+    plane.textContent = orientation.toUpperCase();
+    planeMenu.className = "card-plane-menu";
+    planeMenu.hidden = true;
     for (const value of ORIENTATIONS) {
-      const option = document.createElement("option");
-      option.value = value;
-      option.textContent = value.toUpperCase();
-      orientationSelect.append(option);
+      const choice = document.createElement("button");
+      choice.textContent = value.toUpperCase();
+      choice.addEventListener("click", () => {
+        planeMenu.hidden = true;
+        this.setOrientation(value);
+      });
+      planeMenu.append(choice);
     }
-    orientationSelect.value = orientation;
-    orientationSelect.className = "card-orientation";
-    orientationSelect.title = "The plane this card shows";
-    orientationSelect.addEventListener("change", () =>
-      this.setOrientation(orientationSelect.value as ViewOrientation),
-    );
+    plane.addEventListener("click", () => {
+      planeMenu.hidden = !planeMenu.hidden;
+    });
+    plane.addEventListener("blur", () => {
+      // Let a click on the menu land before it closes.
+      setTimeout(() => (planeMenu.hidden = true), 120);
+    });
+    const planes = document.createElement("span");
+    planes.className = "card-planes";
+    planes.append(plane, planeMenu);
     const name = document.createElement("span");
     name.className = "card-name";
     this.link.className = "card-link";
@@ -81,7 +122,7 @@ export class Card {
     close.textContent = "✕";
     close.title = "Remove this card";
     close.addEventListener("click", () => board.removeCard(this));
-    header.append(orientationSelect, name, this.link, close);
+    header.append(planes, name, this.link, close);
     this.name = name;
     group.members.add(this);
 
@@ -89,7 +130,18 @@ export class Card {
     resize.className = "card-resize";
     resize.title = "Resize";
 
-    element.append(header, slice, overlay, resize);
+    const footer = document.createElement("div");
+    footer.className = "card-bottom";
+    this.centre.className = "card-centre";
+    this.pointer.className = "card-pointer";
+    footer.append(this.centre, this.pointer);
+
+    // The frame: the slice and whatever covers it, with the two lines floating outside it.
+    const body = document.createElement("div");
+    body.className = "card-body";
+    body.append(slice, overlay, resize);
+
+    element.append(header, body, footer);
     board.layer.append(element);
     this.applyRect();
     this.showLink();
@@ -101,7 +153,7 @@ export class Card {
   // Shows the source `source` holds, loading its volume if no other card has.
   setSource(source: Source) {
     this.source = source;
-    this.name.textContent = this.board.sourceName(source);
+    this.name.textContent = shorten(this.board.sourceName(source));
     this.name.title = [source.local, source.http].filter((x) => x !== "").join("\n");
     this.showView(this.board.volumes.get(source.id));
     this.board.reportChanged();
@@ -122,6 +174,22 @@ export class Card {
     // A view looks through its group's position and zoom, so it is added again for the new group.
     if (source !== undefined) this.showView(this.board.volumes.get(source.id));
     this.board.reportChanged();
+  }
+
+  // Shows where the card is looking; kept on screen for reading and for screenshots.
+  showPosition() {
+    const position = this.navigation?.position;
+    this.centre.textContent = position === undefined ? "" : formatVoxel(position);
+  }
+
+  /**
+   * Shows the voxel under the pointer in place of the card's own, since the two mean the same thing
+   * and one line has room for one of them; the card's own is back as soon as the pointer leaves.
+   */
+  showPointer(point: Point | undefined) {
+    this.pointer.textContent = point === undefined ? "" : formatVoxel(point);
+    this.pointer.hidden = point === undefined;
+    this.centre.hidden = point !== undefined;
   }
 
   // Shows whether this card is linked, and to how many others.
@@ -148,7 +216,7 @@ export class Card {
   setOrientation(orientation: ViewOrientation) {
     if (orientation === this.orientation) return;
     this.orientation = orientation;
-    this.orientationSelect.value = orientation;
+    this.plane.textContent = orientation.toUpperCase();
     // A view shows one plane for its whole life, but adding it again costs no downloads.
     const { source } = this;
     if (source !== undefined) this.showView(this.board.volumes.get(source.id));
@@ -193,17 +261,17 @@ export class Card {
   private showView(volume: Volume) {
     this.disposeView();
     const navigation = this.group.navigationFor(volume);
-    this.viewChangedListener = navigation.onViewChanged(() =>
-      this.board.reportViewChanged(),
-    );
+    this.viewChangedListener = navigation.onViewChanged(() => {
+      this.showPosition();
+      this.board.reportViewChanged();
+    });
     this.view = this.board.viewer.addView(this.slice, {
       volume,
       orientation: this.orientation,
       navigation,
     });
-    // The board owns the mouse button: a drag moves the card, and with Alt it pans the slice.  The
-    // wheel stays with the view, which steps through slices and zooms with Control.
-    this.view.handleInput = (event) => event.type === "wheel";
+    // Dragging the data pans the slice and the wheel steps through the slices, both of which the
+    // view does itself; the card is moved by the lines outside it instead (see `gestures.ts`).
 
     this.setOverlay(this.message("Loading…"));
     const { view } = this;
@@ -212,6 +280,7 @@ export class Card {
         // The card may have been removed, or given another source, while it loaded.
         if (this.view !== view) return;
         this.setOverlay(undefined);
+        this.showPosition();
       },
       (error) => {
         if (this.view !== view) return;

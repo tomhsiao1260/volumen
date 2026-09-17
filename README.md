@@ -12,22 +12,30 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
 
 ## What it does
 
-- **A board of cards.** Double click the board to add a card. Drag a card to move it, its corner to
-  resize it, the background to pan, and the wheel over the background to zoom — the cards get larger
-  without showing more data. Alt and a drag pans a slice, the wheel steps through slices, Ctrl and
-  the wheel zooms one.
-- **Pick a scroll in a few clicks.** A new card lists the scrolls of the Vesuvius Challenge, read
-  from its open data bucket, then the scans of the one you pick — finest first, with the voxel size
-  and the energy — and then asks only where the files should go: nowhere in particular, in which case
-  the server keeps what you look at, or a folder of yours, chosen by clicking through this machine's
+- **A board of cards.** Double click the board to add a card. Dragging the data pans the slice, the
+  wheel steps through the slices and Ctrl and the wheel zooms one; a card is moved by the lines above
+  and below it, or Alt and a drag, and resized by its corner. The board is panned by dragging the
+  background or with two fingers, and zoomed with a pinch (or Ctrl and the wheel) — the cards get
+  larger without showing more data.
+- **Pick a scroll in two clicks.** A new card lists the samples of the Vesuvius Challenge, read from
+  its open data bucket, then the scans of the one you pick — finest first, with the voxel size and
+  the energy. Clicking a scan shows it, with the server keeping what you look at; the folder button
+  on a scan keeps the files in a folder of yours instead, chosen by clicking through this machine's
   folders. Data outside the bucket can still be given by hand. Cards naming the same scan share one
   volume, one download and one set of textures.
 - **Linked cards.** Click the ⛓ in a card's header and then another card, and the two share a
   position and zoom: moving through the slices in one moves both, each along its own plane. **+
   linked x/y/z** adds three linked cards showing the XY, XZ and YZ planes.
+- **A card says what it is.** A card's frame is the data and nothing else, so it can be made square;
+  the plane it shows, the scan it shows and the voxel it is looking at are written just above and
+  just below the frame, over the board rather than over the data. All of it stays on screen, so a
+  card can be read while working and carries its own caption in a screenshot. While the pointer is on
+  a card the voxel under it takes the place of the card's own, in yellow, and the link, close and
+  resize controls fade in with it. The board itself has no bars at all: a round button in the corner,
+  and the same menu on a right click.
 - **The board is kept.** Where the cards are, what they show, which are linked and where the board
   is panned to are stored in `server/db/json/board.json`, and are there again next time. Chunks
-  neither store has (sparse scrolls have many) are drawn empty and listed in the corner.
+  neither store has (sparse scrolls have many) are simply drawn empty.
 
 ## Running it
 
@@ -48,7 +56,7 @@ start; the finest scans are hundreds of gigabytes, of which you only ever downlo
   (`card.ts`), their layout and pan and zoom (`board.ts`, `transform.ts`), the mouse input
   (`gestures.ts`), the board's own menu (`menu.ts`), the linked sets (`links.ts`), choosing what to
   show (`scroll_picker.ts`, `catalog.ts`, `sources.ts`), the symbols (`icons.ts`) and the saved board
-  (`storage.ts`). `src/app/` holds the coordinate readout and the missing-chunk list.
+  (`storage.ts`).
 - `server/`: the zarr stores (Node, Express). `GET /api/data/<sourceId>/<key>` serves a file of a
   source, downloading it first if its folder does not have it; `/api/scrolls` lists the data bucket,
   `/api/folders` this machine's folders, and `/api/sources` and `/api/board` keep the sources and the

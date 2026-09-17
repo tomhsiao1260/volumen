@@ -4,7 +4,7 @@
  * source shows the same volume, so its chunks are downloaded and uploaded once.
  */
 
-import type { MissingChunkHandler, Viewer, Volume } from "viewer";
+import type { Viewer, Volume } from "viewer";
 import { SERVER_API_ENDPOINT } from "../config";
 
 export interface Source {
@@ -51,10 +51,7 @@ export async function upsertSource(local: string, http: string, name = "") {
 export class VolumeRegistry {
   private volumes = new Map<string, Volume>();
 
-  constructor(
-    private viewer: Viewer,
-    private onMissingChunk: MissingChunkHandler,
-  ) {}
+  constructor(private viewer: Viewer) {}
 
   /**
    * The volume of `sourceId`, loaded the first time it is asked for.  Volumes are kept until the
@@ -64,10 +61,10 @@ export class VolumeRegistry {
   get(sourceId: string) {
     let volume = this.volumes.get(sourceId);
     if (volume === undefined) {
-      volume = this.viewer.addVolume(
-        { kind: "http", url: `${SERVER_API_ENDPOINT}/api/data/${sourceId}` },
-        { onMissingChunk: this.onMissingChunk },
-      );
+      volume = this.viewer.addVolume({
+        kind: "http",
+        url: `${SERVER_API_ENDPOINT}/api/data/${sourceId}`,
+      });
       this.volumes.set(sourceId, volume);
     }
     return volume;

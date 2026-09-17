@@ -66,11 +66,24 @@ export async function createFolder(parent: string, name: string) {
   return (await response.json()) as FolderListing;
 }
 
+// `45.5` for 45.532, `1.13` for 1.129: enough to tell the scans of one scroll apart.
+function round(micrometres: number) {
+  return String(Number(micrometres.toFixed(micrometres >= 10 ? 1 : 2)));
+}
+
 // `2.4 µm · 78 keV · masked`, from what the folder name says about a scan.
 export function describeVolume({ voxelSize, energy, masked }: ScrollVolume) {
   const parts = [];
-  if (voxelSize !== null) parts.push(`${voxelSize} µm`);
+  if (voxelSize !== null) parts.push(`${round(voxelSize)} µm`);
   if (energy !== null) parts.push(`${energy} keV`);
   if (masked) parts.push("masked");
+  return parts.join(" · ");
+}
+
+// What a card calls this scan: the sample first, as the data itself names it.
+export function volumeName(scroll: Scroll, volume: ScrollVolume) {
+  const parts = [scroll.id];
+  if (volume.voxelSize !== null) parts.push(`${round(volume.voxelSize)} µm`);
+  if (volume.energy !== null) parts.push(`${volume.energy} keV`);
   return parts.join(" · ");
 }

@@ -2,7 +2,7 @@
  * @file The board: the cards, their layout in board coordinates, and the board's own pan and zoom.
  */
 
-import type { View, ViewOrientation } from "viewer";
+import type { Point, View, ViewOrientation } from "viewer";
 import type { Viewer } from "viewer";
 import { Card } from "./card";
 import { bindGestures } from "./gestures";
@@ -198,6 +198,13 @@ export class Board {
 
   cardOfView(view: View) {
     return this.cards.find((card) => card.view === view);
+  }
+
+  // Shows the voxel under the pointer on the card it is over, and on no other.
+  showPointer(view: View, point: Point | undefined) {
+    for (const card of this.cards) {
+      card.showPointer(card.view === view ? point : undefined);
+    }
   }
 
   // Moves the board so that every card is in view.

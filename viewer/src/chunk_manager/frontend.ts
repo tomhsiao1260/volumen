@@ -95,6 +95,8 @@ export class ChunkQueueManager extends SharedObject {
   }
 
   processPendingChunkUpdates() {
+    // Uploading to a context that is gone only produces errors, one per chunk.
+    if (this.gl.isContextLost()) return;
     const deadline =
       this.chunkUpdateDeadline ?? Date.now() + CHUNK_UPDATE_TIME_BUDGET_MS;
     let visibleChunksChanged = false;

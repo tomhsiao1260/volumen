@@ -8,8 +8,6 @@
  */
 
 import { Viewer } from "viewer";
-import { listMissingChunks } from "./app/missing_chunks";
-import { showPosition } from "./app/position_display";
 import { Board } from "./board/board";
 import { createMenu } from "./board/menu";
 import type { Source } from "./board/sources";
@@ -25,11 +23,13 @@ const hint = document.querySelector<HTMLElement>("#board-hint")!;
 const conflict = document.querySelector<HTMLElement>("#board-conflict")!;
 
 const viewer = new Viewer({ container: element });
-const volumes = new VolumeRegistry(viewer, listMissingChunks(main));
+const volumes = new VolumeRegistry(viewer);
 const board = new Board({ viewer, volumes, element, layer });
 
 createMenu(board, element);
-showPosition(board, main);
+
+// Each card shows the voxel under the pointer while it is over that card.
+viewer.onPointerMove((point, view) => board.showPointer(view, point));
 
 // While a card waits to be linked, a line at the top says what to do next.
 const linkHint = document.querySelector<HTMLElement>("#link-hint")!;
@@ -50,9 +50,18 @@ const store = createBoardStore({
 });
 
 window.addEventListener("pagehide", () => store.saveOnUnload());
-document
-  .querySelector<HTMLButtonElement>("#board-reload")!
-  .addEventListener("click", () => window.location.reload());
+for (const button of document.querySelectorAll<HTMLButtonElement>(
+  ".notice-reload",
+)) {
+  button.addEventListener("click", () => window.location.reload());
+}
+
+// A lost WebGL context takes every texture and shader with it, so the page has to be loaded again;
+// say so rather than leaving the cards frozen.
+const lost = document.querySelector<HTMLElement>("#board-lost")!;
+viewer.onContextLost(() => {
+  lost.hidden = false;
+});
 
 // The board on the server, with the sources its cards name.
 function putBack(stored: StoredBoard, sources: Source[]) {

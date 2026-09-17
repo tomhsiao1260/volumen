@@ -1,7 +1,8 @@
 /**
- * @file What a card shows until it has data: the scrolls of the Vesuvius Challenge, a few clicks to
- * one of their scans, and a choice of where its files should go.  A scroll can also be given by
- * hand, for data that is not in the bucket.
+ * @file What a card shows until it has data: the samples of the Vesuvius Challenge, their scans, and
+ * a click to show one.  A scan is normally read straight from the bucket, with the server keeping
+ * what has been looked at; the folder button on a scan keeps it somewhere of your choosing instead.
+ * Data outside the bucket can be given by hand.
  */
 
 import type { FolderListing, Scroll, ScrollVolume } from "./catalog";
@@ -11,8 +12,9 @@ import {
   listFolders,
   listScrolls,
   listVolumes,
+  volumeName,
 } from "./catalog";
-import { icon } from "./icons";
+import { icon, IconName } from "./icons";
 import type { Source } from "./sources";
 import { listSources, sourceLabel, upsertSource } from "./sources";
 
@@ -28,11 +30,7 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
   const element = document.createElement("div");
   element.className = "picker";
 
-  const show = (...content: (Node | string)[]) => {
-    element.replaceChildren(...content.map(asNode));
-  };
-  const asNode = (content: Node | string) =>
-    typeof content === "string" ? document.createTextNode(content) : content;
+  const show = (...content: Node[]) => element.replaceChildren(...content);
 
   const header = (text: string, back?: () => void) => {
     const row = document.createElement("div");
@@ -57,14 +55,21 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     return element;
   };
 
+  /**
+   * One line of a list: a symbol, what it is, and a quieter word about it.  `action` is an extra
+   * button at the end, for the scan that should be kept in a folder.
+   */
   const item = (
-    symbol: Parameters<typeof icon>[0],
+    symbol: IconName,
     label: string,
     note: string,
     onClick: () => void,
+    action?: { symbol: IconName; title: string; onClick: () => void },
   ) => {
+    const row = document.createElement("div");
+    row.className = "picker-item";
     const button = document.createElement("button");
-    button.className = "picker-item";
+    button.className = "picker-choose";
     button.append(icon(symbol));
     const name = document.createElement("span");
     name.className = "picker-name";
@@ -74,7 +79,16 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     detail.textContent = note;
     button.append(name, detail);
     button.addEventListener("click", onClick);
-    return button;
+    row.append(button);
+    if (action !== undefined) {
+      const extra = document.createElement("button");
+      extra.className = "picker-action";
+      extra.title = action.title;
+      extra.append(icon(action.symbol));
+      extra.addEventListener("click", action.onClick);
+      row.append(extra);
+    }
+    return row;
   };
 
   const message = (text: string) => {
@@ -99,15 +113,15 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     return button;
   };
 
-  // The scrolls of the bucket, with a box to narrow them down.
+  // The samples in the bucket, with a box to narrow them down.
   async function showScrolls() {
-    show(message("Reading the scrolls…"));
+    show(message("Reading the samples…"));
     let scrolls: Scroll[];
     try {
       scrolls = await listScrolls();
     } catch (error) {
       show(
-        message(`Could not read the scrolls: ${(error as Error).message}`),
+        message(`Could not read the samples: ${(error as Error).message}`),
         footer(link("Try again", showScrolls), link("By hand…", showCustom)),
       );
       return;
@@ -115,25 +129,26 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     const search = document.createElement("input");
     search.className = "picker-search";
     search.type = "search";
-    search.placeholder = "Search the scrolls";
+    search.placeholder = "Search";
     const items = list();
     const fill = () => {
       const text = search.value.trim().toLowerCase();
-      const found = scrolls.filter(
-        (scroll) =>
-          text === "" ||
-          scroll.name.toLowerCase().includes(text) ||
-          scroll.id.toLowerCase().includes(text),
-      );
       items.replaceChildren(
-        ...found.map((scroll) =>
-          item(
-            scroll.kind === "fragment" ? "fragment" : "scroll",
-            scroll.name,
-            scroll.name === scroll.id ? "" : scroll.id,
-            () => showVolumes(scroll),
+        ...scrolls
+          .filter(
+            (scroll) =>
+              text === "" ||
+              scroll.id.toLowerCase().includes(text) ||
+              scroll.name.toLowerCase().includes(text),
+          )
+          .map((scroll) =>
+            item(
+              scroll.kind === "fragment" ? "fragment" : "scroll",
+              scroll.id,
+              scroll.name === scroll.id ? "" : scroll.name,
+              () => showVolumes(scroll),
+            ),
           ),
-        ),
       );
     };
     search.addEventListener("input", fill);
@@ -142,56 +157,49 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     search.focus();
   }
 
-  // The scans of one scroll, the finest first.
+  // The scans of one sample, the finest first.  Choosing one shows it; the folder button keeps it.
   async function showVolumes(scroll: Scroll) {
-    show(header(scroll.name, showScrolls), message("Reading the scans…"));
+    const title = `${scroll.id}${scroll.name === scroll.id ? "" : ` · ${scroll.name}`}`;
+    show(header(title, showScrolls), message("Reading the scans…"));
     let volumes: ScrollVolume[];
     try {
       volumes = await listVolumes(scroll.id);
     } catch (error) {
       show(
-        header(scroll.name, showScrolls),
+        header(title, showScrolls),
         message(`Could not read the scans: ${(error as Error).message}`),
       );
       return;
     }
     if (volumes.length === 0) {
-      show(header(scroll.name, showScrolls), message("This scroll has no scans."));
+      show(header(title, showScrolls), message("This sample has no scans."));
       return;
     }
     const items = list();
     items.append(
       ...volumes.map((volume) =>
-        item("volume", describeVolume(volume), "", () =>
-          showWhere(scroll, volume),
+        item(
+          "volume",
+          describeVolume(volume),
+          "",
+          () =>
+            choose({
+              local: "",
+              http: volume.url,
+              name: volumeName(scroll, volume),
+            }),
+          {
+            symbol: "folder",
+            title: "Keep it in a folder of your own",
+            onClick: () => showFolders(scroll, volume),
+          },
         ),
       ),
     );
-    show(header(scroll.name, showScrolls), items);
-  }
-
-  // Whether the files should only be cached by the server, or kept in a folder of one's own.
-  function showWhere(scroll: Scroll, volume: ScrollVolume) {
-    const choices = list();
-    const name = `${scroll.name} · ${describeVolume(volume)}`;
-    const view = item(
-      "volume",
-      "Just look at it",
-      "the server keeps what you view",
-      () => choose({ local: "", http: volume.url, name }),
-    );
-    const keep = item(
-      "folder",
-      "Keep it in a folder…",
-      "downloaded as you look",
-      () => showFolders(scroll, volume),
-    );
-    choices.append(view, keep);
     show(
-      header(`${scroll.name} · ${describeVolume(volume)}`, () =>
-        showVolumes(scroll),
-      ),
-      choices,
+      header(title, showScrolls),
+      items,
+      footer(message("A scan opens where it is; the folder keeps a copy.")),
     );
   }
 
@@ -201,13 +209,15 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     volume: ScrollVolume,
     at?: string,
   ) {
-    show(header("Where to keep it", () => showWhere(scroll, volume)), message("…"));
+    const title = `Keep ${describeVolume(volume)} in`;
+    const back = () => showVolumes(scroll);
+    show(header(title, back), message("…"));
     let listing: FolderListing;
     try {
       listing = await listFolders(at);
     } catch (error) {
       show(
-        header("Where to keep it", () => showWhere(scroll, volume)),
+        header(title, back),
         message(`Could not open that folder: ${(error as Error).message}`),
         footer(link("Start again", () => showFolders(scroll, volume))),
       );
@@ -232,7 +242,7 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
     here.className = "picker-path";
     here.textContent = listing.path;
     show(
-      header("Where to keep it", () => showWhere(scroll, volume)),
+      header(title, back),
       here,
       items,
       footer(
@@ -240,7 +250,7 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
           choose({
             local: listing.path,
             http: volume.url,
-            name: `${scroll.name} · ${describeVolume(volume)}`,
+            name: volumeName(scroll, volume),
           }),
         ),
         link("New folder…", async () => {
@@ -274,11 +284,7 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
       form.append(wrapper);
       return input;
     };
-    const local = field(
-      "Zarr folder on this machine",
-      lastCustom.local,
-      "/path/to/scroll.zarr",
-    );
+    const local = field("Zarr folder", lastCustom.local, "/path/to/scroll.zarr");
     const http = field("Remote store", lastCustom.http, "https://…/scroll.zarr");
     const error = document.createElement("span");
     error.className = "picker-error";
@@ -286,7 +292,7 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
       header("By hand", showScrolls),
       form,
       footer(
-        link("Show it", async () => {
+        link("Show", async () => {
           lastCustom = { local: local.value.trim(), http: http.value.trim() };
           error.textContent = "";
           try {
@@ -310,9 +316,7 @@ export function createScrollPicker({ onChosen }: ScrollPickerOptions) {
         if (sources.length === 0) return;
         row.append(document.createTextNode("in use: "));
         for (const source of sources) {
-          row.append(
-            link(sourceLabel(source), () => onChosen(source)),
-          );
+          row.append(link(sourceLabel(source), () => onChosen(source)));
         }
       },
       (error) => console.error("Failed to list the sources:", error),

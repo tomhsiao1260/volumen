@@ -19,7 +19,7 @@ import { initializeWebGL } from "#src/webgl/context.js";
  * after `scheduleRedraw`, `draw` runs on the next animation frame and, for each panel, draws its
  * slice at the surface's origin and copies it into the panel's own canvas.  Panels are therefore
  * ordinary elements, which may be styled, stacked and clipped like any others, and the surface only
- * has to be as large as the largest panel.
+ * has to be as large as the largest panel being drawn.
  */
 export class DisplayContext extends RefCounted {
   gl: GL;
@@ -28,6 +28,17 @@ export class DisplayContext extends RefCounted {
   resizeGeneration = 0;
   // Dispatched when a frame starts drawing.
   updateStarted = new NullarySignal();
+  /**
+   * Dispatched if the browser takes the WebGL context away, which it does when too much of its
+   * memory is asked for.  Everything on the GPU is gone then, so the page has to be loaded again.
+   */
+  contextLost = new NullarySignal();
+  /**
+   * Once the context is lost every GL object belongs to a context that is gone, so any further call
+   * only produces errors — thousands of them, since drawing is driven by animation frames.  Nothing
+   * is drawn after this is set.
+   */
+  lost = false;
   // Where the slices are drawn before being copied into the panels' own canvases.
   readonly surface = document.createElement("canvas");
   private resizeObserver = new ResizeObserver(() => this.invalidateBounds());
@@ -35,6 +46,13 @@ export class DisplayContext extends RefCounted {
   constructor(public container: HTMLElement) {
     super();
     this.gl = initializeWebGL(this.surface);
+    this.surface.addEventListener("webglcontextlost", (event) => {
+      // Without this the context cannot come back at all.
+      event.preventDefault();
+      console.error("The WebGL context was lost.");
+      this.lost = true;
+      this.contextLost.dispatch();
+    });
     this.resizeObserver.observe(container);
     this.registerDisposer(() => this.resizeObserver.disconnect());
   }
@@ -66,24 +84,44 @@ export class DisplayContext extends RefCounted {
   );
 
   draw() {
+    if (this.lost) return;
     this.updateStarted.dispatch();
+    // Every panel is measured first, so that the surface can be sized once for the largest of them.
+    const drawing: SliceViewPanel[] = [];
+    let width = 0;
+    let height = 0;
     for (const panel of this.panels) {
-      if (panel.visibility.value === Number.NEGATIVE_INFINITY) continue;
       panel.ensureBoundsUpdated();
-      const { width, height } = panel.renderViewport;
-      if (width === 0 || height === 0) continue;
-      this.growSurface(width, height);
-      panel.draw();
+      if (panel.visibility.value === Number.NEGATIVE_INFINITY) {
+        // A panel that is not on the board any more gives up its pixels until it comes back.
+        panel.releaseCanvas();
+        continue;
+      }
+      const viewport = panel.renderViewport;
+      if (viewport.width === 0 || viewport.height === 0) continue;
+      drawing.push(panel);
+      width = Math.max(width, viewport.width);
+      height = Math.max(height, viewport.height);
     }
+    if (drawing.length === 0) return;
+    this.fitSurface(width, height);
+    for (const panel of drawing) panel.draw();
   }
 
-  // Panels draw one at a time, so the surface only has to hold the largest of them.  Resizing it
-  // reallocates the drawing buffer, so it never shrinks.
-  private growSurface(width: number, height: number) {
+  /**
+   * Sizes the surface to the largest panel being drawn.  Panels draw one at a time, so that is all
+   * it ever has to hold.  It is left alone while it is within twice the size needed, because
+   * reallocating the drawing buffer is not free — but it does have to come back down: a board zoomed
+   * far in would otherwise leave tens of megapixels allocated, which is how a context gets lost.
+   */
+  private fitSurface(width: number, height: number) {
     const { surface } = this;
-    if (surface.width >= width && surface.height >= height) return;
-    surface.width = Math.max(surface.width, width);
-    surface.height = Math.max(surface.height, height);
+    if (surface.width >= width && surface.height >= height) {
+      // Only give the memory back once far more of it is held than is needed.
+      if (surface.width <= width * 2 && surface.height <= height * 2) return;
+    }
+    surface.width = width;
+    surface.height = height;
   }
 }
 
@@ -106,6 +144,19 @@ function hasOnlyControl(event: MouseEvent) {
 
 // How far outside the container a panel still counts as about to be seen (see `visibility`).
 const NEAR_SCREEN_MARGIN = "200px";
+
+/**
+ * The pixels to draw one of a panel's own pixels with, given how much it is magnified on screen and
+ * how large it is.  Halving and doubling keeps the shape of what is drawn exactly, so the panel's
+ * canvas can simply be stretched over it, and leaves the size alone until the magnification has
+ * really changed.
+ */
+function fitRenderScale(magnification: number, layoutSize: number) {
+  let scale = 2 ** Math.round(Math.log2(Math.max(magnification, 1e-3)));
+  const most = SliceViewPanel.maxSize / layoutSize;
+  while (scale > most && scale > 1 / 8) scale /= 2;
+  return Math.max(1 / 8, scale);
+}
 
 // Zoom factor for one wheel event: e^(deltaY / 200) when the delta is in pixels.
 function getWheelZoomAmount(event: WheelEvent) {
@@ -152,6 +203,22 @@ export class SliceViewPanel extends RefCounted {
   // The canvas the slice is copied into, filling `element`.
   private canvas = document.createElement("canvas");
   private context: CanvasRenderingContext2D;
+
+  /**
+   * The most pixels a panel is drawn with, along either side.  A panel magnified by a board's zoom
+   * can cover far more of them than a screen has, and both its own canvas and the surface it is
+   * drawn in would then take tens of megabytes each; past this size it is drawn with fewer pixels
+   * and scaled up, which leaves the data it shows unchanged.
+   */
+  static readonly maxSize = 2048;
+
+  /**
+   * How many pixels a panel is drawn with per pixel of its own layout: 1 normally, 2 while a board
+   * magnifies it twice, and so on.  It only ever doubles or halves, because every change reallocates
+   * this panel's canvas and the surface it is drawn in — and doing that on every frame of a zoom is
+   * what costs a WebGL context.
+   */
+  private renderScale = 1;
 
   /**
    * How much this panel's chunks are worth loading: `POSITIVE_INFINITY` while the panel is on
@@ -272,9 +339,10 @@ export class SliceViewPanel extends RefCounted {
     const { button } = initialEvent;
     let prevClientX = initialEvent.clientX;
     let prevClientY = initialEvent.clientY;
+    const scale = this.drawnPerScreenPixel(this.element.getBoundingClientRect());
     const onMove = (e: PointerEvent) => {
-      const deltaX = e.clientX - prevClientX;
-      const deltaY = e.clientY - prevClientY;
+      const deltaX = (e.clientX - prevClientX) * scale;
+      const deltaY = (e.clientY - prevClientY) * scale;
       prevClientX = e.clientX;
       prevClientY = e.clientY;
       this.translateByViewportPixels(deltaX, deltaY);
@@ -309,6 +377,14 @@ export class SliceViewPanel extends RefCounted {
     });
   }
 
+  // Frees the pixels of a panel that is not being drawn; the next `draw` sizes the canvas again.
+  releaseCanvas() {
+    const { canvas } = this;
+    if (canvas.width === 0 && canvas.height === 0) return;
+    canvas.width = 0;
+    canvas.height = 0;
+  }
+
   // Draws the slice into the shared surface and copies it into the panel's own canvas, which the
   // next panel's drawing would otherwise overwrite.
   draw() {
@@ -337,14 +413,21 @@ export class SliceViewPanel extends RefCounted {
     this.boundsGeneration = display.resizeGeneration;
 
     const { element } = this;
-    const { width, height } = element.getBoundingClientRect();
-    const viewport = this.renderViewport;
-    viewport.width = Math.round(width);
-    viewport.height = Math.round(height);
     // `getBoundingClientRect` is scaled by a CSS transform on an ancestor and `offsetWidth` is not,
-    // so their ratio is how much the panel is magnified on screen (see `RenderViewport`).
-    const layoutWidth = element.offsetWidth;
-    viewport.pixelScale = layoutWidth > 0 ? width / layoutWidth : 1;
+    // so their ratio is how much the panel is magnified on screen.
+    const { width } = element.getBoundingClientRect();
+    const layoutWidth = Math.max(1, element.offsetWidth);
+    const layoutHeight = Math.max(1, element.offsetHeight);
+    this.renderScale = fitRenderScale(
+      width / layoutWidth,
+      Math.max(layoutWidth, layoutHeight),
+    );
+    const viewport = this.renderViewport;
+    viewport.width = Math.round(layoutWidth * this.renderScale);
+    viewport.height = Math.round(layoutHeight * this.renderScale);
+    // It is the pixels actually drawn that count, so that a panel drawn with fewer of them than it
+    // is shown with still shows the same data (see `RenderViewport`).
+    viewport.pixelScale = this.renderScale;
 
     this.sliceView.projectionParameters.setViewport(viewport);
   }
@@ -353,11 +436,23 @@ export class SliceViewPanel extends RefCounted {
   private offsetFromCenter(clientX: number, clientY: number) {
     const { element, renderViewport } = this;
     const bounds = element.getBoundingClientRect();
+    const scale = this.drawnPerScreenPixel(bounds);
     tempOffset[0] =
-      clientX - (bounds.left + element.clientLeft) - renderViewport.width / 2;
+      (clientX - (bounds.left + element.clientLeft)) * scale -
+      renderViewport.width / 2;
     tempOffset[1] =
-      clientY - (bounds.top + element.clientTop) - renderViewport.height / 2;
+      (clientY - (bounds.top + element.clientTop)) * scale -
+      renderViewport.height / 2;
     return tempOffset;
+  }
+
+  /**
+   * Drawn pixels per pixel on screen.  A panel is drawn with as many pixels as `fitRenderScale`
+   * allows and stretched over however large it is shown, so a mouse position, which arrives in
+   * screen pixels, has to be scaled before it means anything to the projection.
+   */
+  private drawnPerScreenPixel(bounds: DOMRect) {
+    return bounds.width > 0 ? this.renderViewport.width / bounds.width : 1;
   }
 
   /**

@@ -1,23 +1,28 @@
 /**
- * @file Mouse input on the board:
+ * @file Mouse and trackpad input on the board:
  *
- *   - left drag on the background, or middle drag anywhere: pan the board
- *   - wheel outside a slice: zoom the board around the pointer
+ *   - drag the data: pan the slice, which the view does itself
+ *   - drag a card's lines, or Alt and drag it anywhere: move the card
+ *   - drag a card's corner: resize it
+ *   - drag the background, or middle drag anywhere: pan the board
+ *   - two fingers, or the wheel, outside the data: pan the board
+ *   - pinch, or Control and the wheel, outside the data: zoom the board around the pointer
+ *   - wheel over the data: step through the slices; with Control: zoom the slice (both the view's)
  *   - double click on the background: add a card there
- *   - left drag on a card: move it; with Alt over its slice: pan the slice
  *   - click a card while linking: link it to the card the link started from
- *   - left drag on a card's corner: resize it
- *   - wheel over a slice: step through slices; with Control: zoom the slice (both left to the view)
  */
 
 import type { Board } from "./board";
 import { CARD_HEIGHT, CARD_WIDTH } from "./board";
 import { zoomAbout } from "./transform";
 
-// Zoom factor for one wheel notch, gentler than the view's own zoom.
+/**
+ * Zoom factor for a pinch, or for the wheel with Control held.  A trackpad's pinch arrives as a
+ * wheel event with `ctrlKey` set, which is how the two are told apart.
+ */
 function wheelZoomAmount(event: WheelEvent) {
   const multiplier =
-    event.deltaMode === WheelEvent.DOM_DELTA_PIXEL ? 1 / 400 : 1 / 8;
+    event.deltaMode === WheelEvent.DOM_DELTA_PIXEL ? 1 / 200 : 1 / 8;
   return Math.exp(-event.deltaY * multiplier);
 }
 
@@ -78,36 +83,42 @@ export function bindGestures(board: Board) {
       drag(event, board.transform.scale, (deltaX, deltaY) =>
         card.resizeBy(deltaX, deltaY),
       );
-    } else if (
-      event.altKey &&
-      card.view !== undefined &&
-      target.closest(".card-slice") !== null
-    ) {
-      // The slice moves by screen pixels, so the board's zoom is already in the view's projection.
-      const { view } = card;
-      drag(event, 1, (deltaX, deltaY) =>
-        view.translateByViewportPixels(deltaX, deltaY),
-      );
-    } else {
+      return;
+    }
+    // The lines above and below the data are what the card is dragged by; Alt does it from anywhere.
+    const onBar =
+      target.closest(".card-top") !== null ||
+      target.closest(".card-bottom") !== null;
+    if (onBar || event.altKey) {
       drag(event, board.transform.scale, (deltaX, deltaY) =>
         card.moveBy(deltaX, deltaY),
       );
     }
+    // Anywhere else is the data, which the view pans itself.
   });
 
   element.addEventListener(
     "wheel",
     (event) => {
-      // Over a slice the view has already taken the wheel — a slice step, or a zoom with Control —
-      // and stopped the event, so this only sees the board's background and the cards' chrome.
-      const bounds = element.getBoundingClientRect();
+      // Over the data the view has already taken the wheel — a slice step, or a zoom with Control —
+      // and stopped the event, so this only sees the board's background and the cards' lines.  A card
+      // that is showing a list scrolls it instead.
+      if ((event.target as HTMLElement).closest(".card-overlay") !== null) return;
       event.preventDefault();
-      board.transform = zoomAbout(
-        board.transform,
-        event.clientX - bounds.left,
-        event.clientY - bounds.top,
-        wheelZoomAmount(event),
-      );
+      const bounds = element.getBoundingClientRect();
+      if (event.ctrlKey || event.metaKey) {
+        // A pinch on a trackpad, or Control and the wheel.
+        board.transform = zoomAbout(
+          board.transform,
+          event.clientX - bounds.left,
+          event.clientY - bounds.top,
+          wheelZoomAmount(event),
+        );
+      } else {
+        // Two fingers on a trackpad, or the wheel: the board moves, as a page would scroll.
+        board.transform.x -= event.deltaX;
+        board.transform.y -= event.deltaY;
+      }
       board.applyTransform();
     },
     { passive: false },
