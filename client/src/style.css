@@ -276,6 +276,65 @@ button {
   opacity: 1;
 }
 
+/* A surface card's frame: the sheet the worker drew, scaled to the card. */
+.card-surface {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* A surface card says what it is where a slice card says its plane. */
+.card-kind {
+  cursor: move;
+}
+
+/* How far through the sheets a surface card is, dimmed while it is still being drawn. */
+.card-layer {
+  color: var(--text);
+  transition: color 120ms ease;
+}
+
+.card-layer.loading {
+  color: var(--dim);
+}
+
+/* The menu a right click on a card's data opens, inside the card so that it moves with it. */
+.card-menu {
+  position: absolute;
+  z-index: 6;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background-color: #14161cf2;
+  box-shadow: 0 12px 32px #000000a6;
+}
+
+.card-menu button {
+  padding: 6px 8px;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.card-menu button:hover:not(:disabled) {
+  background-color: #ffffff14;
+}
+
+.card-menu button:disabled {
+  color: var(--dim);
+  cursor: default;
+}
+
+.card-menu-note {
+  padding: 0 8px 5px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+
 .card-resize {
   position: absolute;
   right: 0;

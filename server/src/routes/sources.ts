@@ -1,5 +1,6 @@
 import { Router, Request, Response } from "express";
-import { getSources, upsertSource } from "../utils/sources";
+import { getLasagna } from "../utils/lasagna";
+import { getSource, getSources, upsertSource } from "../utils/sources";
 
 const router = Router();
 
@@ -21,6 +22,21 @@ router.post("/", async (req: Request, res: Response) => {
     return;
   }
   res.json(await upsertSource(pair));
+});
+
+// The Lasagna prediction of a source's scan, which a surface card needs; null if there is none.
+router.get("/:id/lasagna", async (req: Request, res: Response) => {
+  const source = await getSource(String(req.params.id));
+  if (source === undefined) {
+    res.status(404).json({ error: `Unknown source ${req.params.id}` });
+    return;
+  }
+  try {
+    res.json({ lasagna: source.http === "" ? null : await getLasagna(source.http) });
+  } catch (error) {
+    console.error("Failed to find the Lasagna prediction:", error);
+    res.status(502).json({ error: (error as Error).message });
+  }
 });
 
 export default router;

@@ -29,10 +29,16 @@ export interface Board {
     height: number;
     // Stacking order, lowest first.
     z: number;
+    // A slice through the scan, or a piece of one sheet (a surface card).
+    kind: "slice" | "surface";
+    // The slice's plane; a surface card keeps the one it was opened from.
     orientation: "xy" | "xz" | "yz";
     // The source it shows, from `sources.json`; null for a card that has not been given one.
     sourceId: string | null;
     groupId: string;
+    // A surface card's sheet: the voxel it was opened on, how many sheets it has moved from there
+    // (w, fractional; positive is outward), and its scale in voxels per pixel.
+    surface?: { seed: { x: number; y: number; z: number }; w: number; zoom: number };
   }[];
 }
 
@@ -59,6 +65,17 @@ function number(value: unknown, fallback: number) {
 
 function text(value: unknown) {
   return typeof value === "string" ? value : "";
+}
+
+function parseSurface(value: any): Board["cards"][0]["surface"] {
+  const seed = value?.seed;
+  const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v);
+  if (![seed?.x, seed?.y, seed?.z].every(finite)) return undefined;
+  return {
+    seed: { x: seed.x, y: seed.y, z: seed.z },
+    w: number(value.w, 0),
+    zoom: Math.max(1e-3, number(value.zoom, 1)),
+  };
 }
 
 /**
@@ -103,6 +120,7 @@ export function parseBoard(value: any): Board {
         board.groups.push({ id: groupId, hue: 0, position: null, zoom: null });
         known.add(groupId);
       }
+      const surface = parseSurface(card.surface);
       return {
         id: text(card.id),
         x: number(card.x, 0),
@@ -110,9 +128,12 @@ export function parseBoard(value: any): Board {
         width: Math.max(1, number(card.width, 340)),
         height: Math.max(1, number(card.height, 300)),
         z: number(card.z, index),
+        // A surface card that has lost its sheet is of no use as one; it shows the slice instead.
+        kind: card.kind === "surface" && surface !== undefined ? "surface" : "slice",
         orientation: text(card.orientation) as Board["cards"][0]["orientation"],
         sourceId: text(card.sourceId) === "" ? null : text(card.sourceId),
         groupId,
+        ...(surface === undefined ? {} : { surface }),
       };
     });
   // Groups nothing refers to any more.

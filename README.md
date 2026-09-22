@@ -12,11 +12,12 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
 
 ## What it does
 
-- **A board of cards.** Double click the board to add a card. Dragging the data pans the slice, the
-  wheel steps through the slices and Ctrl and the wheel zooms one; a card is moved by the lines above
-  and below it, or Alt and a drag, and resized by its corner. The board is panned with two fingers,
-  Space and a drag, or a middle drag, and zoomed with a pinch (or Ctrl and the wheel) — the cards get
-  larger without showing more data.
+- **A board of cards.** Double click the board to add a card. A card is moved by dragging it
+  anywhere and resized by its corner; the board is panned with two fingers, Space and a drag, or a
+  middle drag, and zoomed with a pinch (or Ctrl and the wheel) — the cards get larger without showing
+  more data. **What a card shows only moves while Alt is held**: Alt and a drag pans the data, Alt
+  and the wheel steps through the slices, and Alt and Ctrl and the wheel zooms them. Without that,
+  picking a card up or scrolling the board past it would move the data inside it by accident.
 - **Selecting cards.** Click a card to select it, Shift click to add another, or drag the board to
   pick out an area and take every card it touches. Dragging any of them then moves them all, and what
   is selected is what copy and paste acts on.
@@ -32,6 +33,15 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
   third; paste several selected cards and each copy is linked to the card it came from. The ⛓ on a
   card says how many move with it, and a click takes it out. **+ linked x/y/z** puts all three planes
   down at once.
+- **Surface cards: a piece of one sheet, laid flat.** Right-click a slice card's data on a sheet of
+  papyrus and choose **Open surface here**: a card beside it shows that piece of the sheet flattened,
+  at the slice's scale, and Alt and the wheel moves through the scroll from one sheet to the next —
+  each whole step of `w` is a sheet and each half a gap between two, counting outward. Going further
+  than the piece reaches builds another one around the sheet reached, so a card can keep going. It is
+  worked out as you look from the Vesuvius Challenge's Lasagna prediction of the scan (the sheets'
+  normals and where the sheets are), so it is there for the scans that have one — Scrolls 1–4 among
+  them, not Scroll 5 — and it is as good as the prediction: where the papyrus is crumpled, it loses
+  the sheet.
 - **A card says what it is.** A card's frame is the data and nothing else, so it can be made square;
   the plane it shows, the scan it shows and the voxel it is looking at are written just above and
   just below the frame, over the board rather than over the data. All of it stays on screen, so a
@@ -64,15 +74,19 @@ start; the finest scans are hundreds of gigabytes, of which you only ever downlo
   and every change that can be made to it (`state.ts`), the mouse, trackpad and keyboard input
   (`gestures.ts`), the pan and zoom (`transform.ts`), the linked sets (`links.ts`) and the viewer,
   volumes and groups that outlive a render (`session.ts`). `src/components/` draws it (`App.tsx`,
-  `CardView.tsx`, `SourcePicker.tsx`, `BoardMenu.tsx`), and `src/api/` talks to the server (the data
-  bucket and this machine's folders in `catalog.ts`, the sources in `sources.ts`, the saved board in
-  `storage.ts`).
+  `CardView.tsx`, `SurfaceCardView.tsx`, `SourcePicker.tsx`, `BoardMenu.tsx`), and `src/api/` talks to
+  the server (the data bucket and this machine's folders in `catalog.ts`, the sources in
+  `sources.ts`, a scan's Lasagna prediction in `lasagna.ts`, the saved board in `storage.ts`).
+  `src/surface/` is the surface cards' worker: the arrays it reads (`store.ts`), the prediction as a
+  field (`field.ts`), a piece of sheet and its neighbours built from it (`patch.ts`), and a sheet
+  drawn from the scan (`render.ts`).
 - `server/`: the zarr stores (Node, Express). `GET /api/data/<sourceId>/<key>` serves a file of a
-  source, downloading it first if its folder does not have it; `/api/scrolls` lists the data bucket,
-  `/api/folders` this machine's folders, and `/api/sources` and `/api/board` keep the sources and the
-  board in `server/db/json/`.
-- `viewer/`: the viewer library, a copy of Neuroglancer Mini's. Changes here should go back there
-  too, so that the two stay the same.
+  source, downloading it first if its folder does not have it; `/api/sources/<id>/lasagna` finds the
+  Lasagna prediction of a source's scan, each of whose arrays is a source too; `/api/scrolls` lists
+  the data bucket, `/api/folders` this machine's folders, and `/api/sources` and `/api/board` keep
+  the sources and the board in `server/db/json/`.
+- `viewer/`: the viewer library, which started as a copy of Neuroglancer Mini's and is now this
+  project's own.
 - `scripts/start.js`: installs, builds, starts both and opens the page.
 - `docs/whiteboard.md`: what the viewer needed for this board, and what the board does not do yet.
 

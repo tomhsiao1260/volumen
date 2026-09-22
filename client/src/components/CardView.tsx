@@ -2,6 +2,9 @@
  * @file One card: a frame in board coordinates showing a cross-section of the scan it names.  A card
  * with no source asks which one to show instead (see `SourcePicker.tsx`).
  *
+ * The data is only moved while Alt is held, so that dragging a card, or the board under it, never
+ * moves what the card is looking at by accident.
+ *
  * The card's frame is the data and nothing else, so it can be made square; what the card says about
  * itself — the plane, the scan, the voxel it is looking at — floats just above and just below the
  * frame, over the board rather than over the data.  All of it stays on screen, because that is what
@@ -12,6 +15,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { Point, ViewOrientation } from "viewer";
+import { getLasagna } from "../api/lasagna";
 import { sourceLabel } from "../api/sources";
 import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
@@ -20,12 +24,12 @@ import { SourcePicker } from "./SourcePicker";
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
 
-function formatVoxel({ x, y, z }: Point) {
+export function formatVoxel({ x, y, z }: Point) {
   return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
 }
 
 // A scan is named for the card without saying that it is masked, which nearly all of them are.
-function shorten(name: string) {
+export function shorten(name: string) {
   return name.replace(/\s*·\s*masked$/, "");
 }
 
@@ -44,6 +48,19 @@ export interface CardViewProps {
   onLooked: () => void;
   // Takes this card out of its group, keeping it where it is looking.
   onUnlink: () => void;
+  // Opens a surface card on the sheet at `seed`.
+  onOpenSurface: (seed: Point) => void;
+}
+
+/**
+ * The menu a right click on the data opens: where it was opened, in the card's own pixels, on which
+ * voxel, and whether this scan has a surface prediction, which is asked as the menu opens.
+ */
+interface CardMenu {
+  x: number;
+  y: number;
+  point: Point;
+  surface: "asking" | "yes" | "no" | "unknown";
 }
 
 export function CardView({
@@ -57,6 +74,7 @@ export function CardView({
   dispatch,
   onLooked,
   onUnlink,
+  onOpenSurface,
 }: CardViewProps) {
   const slice = useRef<HTMLDivElement>(null);
   const [failed, setFailed] = useState(false);
@@ -64,7 +82,23 @@ export function CardView({
   const [centre, setCentre] = useState<Point>();
   const [pointer, setPointer] = useState<Point>();
   const [planeMenu, setPlaneMenu] = useState(false);
+  const [menu, setMenu] = useState<CardMenu>();
   const { sourceId, orientation, groupId } = card;
+
+  // The menu goes away on a press anywhere else, and on Escape.
+  useEffect(() => {
+    if (menu === undefined) return;
+    const onDown = (event: PointerEvent) => {
+      if (!(event.target as Element).closest?.(".card-menu")) setMenu(undefined);
+    };
+    const onKey = (event: KeyboardEvent) => event.key === "Escape" && setMenu(undefined);
+    document.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
 
   // The viewer's side of the card: one view, for as long as it shows this scan in this plane.
   useEffect(() => {
@@ -76,6 +110,9 @@ export function CardView({
       orientation,
       navigation,
     });
+    // The view navigates only while Alt is held; every other press and wheel belongs to the board,
+    // which moves the card or the board itself.
+    added.handleInput = (event) => event.altKey;
     setFailed(false);
     setLoaded(false);
     setCentre(navigation.position);
@@ -84,6 +121,8 @@ export function CardView({
       onLooked();
     });
     const unwatch = session.watchPointer(added, setPointer);
+    // Asked now, so that the menu knows whether a surface can be opened by the time it is opened.
+    getLasagna(sourceId).catch(() => {});
     let current = true;
     volume.loaded.then(
       () => current && setLoaded(true),
@@ -179,7 +218,29 @@ export function CardView({
         </button>
       </div>
 
-      <div className="card-body">
+      <div
+        className="card-body"
+        onContextMenu={(event) => {
+          event.preventDefault();
+          if (sourceId === null || pointer === undefined) return;
+          const rect = event.currentTarget.getBoundingClientRect();
+          // The card is drawn scaled with the board; the menu is placed in the card's own pixels.
+          const scale = rect.width / card.width;
+          setMenu({
+            x: (event.clientX - rect.left) / scale,
+            y: (event.clientY - rect.top) / scale,
+            point: pointer,
+            surface: "asking",
+          });
+          getLasagna(sourceId).then(
+            (lasagna) => setMenu((open) => open && { ...open, surface: lasagna === null ? "no" : "yes" }),
+            (error) => {
+              console.error("Failed to ask for the surface prediction:", error);
+              setMenu((open) => open && { ...open, surface: "unknown" });
+            },
+          );
+        }}
+      >
         {/* The viewer puts its canvas inside this element, so it has no border or padding. */}
         <div className="card-slice" ref={slice} />
         {sourceId === null && (
@@ -210,6 +271,29 @@ export function CardView({
         )}
         <div className="card-resize" title="Resize" />
       </div>
+
+      {menu !== undefined && (
+        <div className="card-menu" style={{ left: menu.x, top: menu.y }}>
+          <button
+            disabled={menu.surface !== "yes"}
+            onClick={() => {
+              setMenu(undefined);
+              onOpenSurface(menu.point);
+            }}
+          >
+            Open surface here
+          </button>
+          {menu.surface !== "yes" && (
+            <div className="card-menu-note">
+              {menu.surface === "asking"
+                ? "Looking for a surface prediction…"
+                : menu.surface === "no"
+                  ? "This scan has no surface prediction."
+                  : "Could not ask the server. See the browser console."}
+            </div>
+          )}
+        </div>
+      )}
 
       <div className="card-bottom">
         <span className={pointer === undefined ? "card-centre" : "card-pointer"}>

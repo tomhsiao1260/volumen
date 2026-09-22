@@ -6,7 +6,7 @@
  * the view drawing it belongs to the session (`session.ts`).
  */
 
-import type { ViewOrientation } from "viewer";
+import type { Point, ViewOrientation } from "viewer";
 import type { Source } from "../api/sources";
 import type { StoredBoard } from "../api/storage";
 import { newGroupHue, newGroupId, takeGroupIds } from "./links";
@@ -19,6 +19,14 @@ export const CARD_HEIGHT = 300;
 export const CARD_GAP = 16;
 export const MIN_CARD_SIZE = 140;
 
+// A surface card's sheet: the voxel it was opened on, how many sheets it has moved from there
+// (fractional, positive outward), and its scale in full-resolution voxels per pixel.
+export interface SurfaceState {
+  seed: Point;
+  w: number;
+  zoom: number;
+}
+
 export interface CardState {
   id: string;
   x: number;
@@ -27,9 +35,13 @@ export interface CardState {
   height: number;
   // Which card is in front, kept so that a saved board stacks the same way.
   z: number;
+  // A slice through the scan, or a piece of one of its sheets.
+  kind: "slice" | "surface";
+  // The slice's plane; a surface card keeps the one it was opened from.
   orientation: ViewOrientation;
   sourceId: string | null;
   groupId: string;
+  surface?: SurfaceState;
 }
 
 export interface BoardState {
@@ -66,6 +78,9 @@ function takeIds(ids: string[]) {
 
 export type BoardAction =
   | { type: "addCard"; at: Point2D; orientation?: ViewOrientation }
+  // A surface card beside card `from`, on the sheet at `seed`, showing what `from` shows.
+  | { type: "addSurfaceCard"; from: string; seed: Point; zoom: number }
+  | { type: "setSurfaceLayer"; id: string; w: number }
   | { type: "removeCard"; id: string }
   | { type: "moveSelection"; deltaX: number; deltaY: number }
   | { type: "resizeCard"; id: string; deltaX: number; deltaY: number }
@@ -100,6 +115,7 @@ export function boardReducer(
         width: CARD_WIDTH,
         height: CARD_HEIGHT,
         z: topZ(state) + 1,
+        kind: "slice",
         orientation: action.orientation ?? "xy",
         sourceId: null,
         groupId,
@@ -111,6 +127,40 @@ export function boardReducer(
         selection: [card.id],
       };
     }
+
+    case "addSurfaceCard": {
+      const from = find(state, action.from);
+      if (from === undefined || from.sourceId === null) return state;
+      const groupId = newGroupId();
+      const card: CardState = {
+        id: `c${nextCardId++}`,
+        ...beside(state, from),
+        width: from.width,
+        height: from.height,
+        z: topZ(state) + 1,
+        kind: "surface",
+        orientation: from.orientation,
+        sourceId: from.sourceId,
+        groupId,
+        surface: { seed: { ...action.seed }, w: 0, zoom: action.zoom },
+      };
+      return {
+        ...state,
+        cards: [...state.cards, card],
+        hues: { ...state.hues, [groupId]: newGroupHue() },
+        selection: [card.id],
+      };
+    }
+
+    case "setSurfaceLayer":
+      return {
+        ...state,
+        cards: state.cards.map((card) =>
+          card.id === action.id && card.surface !== undefined
+            ? { ...card, surface: { ...card.surface, w: action.w } }
+            : card,
+        ),
+      };
 
     case "removeCard":
       return {
@@ -255,13 +305,14 @@ export function boardReducer(
       let z = topZ(state);
       const hues = { ...state.hues };
       // Each copy joins the group of the card it came from, so that the two move together; a group
-      // whose cards have all been removed since the copy is made again.
+      // whose cards have all been removed since the copy is made again.  A surface card does not
+      // move with anything yet, so its copy is on its own.
       const pasted = clipboard.cards.map((card) => {
-        const groupId = state.cards.some(
-          (other) => other.groupId === card.groupId,
-        )
-          ? card.groupId
-          : newGroupId();
+        const groupId =
+          card.kind === "slice" &&
+          state.cards.some((other) => other.groupId === card.groupId)
+            ? card.groupId
+            : newGroupId();
         hues[groupId] ??= newGroupHue();
         return {
           ...card,
@@ -299,6 +350,7 @@ export function boardReducer(
         .sort((a, b) => a.z - b.z)
         .map((card, index) => ({
           ...card,
+          kind: card.kind ?? "slice",
           z: index + 1,
           // A card whose source the server no longer knows asks for one again.
           sourceId:
@@ -317,6 +369,37 @@ export function boardReducer(
       };
     }
   }
+}
+
+/**
+ * Somewhere to put a new card of the same size as `from`: the nearest place around it that no card
+ * is in, looked for to the right first and then around and further out.  The step down leaves room
+ * for the lines a card says what it is on, which lie above and below its frame.
+ */
+function beside(state: BoardState, from: CardState) {
+  const across = from.width + CARD_GAP;
+  const down = from.height + 3 * CARD_GAP;
+  const clear = (x: number, y: number) =>
+    !state.cards.some(
+      (card) =>
+        x < card.x + card.width + CARD_GAP &&
+        x + from.width + CARD_GAP > card.x &&
+        y < card.y + card.height + CARD_GAP &&
+        y + from.height + CARD_GAP > card.y,
+    );
+  for (let ring = 1; ring <= 4; ring++) {
+    // Right, below, left, above, then the corners, all `ring` steps out.
+    const steps = [
+      [1, 0], [0, 1], [-1, 0], [0, -1],
+      [1, 1], [-1, 1], [1, -1], [-1, -1],
+    ];
+    for (const [sx, sy] of steps) {
+      const x = from.x + sx * ring * across;
+      const y = from.y + sy * ring * down;
+      if (clear(x, y)) return { x, y };
+    }
+  }
+  return { x: from.x + across, y: from.y };
 }
 
 function find(state: BoardState, id: string) {
@@ -361,9 +444,11 @@ export function serialize(
       width: card.width,
       height: card.height,
       z: card.z,
+      kind: card.kind,
       orientation: card.orientation,
       sourceId: card.sourceId,
       groupId: card.groupId,
+      ...(card.surface === undefined ? {} : { surface: card.surface }),
     })),
   };
 }

@@ -3,15 +3,18 @@
  *
  *   - click a card: select it, which is what the keyboard and a drag then act on; Shift adds one
  *   - drag the background: pick out an area, selecting every card it touches
- *   - drag the data: pan the slice, which the view does itself
- *   - drag a card's lines, or Alt and drag it anywhere: move it, and everything else selected
+ *   - drag a card anywhere: move it, and everything else selected
  *   - drag a card's corner: resize it
  *   - middle drag, or Space and drag, anywhere: pan the board
- *   - two fingers, or the wheel, outside the data: pan the board
- *   - pinch, or Control and the wheel, outside the data: zoom the board around the pointer
- *   - wheel over the data: step through the slices; with Control: zoom the slice (both the view's)
+ *   - two fingers, or the wheel, anywhere: pan the board
+ *   - pinch, or Control and the wheel: zoom the board around the pointer
  *   - double click on the background: add a card there
  *   - copy and paste: add a copy of everything selected beside it, and linked to it
+ *
+ * What a card shows is moved only with Alt held — Alt and drag pans the data, Alt and the wheel
+ * steps through the slices, Alt and Control and the wheel zooms it (all the view's own, see
+ * `handleInput` in `CardView.tsx`).  Without that, picking a card up or scrolling the board past it
+ * would move the data inside it by accident.
  */
 
 import { useEffect } from "react";
@@ -181,22 +184,18 @@ export function useBoardGestures({
         );
         return;
       }
-      // The lines above and below the data are what a card is dragged by; Alt does it from anywhere.
-      const onLine =
-        target.closest(".card-top") !== null ||
-        target.closest(".card-bottom") !== null;
-      if (onLine || event.altKey) {
+      // A card is dragged by any part of it; with Alt the view pans the data instead, and a list a
+      // card is showing keeps its own drag.
+      if (!event.altKey && target.closest(".card-overlay") === null) {
         drag(event, scale, (deltaX, deltaY) =>
           dispatch({ type: "moveSelection", deltaX, deltaY }),
         );
       }
-      // Anywhere else is the data, which the view pans itself.
     };
 
     const onWheel = (event: WheelEvent) => {
-      // Over the data the view has already taken the wheel — a slice step, or a zoom with Control —
-      // and stopped the event, so this only sees the board's background and the cards' lines.  A
-      // card that is showing a list scrolls it instead.
+      // With Alt the view has already taken the wheel — a slice step, or a zoom with Control — and
+      // stopped the event, so this sees everything else.  A card that is showing a list scrolls it.
       if ((event.target as HTMLElement).closest(".card-overlay") !== null) {
         return;
       }

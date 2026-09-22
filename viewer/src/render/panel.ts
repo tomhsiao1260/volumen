@@ -200,7 +200,8 @@ function getWheelZoomAmount(event: WheelEvent) {
  *   - wheel: move one voxel along the viewing direction
  *   - control+wheel: zoom around the mouse position
  *
- * `handleInput` lets the page take any of them over.
+ * `handleInput` lets the page take any of them over, and decide which events count as navigation at
+ * all — a board where a drag moves the card can ask for a modifier to be held first.
  */
 export class SliceViewPanel extends RefCounted {
   gl: GL = this.viewer.display.gl;
@@ -211,9 +212,10 @@ export class SliceViewPanel extends RefCounted {
   renderViewport = new RenderViewport();
 
   /**
-   * Whether the view handles `event` itself.  Return `false` to leave it to the page, so that a
-   * board of views can take the wheel for its own zoom, say; the view then does not stop the event.
-   * By default the view handles all of them.
+   * Whether the view handles `event` itself, rather than leaving it to the page — the view then does
+   * not stop the event, so that a board can take the wheel for its own zoom, say.  A view given one
+   * of these asks it about every event, including those with a modifier held; one without handles
+   * the unmodified ones, plus control and the wheel to zoom.
    */
   handleInput: ((event: MouseEvent) => boolean) | undefined;
 
@@ -320,21 +322,27 @@ export class SliceViewPanel extends RefCounted {
     const onSlice = (event: MouseEvent) =>
       event.target === canvas || event.target === element;
 
+    // What the page says, or the usual rule for a view that was given nothing to say it with.
+    const handles = (event: MouseEvent, usual: boolean) =>
+      this.handleInput === undefined ? usual : this.handleInput(event);
+
     const onMouseDown = (event: MouseEvent) => {
       if (!onSlice(event) || event.button !== 0) return;
-      if (!hasNoModifiers(event) || this.handleInput?.(event) === false) return;
+      if (!handles(event, hasNoModifiers(event))) return;
       event.stopPropagation();
       this.startDrag(event);
       event.preventDefault();
     };
 
     const onWheel = (event: WheelEvent) => {
-      if (this.handleInput?.(event) === false) return;
-      if (hasOnlyControl(event)) {
+      if (!handles(event, hasNoModifiers(event) || hasOnlyControl(event))) return;
+      // Control and the wheel zooms, as it does over a page; the wheel alone moves through the
+      // slices.
+      if (event.ctrlKey || event.metaKey) {
         event.stopPropagation();
         this.zoomByMouse(event, getWheelZoomAmount(event));
         event.preventDefault();
-      } else if (onSlice(event) && hasNoModifiers(event)) {
+      } else if (onSlice(event)) {
         event.stopPropagation();
         const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
         this.stepSlices(delta > 0 ? -1 : 1);

@@ -25,9 +25,12 @@ export interface StoredBoard {
     width: number;
     height: number;
     z: number;
+    // Missing on boards saved before there were surface cards.
+    kind?: "slice" | "surface";
     orientation: "xy" | "xz" | "yz";
     sourceId: string | null;
     groupId: string;
+    surface?: { seed: { x: number; y: number; z: number }; w: number; zoom: number };
   }[];
 }
 

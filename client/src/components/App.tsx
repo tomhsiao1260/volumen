@@ -26,6 +26,7 @@ import {
 import { cssTransform, toBoard } from "../board/transform";
 import { BoardMenu } from "./BoardMenu";
 import { CardView } from "./CardView";
+import { SurfaceCardView } from "./SurfaceCardView";
 
 // A lost context is worth rebuilding through, up to this many times in `RECOVERY_WINDOW_MS`; beyond
 // that the page is asking for a graphics context it cannot keep, and rebuilding makes it worse.
@@ -201,6 +202,9 @@ export function App() {
         get viewer() {
           return sessionRef.current?.viewer;
         },
+        get session() {
+          return sessionRef.current;
+        },
         dispatch,
       },
     });
@@ -245,23 +249,42 @@ export function App() {
         style={{ transform: cssTransform(state.view) }}
       >
         {session !== null &&
-          state.cards.map((card) => (
-            <CardView
-              key={card.id}
-              card={card}
-              source={
-                card.sourceId === null ? undefined : state.sources[card.sourceId]
-              }
-              hue={state.hues[card.groupId] ?? 0}
-              selected={state.selection.includes(card.id)}
-              linked={groupSize(state, card)}
-              session={session}
-              generation={generation}
-              dispatch={dispatch}
-              onLooked={() => restoredRef.current && store.schedule()}
-              onUnlink={() => unlink(card)}
-            />
-          ))}
+          state.cards.map((card) => {
+            const source =
+              card.sourceId === null ? undefined : state.sources[card.sourceId];
+            return card.kind === "surface" ? (
+              <SurfaceCardView
+                key={card.id}
+                card={card}
+                source={source}
+                selected={state.selection.includes(card.id)}
+                dispatch={dispatch}
+              />
+            ) : (
+              <CardView
+                key={card.id}
+                card={card}
+                source={source}
+                hue={state.hues[card.groupId] ?? 0}
+                selected={state.selection.includes(card.id)}
+                linked={groupSize(state, card)}
+                session={session}
+                generation={generation}
+                dispatch={dispatch}
+                onLooked={() => restoredRef.current && store.schedule()}
+                onUnlink={() => unlink(card)}
+                onOpenSurface={(seed) =>
+                  dispatch({
+                    type: "addSurfaceCard",
+                    from: card.id,
+                    seed,
+                    // At the scale the slice is seen at.
+                    zoom: sessionRef.current?.group(card.groupId).navigation?.zoom ?? 1,
+                  })
+                }
+              />
+            );
+          })}
       </div>
 
       <div id="board-marquee" ref={setMarquee} hidden />

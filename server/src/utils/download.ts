@@ -65,7 +65,13 @@ async function fetchFile(
   file: string,
 ): Promise<DownloadResult> {
   const url = `${remoteUrl}/${key}`;
-  const response = await fetch(url);
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (error) {
+    // The connection dropped, which the bucket does now and then: worth asking again.
+    throw new RetryableError(`Fetching ${url} failed: ${(error as Error).message}`);
+  }
   // S3 answers 403 rather than 404 for a missing file.
   if (response.status === 404 || response.status === 403) return "missing";
   if (RETRYABLE_STATUS.has(response.status)) {
