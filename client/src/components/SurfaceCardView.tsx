@@ -4,6 +4,10 @@
  *
  * Alt and the wheel moves through the sheets, an eighth of one at a time: whole `w` are sheets and
  * halves the gaps between them.  As everywhere on the board, the data only moves while Alt is held.
+ *
+ * A card shows one of the sheet's own planes, as a slice card shows one of the scan's: UV is the
+ * sheet laid flat, UW and VW cut across the sheets, where a piece that is right shows them as level
+ * bands.  The badge changes it.
  */
 
 import { useEffect, useRef, useState } from "react";
@@ -12,7 +16,7 @@ import type { Source } from "../api/sources";
 import { sourceLabel } from "../api/sources";
 import type { BoardAction, CardState } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
-import type { FrameEvent, SurfaceFacts, SurfaceStatus } from "../surface/types";
+import type { FrameEvent, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { formatVoxel, shorten } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
@@ -24,6 +28,14 @@ const PER_PIXEL = 1 / 400;
 // What the card found is for whoever is working on it, not for the board: it is written to the
 // console of a page opened with `?debug`, like the rest of the handles there.
 const DEBUG = new URLSearchParams(window.location.search).has("debug");
+
+const PLANES: SurfacePlane[] = ["uv", "uw", "vw"];
+
+const PLANE_TITLES: Record<SurfacePlane, string> = {
+  uv: "The sheet, laid flat",
+  uw: "Across the sheets, along the sheet's width",
+  vw: "Across the sheets, along the scroll",
+};
 
 function formatLayer(w: number) {
   return `w ${w < 0 ? "−" : "+"}${Math.abs(w).toFixed(2)}`;
@@ -63,12 +75,16 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   const [status, setStatus] = useState<Status>("loading");
   const [drawn, setDrawn] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [planeMenu, setPlaneMenu] = useState(false);
   const surface = card.surface!;
   const { id, sourceId } = card;
-  const { seed, zoom, w } = surface;
-  // The sheet asked for last, which the wheel adds to before the state has caught up.
+  const { seed, zoom, w, plane } = surface;
+  // The sheet and plane asked for last, which the wheel and the badge change before the state has
+  // caught up, and which a frame is compared against to know whether it is the one being waited for.
   const wanted = useRef(w);
   wanted.current = w;
+  const wantedPlane = useRef(plane);
+  wantedPlane.current = plane;
   // The size the sheet was built for; it is not built again while the card is resized, since the
   // sheet it shows does not change.
   const size = useRef({ width: card.width, height: card.height });
@@ -92,8 +108,12 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
     context.putImageData(into, 0, 0);
     shown.current = frame.w;
     setDrawn(true);
-    // Still loading while this is not the sheet asked for last, or not all of it.
-    setLoading(frame.loading || (!frame.limited && frame.w !== wanted.current));
+    // Still loading while this is not the sheet and plane asked for last, or not all of it.
+    setLoading(
+      frame.loading ||
+        frame.plane !== wantedPlane.current ||
+        (!frame.limited && frame.w !== wanted.current),
+    );
   };
 
   useEffect(() => {
@@ -120,6 +140,7 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
             lasagna,
             seed,
             w: wanted.current,
+            plane,
             zoom,
             // The frame inside the card's border.
             width: size.current.width - 2,
@@ -153,9 +174,9 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   }, [id, sourceId, seed, zoom]);
 
   useEffect(() => {
-    surfaceEngine().layer(id, w);
-    if (shown.current !== w) setLoading(true);
-  }, [id, w]);
+    surfaceEngine().show(id, w, plane);
+    setLoading(true);
+  }, [id, w, plane]);
 
   /*
    * Alt and the wheel moves through the sheets: a notch is an eighth of one and a trackpad moves
@@ -200,8 +221,31 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
       }}
     >
       <div className="card-top">
-        <span className="card-plane card-kind" title="A piece of one sheet">
-          SURFACE
+        <span className="card-planes">
+          <button
+            className="card-plane"
+            title={PLANE_TITLES[plane]}
+            onClick={() => setPlaneMenu(!planeMenu)}
+            onBlur={() => setTimeout(() => setPlaneMenu(false), 120)}
+          >
+            {plane.toUpperCase()}
+          </button>
+          {planeMenu && (
+            <div className="card-plane-menu">
+              {PLANES.map((value) => (
+                <button
+                  key={value}
+                  title={PLANE_TITLES[value]}
+                  onClick={() => {
+                    setPlaneMenu(false);
+                    dispatch({ type: "setSurfacePlane", id: card.id, plane: value });
+                  }}
+                >
+                  {value.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
         </span>
         <span className="card-name">{source === undefined ? "" : shorten(sourceLabel(source))}</span>
         <button

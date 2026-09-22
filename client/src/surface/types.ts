@@ -3,6 +3,9 @@
  */
 
 import type { Lasagna } from "../api/lasagna";
+import type { SurfacePlane } from "./render";
+
+export type { SurfacePlane };
 
 // Opens a surface card: finds the sheet at `seed` and builds the piece of it the card covers, with
 // the sheets either side of it.
@@ -16,17 +19,20 @@ export interface OpenRequest {
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.
   w: number;
+  // Which of the sheet's own planes to draw.
+  plane: SurfacePlane;
   // Full-resolution voxels per pixel, and the size of the card's data in pixels.
   zoom: number;
   width: number;
   height: number;
 }
 
-// Shows another sheet, or between two.
-export interface LayerRequest {
-  type: "layer";
+// Shows another sheet, or another of the sheet's planes.
+export interface ShowRequest {
+  type: "show";
   id: string;
   w: number;
+  plane: SurfacePlane;
 }
 
 export interface CloseRequest {
@@ -34,7 +40,7 @@ export interface CloseRequest {
   id: string;
 }
 
-export type SurfaceRequest = OpenRequest | LayerRequest | CloseRequest;
+export type SurfaceRequest = OpenRequest | ShowRequest | CloseRequest;
 
 export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "failed";
 
@@ -63,9 +69,10 @@ export interface StatusEvent {
 export interface FrameEvent {
   type: "frame";
   id: string;
-  // The sheet drawn, which is the one asked for unless the sheets could not be followed that far —
-  // and whether that is why it differs.
+  // The sheet and plane drawn; the sheet is the one asked for unless the sheets could not be
+  // followed that far, which `limited` says.
   w: number;
+  plane: SurfacePlane;
   limited: boolean;
   width: number;
   height: number;

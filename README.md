@@ -37,7 +37,10 @@ reduced copy of the [Neuroglancer](https://github.com/google/neuroglancer) sourc
   papyrus and choose **Open surface here**: a card beside it shows that piece of the sheet flattened,
   at the slice's scale, and Alt and the wheel moves through the scroll from one sheet to the next —
   each whole step of `w` is a sheet and each half a gap between two, counting outward. Going further
-  than the piece reaches builds another one around the sheet reached, so a card can keep going. It is
+  than the piece reaches builds another one around the sheet reached, so a card can keep going. The
+  badge switches between the sheet's own planes, as a slice card's does between the scan's: **UV** is
+  the sheet laid flat, **UW** and **VW** cut across the sheets, where a piece that is right shows
+  them as level bands — which is how to see whether it is. It is
   worked out as you look from the Vesuvius Challenge's Lasagna prediction of the scan (the sheets'
   normals and where the sheets are), so it is there for the scans that have one — Scrolls 1–4 among
   them, not Scroll 5 — and it is as good as the prediction: where the papyrus is crumpled, it loses

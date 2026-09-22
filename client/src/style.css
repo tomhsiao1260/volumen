@@ -285,11 +285,6 @@ button {
   height: 100%;
 }
 
-/* A surface card says what it is where a slice card says its plane. */
-.card-kind {
-  cursor: move;
-}
-
 /* How far through the sheets a surface card is, dimmed while it is still being drawn. */
 .card-layer {
   color: var(--text);

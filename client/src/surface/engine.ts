@@ -3,7 +3,7 @@
  * the chunks they read.  A card opens itself with its parameters and hears back how it is doing.
  */
 
-import type { OpenRequest, SurfaceEvent, SurfaceRequest } from "./types";
+import type { OpenRequest, SurfaceEvent, SurfacePlane, SurfaceRequest } from "./types";
 
 class SurfaceEngine {
   private worker = new Worker(new URL("./worker.ts", import.meta.url), {
@@ -27,8 +27,8 @@ class SurfaceEngine {
     this.post({ type: "open", ...request });
   }
 
-  layer(id: string, w: number) {
-    this.post({ type: "layer", id, w });
+  show(id: string, w: number, plane: SurfacePlane) {
+    this.post({ type: "show", id, w, plane });
   }
 
   close(id: string) {

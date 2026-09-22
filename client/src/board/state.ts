@@ -7,6 +7,7 @@
  */
 
 import type { Point, ViewOrientation } from "viewer";
+import type { SurfacePlane } from "../surface/types";
 import type { Source } from "../api/sources";
 import type { StoredBoard } from "../api/storage";
 import { newGroupHue, newGroupId, takeGroupIds } from "./links";
@@ -19,11 +20,15 @@ export const CARD_HEIGHT = 300;
 export const CARD_GAP = 16;
 export const MIN_CARD_SIZE = 140;
 
-// A surface card's sheet: the voxel it was opened on, how many sheets it has moved from there
-// (fractional, positive outward), and its scale in full-resolution voxels per pixel.
+/**
+ * A surface card's sheet: the voxel it was opened on, how many sheets it has moved from there
+ * (fractional, positive outward), which of the sheet's own planes it draws, and its scale in
+ * full-resolution voxels per pixel.
+ */
 export interface SurfaceState {
   seed: Point;
   w: number;
+  plane: SurfacePlane;
   zoom: number;
 }
 
@@ -81,6 +86,7 @@ export type BoardAction =
   // A surface card beside card `from`, on the sheet at `seed`, showing what `from` shows.
   | { type: "addSurfaceCard"; from: string; seed: Point; zoom: number }
   | { type: "setSurfaceLayer"; id: string; w: number }
+  | { type: "setSurfacePlane"; id: string; plane: SurfacePlane }
   | { type: "removeCard"; id: string }
   | { type: "moveSelection"; deltaX: number; deltaY: number }
   | { type: "resizeCard"; id: string; deltaX: number; deltaY: number }
@@ -142,7 +148,7 @@ export function boardReducer(
         orientation: from.orientation,
         sourceId: from.sourceId,
         groupId,
-        surface: { seed: { ...action.seed }, w: 0, zoom: action.zoom },
+        surface: { seed: { ...action.seed }, w: 0, plane: "uv", zoom: action.zoom },
       };
       return {
         ...state,
@@ -151,6 +157,16 @@ export function boardReducer(
         selection: [card.id],
       };
     }
+
+    case "setSurfacePlane":
+      return {
+        ...state,
+        cards: state.cards.map((card) =>
+          card.id === action.id && card.surface !== undefined
+            ? { ...card, surface: { ...card.surface, plane: action.plane } }
+            : card,
+        ),
+      };
 
     case "setSurfaceLayer":
       return {

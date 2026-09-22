@@ -402,6 +402,33 @@ export function buildPatch(
 }
 
 /**
+ * Where grid point (`gi`, `gj`) of sheet `w` sits in the scan (sheets from the piece's own, both the
+ * point and the sheet fractional), written into `out`; false where the table has nothing there.
+ */
+export function positionAt(patch: Patch, w: number, gi: number, gj: number, out: Float64Array) {
+  const { nu, nv, K, per, P } = patch;
+  const count = nu * nv;
+  const at = (w + K) * per;
+  if (at < 0 || at > 2 * K * per || gi < 0 || gj < 0 || gi > nv - 1 || gj > nu - 1) return false;
+  const k0 = Math.min(Math.floor(at), 2 * K * per - 1), tk = at - k0;
+  const i0 = Math.min(Math.floor(gi), nv - 2), ti = gi - i0;
+  const j0 = Math.min(Math.floor(gj), nu - 2), tj = gj - j0;
+  out[0] = out[1] = out[2] = 0;
+  for (let dk = 0; dk < 2; dk++)
+    for (let di = 0; di < 2; di++)
+      for (let dj = 0; dj < 2; dj++) {
+        const weight = (dk ? tk : 1 - tk) * (di ? ti : 1 - ti) * (dj ? tj : 1 - tj);
+        if (weight === 0) continue;
+        const o = (((k0 + dk) * count + (i0 + di) * nu + j0 + dj)) * 3;
+        if (Number.isNaN(P[o])) return false;
+        out[0] += weight * P[o];
+        out[1] += weight * P[o + 1];
+        out[2] += weight * P[o + 2];
+      }
+  return true;
+}
+
+/**
  * The grid of layer `w` (sheets from the base, fractional): positions (flat z, y, x, row by row),
  * NaN where the table has nothing, linear between the table's layers.
  */

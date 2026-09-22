@@ -30,7 +30,12 @@ export interface StoredBoard {
     orientation: "xy" | "xz" | "yz";
     sourceId: string | null;
     groupId: string;
-    surface?: { seed: { x: number; y: number; z: number }; w: number; zoom: number };
+    surface?: {
+      seed: { x: number; y: number; z: number };
+      w: number;
+      plane: "uv" | "uw" | "vw";
+      zoom: number;
+    };
   }[];
 }
 

@@ -37,8 +37,14 @@ export interface Board {
     sourceId: string | null;
     groupId: string;
     // A surface card's sheet: the voxel it was opened on, how many sheets it has moved from there
-    // (w, fractional; positive is outward), and its scale in voxels per pixel.
-    surface?: { seed: { x: number; y: number; z: number }; w: number; zoom: number };
+    // (w, fractional; positive is outward), which of the sheet's own planes it draws, and its scale
+    // in voxels per pixel.
+    surface?: {
+      seed: { x: number; y: number; z: number };
+      w: number;
+      plane: "uv" | "uw" | "vw";
+      zoom: number;
+    };
   }[];
 }
 
@@ -67,6 +73,8 @@ function text(value: unknown) {
   return typeof value === "string" ? value : "";
 }
 
+const PLANES = new Set(["uv", "uw", "vw"]);
+
 function parseSurface(value: any): Board["cards"][0]["surface"] {
   const seed = value?.seed;
   const finite = (v: unknown) => typeof v === "number" && Number.isFinite(v);
@@ -74,6 +82,9 @@ function parseSurface(value: any): Board["cards"][0]["surface"] {
   return {
     seed: { x: seed.x, y: seed.y, z: seed.z },
     w: number(value.w, 0),
+    plane: PLANES.has(text(value.plane))
+      ? (text(value.plane) as "uv" | "uw" | "vw")
+      : "uv",
     zoom: Math.max(1e-3, number(value.zoom, 1)),
   };
 }

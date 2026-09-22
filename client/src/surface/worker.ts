@@ -14,7 +14,8 @@ import { chunksFor, LasagnaField } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, layerGrid, outward } from "./patch";
-import { drawLayer, layerChunks } from "./render";
+import type { SurfacePlane } from "./render";
+import { drawPlane, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
 import type { FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./types";
 
@@ -77,6 +78,8 @@ function channelLevel(sourceId: string, level: number) {
 
 // How far from its own sheet a piece is used before another is built around the sheet reached.
 const REBASE_AT = K - 0.75;
+// Sheets either side of the one the card is on that the cross-sections show.
+const SPAN = 2;
 // The level drawn first while the one asked for arrives: this many levels coarser.
 const PREVIEW_LEVELS = 2;
 // While chunks arrive, the sheet is drawn again at most this often.
@@ -102,18 +105,21 @@ class Card {
   // The sheet the piece was built on, counted from the one the card was opened on.
   private baseW = 0;
   private wanted: number;
+  private plane: SurfacePlane;
   private drawing = false;
   // Resolves the wait of the drawing in progress when another sheet is asked for.
   private changed: (() => void) | undefined;
 
   constructor(private request: OpenRequest) {
     this.wanted = request.w;
+    this.plane = request.plane;
     request.width = Math.max(1, Math.round(request.width));
     request.height = Math.max(1, Math.round(request.height));
   }
 
-  show(w: number) {
+  show(w: number, plane: SurfacePlane) {
     this.wanted = w;
+    this.plane = plane;
     this.changed?.();
     if (!this.drawing) this.run().catch((error) => this.fail(error));
   }
@@ -247,9 +253,10 @@ class Card {
     if (this.patch === undefined || this.scan === undefined) return;
     this.drawing = true;
     try {
-      let drawn: number | undefined;
-      while (!this.closed && drawn !== this.wanted) {
-        const w = this.wanted;
+      let drawn: string | undefined;
+      while (!this.closed && drawn !== `${this.wanted} ${this.plane}`) {
+        const w = this.wanted, plane = this.plane;
+        const asked = `${w} ${plane}`;
         const changed = new Promise<void>((resolve) => (this.changed = resolve));
         const reached = await this.reach(w);
         if (this.closed) return;
@@ -258,17 +265,18 @@ class Card {
         // The level whose voxels are about the size of a pixel, and a coarser one to start with.
         const fine = Math.max(0, Math.min(scan.length - 1, Math.floor(Math.log2(zoom) + 1e-6)));
         const preview = Math.min(scan.length - 1, fine + PREVIEW_LEVELS);
-        const grid = layerGrid(patch, reached - this.baseW);
+        const sheet = reached - this.baseW;
 
         // Nothing at all is not worth sending: the card goes on saying that it is loading.
         const send = () => {
           const pixels = new Uint8ClampedArray(width * height * 4);
-          const { coarser, drawn: painted } = drawLayer(grid, patch.nu, patch.nv, width, height, scan, fine, pixels);
+          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, SPAN, width, height, scan, fine, pixels);
           if (painted === 0) return coarser;
           const frame: FrameEvent = {
             type: "frame",
             id,
             w: reached,
+            plane,
             limited: reached !== w,
             width,
             height,
@@ -279,16 +287,16 @@ class Card {
           return coarser;
         };
 
-        drawn = w;
+        drawn = asked;
         if (send() > 0) {
           for (const level of preview === fine ? [fine] : [preview, fine]) {
-            const chunks = layerChunks(grid, patch.nu, patch.nv, scan[level]);
+            const chunks = planeChunks(patch, plane, sheet, SPAN, width, height, scan[level]);
             let arrived = false, last = performance.now();
             const loads = chunks.map((chunk) =>
               // A chunk that fails to arrive is drawn from a coarser level.
               scan[level].load(...chunk).catch(() => {}).then(() => {
                 arrived = true;
-                if (this.wanted === w && performance.now() - last > REDRAW_MS) {
+                if (this.wanted === w && this.plane === plane && performance.now() - last > REDRAW_MS) {
                   last = performance.now();
                   arrived = false;
                   send();
@@ -296,17 +304,19 @@ class Card {
               }),
             );
             await Promise.race([Promise.all(loads), changed]);
-            if (this.closed || this.wanted !== w) break;
+            if (this.closed || this.wanted !== w || this.plane !== plane) break;
             if (arrived) send();
           }
         }
-        if (this.closed || this.wanted !== w) continue;
-        // The sheets half a step either side, which the wheel most likely asks for next.
-        for (const next of [reached + 0.5, reached - 0.5]) {
-          if (Math.abs(next - this.baseW) > K) continue;
-          const around = layerGrid(patch, next - this.baseW);
-          for (const chunk of layerChunks(around, patch.nu, patch.nv, scan[fine])) {
-            scan[fine].load(...chunk).catch(() => {});
+        if (this.closed || this.wanted !== w || this.plane !== plane) continue;
+        // The sheets half a step either side, which the wheel most likely asks for next; the
+        // cross-sections already cover them.
+        if (plane === "uv") {
+          for (const next of [sheet + 0.5, sheet - 0.5]) {
+            if (Math.abs(next) > K) continue;
+            for (const chunk of planeChunks(patch, plane, next, SPAN, width, height, scan[fine])) {
+              scan[fine].load(...chunk).catch(() => {});
+            }
           }
         }
       }
@@ -327,8 +337,8 @@ worker.onmessage = ({ data: request }) => {
       void card.start();
       break;
     }
-    case "layer":
-      cards.get(request.id)?.show(request.w);
+    case "show":
+      cards.get(request.id)?.show(request.w, request.plane);
       break;
     case "close":
       cards.get(request.id)?.close();
