@@ -21,8 +21,10 @@ export interface OpenRequest {
   w: number;
   // Which of the sheet's own planes to draw.
   plane: SurfacePlane;
-  // Full-resolution voxels per pixel, and the size of the card's data in pixels.
+  // Full-resolution voxels per pixel of the card's layout, how many pixels it is drawn with per one
+  // of those, and the size of its data in the pixels it is drawn with.
   zoom: number;
+  density: number;
   width: number;
   height: number;
 }

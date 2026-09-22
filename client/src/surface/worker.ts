@@ -85,10 +85,14 @@ const PREVIEW_LEVELS = 2;
 // While chunks arrive, the sheet is drawn again at most this often.
 const REDRAW_MS = 120;
 
-// The grid of a patch covering `width` × `height` pixels at `zoom` voxels per pixel: a point about
-// every 12 pixels, but no closer than the prediction's own detail and no more than 65 a side.
+/**
+ * The grid of a patch covering `width` × `height` pixels at `zoom` voxels per pixel.  The points are
+ * about eight voxels apart, which is what the sheet's own undulations need — a coarser grid cannot
+ * follow them and the flattening suffers — but no more than 65 a side, which caps what building one
+ * costs.
+ */
 function gridFor(width: number, height: number, zoom: number): PatchGrid {
-  const spacing = Math.min(48, Math.max(6, zoom * 12));
+  const spacing = Math.min(24, Math.max(6, zoom * 4));
   const count = (extent: number) => {
     const n = Math.min(65, Math.max(5, Math.ceil(extent / spacing) + 1));
     return n % 2 === 1 ? n : n + 1;
@@ -183,7 +187,9 @@ class Card {
    * normal that agrees with `towards` — away from the scroll's axis, or the way the last piece went.
    */
   private async build(seed: Vec3, towards: Vec3 | undefined) {
-    const { width, height, zoom } = this.request;
+    const { width, height, zoom, density } = this.request;
+    // What the card covers does not change with how many pixels it is drawn with.
+    const across = width / density, down = height / density;
     const channels = this.channels!;
     const all = [channels.cos, channels.grad_mag, channels.nx, channels.ny];
     const started = performance.now();
@@ -205,7 +211,7 @@ class Card {
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
     const depth = TRACE_SHEETS * spacing;
-    const tangent = Math.hypot(width, height) * zoom * 0.6;
+    const tangent = Math.hypot(across, down) * zoom * 0.6;
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(
       seed.map((v, i) => v - half[i]) as Vec3,
@@ -213,7 +219,7 @@ class Card {
     );
     if (this.closed) return undefined;
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, gridFor(width, height, zoom), K, PER, TRACE_SHEETS);
+    const patch = buildPatch(field, seed, n, gridFor(across, down, zoom), K, PER, TRACE_SHEETS);
     return patch === undefined ? undefined : { patch, spacing, read };
   }
 
@@ -261,16 +267,18 @@ class Card {
         const reached = await this.reach(w);
         if (this.closed) return;
         const patch = this.patch!, scan = this.scan!;
-        const { id, width, height, zoom } = this.request;
-        // The level whose voxels are about the size of a pixel, and a coarser one to start with.
+        const { id, width, height, zoom, density } = this.request;
+        // The level whose voxels are about the size of a pixel of the card's layout, and a coarser
+        // one to start with.  The card is drawn with more pixels than that on a dense screen, which
+        // keeps it sharp without asking for four times the data.
         const fine = Math.max(0, Math.min(scan.length - 1, Math.floor(Math.log2(zoom) + 1e-6)));
         const preview = Math.min(scan.length - 1, fine + PREVIEW_LEVELS);
         const sheet = reached - this.baseW;
 
         // Nothing at all is not worth sending: the card goes on saying that it is loading.
-        const send = () => {
+        const send = (step = 1) => {
           const pixels = new Uint8ClampedArray(width * height * 4);
-          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, SPAN, width, height, scan, fine, pixels);
+          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, SPAN, width, height, scan, fine, pixels, step);
           if (painted === 0) return coarser;
           const frame: FrameEvent = {
             type: "frame",
@@ -281,13 +289,17 @@ class Card {
             width,
             height,
             pixels: pixels.buffer,
-            loading: coarser > 0,
+            loading: coarser > 0 || step > 1,
           };
           this.post(frame, [frame.pixels]);
           return coarser;
         };
 
         drawn = asked;
+        // A quick half-resolution look first, so that turning the wheel keeps up, then the whole
+        // thing; another sheet asked for in between leaves the whole one for it instead.
+        send(2);
+        if (this.wanted !== w || this.plane !== plane) continue;
         if (send() > 0) {
           for (const level of preview === fine ? [fine] : [preview, fine]) {
             const chunks = planeChunks(patch, plane, sheet, SPAN, width, height, scan[level]);

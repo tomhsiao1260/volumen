@@ -21,6 +21,10 @@ import { formatVoxel, shorten } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
 
+// The card is drawn with this many pixels per pixel of its own layout, so that it is as sharp as the
+// screen allows; past two there is nothing more to see and every pixel costs.
+const MAX_DENSITY = 2;
+
 // Sheets per wheel notch, and per pixel of a trackpad's scroll.
 const NOTCH = 1 / 8;
 const PER_PIXEL = 1 / 400;
@@ -88,6 +92,7 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   // The size the sheet was built for; it is not built again while the card is resized, since the
   // sheet it shows does not change.
   const size = useRef({ width: card.width, height: card.height });
+  const density = Math.min(MAX_DENSITY, window.devicePixelRatio || 1);
 
   const paint = (frame: FrameEvent) => {
     const element = canvas.current;
@@ -142,9 +147,10 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
             w: wanted.current,
             plane,
             zoom,
-            // The frame inside the card's border.
-            width: size.current.width - 2,
-            height: size.current.height - 2,
+            // The frame inside the card's border, in the pixels it is drawn with.
+            width: Math.round((size.current.width - 2) * density),
+            height: Math.round((size.current.height - 2) * density),
+            density,
           },
           (event) => {
             if (event.type === "frame") {

@@ -102,10 +102,16 @@ class LevelReader {
   }
 }
 
+// Pixels between the points whose place in the scan is worked out exactly.  A piece is smooth over a
+// few pixels, so the ones in between are interpolated, which is most of the drawing's cost saved.
+const STEP = 8;
+
 /**
  * Draws a plane of `patch` into `out` (RGBA, width × height), reading `levels[level]` and coarser
- * levels where it is missing.  Pixels the piece does not reach are left transparent.  Returns how
- * many pixels came from a coarser level than asked for, and how many were drawn at all.
+ * levels where it is missing.  Pixels the piece does not reach are left transparent.  With `step`
+ * above one, only every `step`-th pixel each way is worked out and the rest of its square copied, for
+ * a quick first look at a sheet the wheel has just reached.  Returns how many pixels came from a
+ * coarser level than asked for, and how many were drawn at all.
  */
 export function drawPlane(
   patch: Patch,
@@ -117,18 +123,45 @@ export function drawPlane(
   levels: ZarrLevel[],
   level: number,
   out: Uint8ClampedArray,
+  step = 1,
 ) {
   const readers = levels.map((one) => new LevelReader(one));
   const where = mapping(patch, plane, w, span, width, height);
   const point = new Float64Array(3);
+
+  // Where the piece is, at every STEP-th pixel across and down, and whether it is there at all.
+  const across = Math.ceil(width / STEP) + 1, down = Math.ceil(height / STEP) + 1;
+  const places = new Float64Array(across * down * 3);
+  const there = new Uint8Array(across * down);
+  for (let i = 0; i < down; i++)
+    for (let j = 0; j < across; j++) {
+      const [sheet, gi, gj] = where(Math.min(i * STEP, height - 1), Math.min(j * STEP, width - 1));
+      if (!positionAt(patch, sheet, gi, gj, point)) continue;
+      places.set(point, (i * across + j) * 3);
+      there[i * across + j] = 1;
+    }
+
   let coarser = 0, drawn = 0;
-  for (let r = 0; r < height; r++)
-    for (let c = 0; c < width; c++) {
+  for (let r = 0; r < height; r += step) {
+    const i0 = Math.min(Math.floor(r / STEP), down - 2), ti = (r - i0 * STEP) / STEP;
+    for (let c = 0; c < width; c += step) {
       const o = (r * width + c) * 4;
-      const [sheet, gi, gj] = where(r, c);
-      if (!positionAt(patch, sheet, gi, gj, point)) {
-        out[o + 3] = 0;
-        continue;
+      const j0 = Math.min(Math.floor(c / STEP), across - 2), tj = (c - j0 * STEP) / STEP;
+      const topLeft = i0 * across + j0, bottomLeft = topLeft + across;
+      if (there[topLeft] && there[topLeft + 1] && there[bottomLeft] && there[bottomLeft + 1]) {
+        const a = topLeft * 3, b = a + 3, d = bottomLeft * 3, e = d + 3;
+        for (let axis = 0; axis < 3; axis++) {
+          const top = places[a + axis] * (1 - tj) + places[b + axis] * tj;
+          const bottom = places[d + axis] * (1 - tj) + places[e + axis] * tj;
+          point[axis] = top * (1 - ti) + bottom * ti;
+        }
+      } else {
+        // Near the edge of what the piece reaches, where interpolating would round it off.
+        const [sheet, gi, gj] = where(r, c);
+        if (!positionAt(patch, sheet, gi, gj, point)) {
+          out[o + 3] = 0;
+          continue;
+        }
       }
       let value = -1, l = level;
       for (; l < readers.length; l++) {
@@ -148,7 +181,16 @@ export function drawPlane(
       out[o] = out[o + 1] = out[o + 2] = value;
       out[o + 3] = 255;
       drawn++;
+      // The rest of this pixel's square, while it is standing in for them.
+      for (let rr = r; rr < Math.min(r + step, height); rr++)
+        for (let cc = c; cc < Math.min(c + step, width); cc++) {
+          if (rr === r && cc === c) continue;
+          const q = (rr * width + cc) * 4;
+          out[q] = out[q + 1] = out[q + 2] = value;
+          out[q + 3] = 255;
+        }
     }
+  }
   return { coarser, drawn };
 }
 
