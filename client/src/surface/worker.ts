@@ -13,7 +13,7 @@ import { SERVER_API_ENDPOINT } from "../config";
 import { chunksFor, LasagnaField, readMask } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
-import { buildPatch, layerGrid, outward } from "./patch";
+import { buildPatch, layerGrid, outward, patchFacts } from "./patch";
 import type { SurfacePlane } from "./render";
 import { drawPlane, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
@@ -22,11 +22,8 @@ import type { FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./ty
 // Sheets each side of the one the card sits on, and table layers per sheet.
 const K = 3;
 const PER = 8;
-// How far the streamlines are followed, in sheets: one past K, so that the table is filled to its
-// edge.  Without a surface prediction they are counted by the density instead, which can be out by
-// 1.5–2× on the scans measured, so more are asked for.
-const TRACE_SHEETS = K + 1;
-const TRACE_SHEETS_BY_DENSITY = (K + 0.5) * 1.6;
+// Sheets either side of the one fitted first, and how much room to leave for them in the box.
+const REACH_SHEETS = K + 1;
 
 const worker = self as unknown as {
   onmessage: ((message: MessageEvent<SurfaceRequest>) => void) | null;
@@ -97,23 +94,14 @@ const REDRAW_MS = 120;
 const NEAR = 96;
 
 /**
- * How far apart the sheets are at `p`, in voxels: the middles of the surface prediction's bands
- * along the normal where there are two to measure between, and the density's guess otherwise, which
- * is only ever right to within a few times.
+ * How far apart the sheets are at `p`, in voxels: measured along the normal from the prediction, and
+ * where that finds nothing, guessed from the density — which is only ever right to within a few
+ * times, so it is a last resort.
  */
 function sheetSpacing(field: LasagnaField, p: Vec3, n: Vec3) {
   const guess = Math.min(150, Math.max(15, 1 / (field.density(p[0], p[1], p[2]) || 1 / 60)));
-  if (!field.hasBands) return guess;
-  const middles: number[] = [];
-  let start: number | undefined;
-  for (let t = -NEAR; t <= NEAR; t += 1) {
-    const on = field.band(p[0] + n[0] * t, p[1] + n[1] * t, p[2] + n[2] * t) > 127;
-    if (on && start === undefined) start = t;
-    if (!on && start !== undefined) (middles.push((start + t - 1) / 2), (start = undefined));
-  }
-  if (middles.length < 2) return guess;
-  const gaps = middles.slice(1).map((m, i) => m - middles[i]).sort((a, b) => a - b);
-  return Math.min(300, Math.max(15, gaps[gaps.length >> 1]));
+  const measured = field.spacingAt(p[0], p[1], p[2], n[0], n[1], n[2], NEAR);
+  return Number.isNaN(measured) ? guess : Math.min(300, Math.max(15, measured));
 }
 
 function gridFor(width: number, height: number, zoom: number): PatchGrid {
@@ -205,6 +193,7 @@ class Card {
           step: Math.round(Math.max(built.patch.hu, built.patch.hv)),
           read: Math.round(built.read),
           built: Math.round(performance.now() - started - built.read),
+          ...patchFacts(built.patch),
         },
       });
       await this.run();
@@ -222,7 +211,6 @@ class Card {
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
     const { mask, ...channels } = this.channels!;
-    const bands = mask !== undefined;
     const all = [channels.cos, channels.grad_mag, channels.nx, channels.ny];
     const started = performance.now();
     const load = async (lo: Vec3, hi: Vec3) => {
@@ -245,8 +233,7 @@ class Card {
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
-    const sheets = bands ? TRACE_SHEETS : TRACE_SHEETS_BY_DENSITY;
-    const depth = (sheets + 0.5) * spacing;
+    const depth = (REACH_SHEETS + 0.5) * spacing;
     const tangent = Math.hypot(across, down) * zoom * 0.6;
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(
@@ -255,7 +242,7 @@ class Card {
     );
     if (this.closed) return undefined;
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, gridFor(across, down, zoom), K, PER, sheets);
+    const patch = buildPatch(field, seed, n, gridFor(across, down, zoom), K, PER, spacing);
     return patch === undefined ? undefined : { patch, spacing, read };
   }
 

@@ -283,6 +283,9 @@ button {
   display: block;
   width: 100%;
   height: 100%;
+  /* Where the piece has no sheet the canvas is left clear, and what shows through is this: the card
+     says plainly that there is nothing there, rather than drawing a likely-looking guess. */
+  background: #000;
 }
 
 /* How far through the sheets a surface card is, dimmed while it is still being drawn. */

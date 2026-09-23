@@ -228,17 +228,19 @@ export function planeChunks(
     for (let j = 0; j + 1 < LATTICE; j++) {
       lo.fill(Infinity);
       hi.fill(-Infinity);
-      let whole = true;
+      // Whichever corners of the cell the piece reaches: a cell beside a hole has some, and the
+      // pixels there are drawn like any other, so their chunks are needed like any other.
+      let corners = 0;
       for (const k of [i * LATTICE + j, i * LATTICE + j + 1, (i + 1) * LATTICE + j, (i + 1) * LATTICE + j + 1]) {
+        if (Number.isNaN(positions[k * 3])) continue;
+        corners++;
         for (let c = 0; c < 3; c++) {
-          const value = positions[k * 3 + c];
-          if (Number.isNaN(value)) whole = false;
-          const at = (value + 0.5) / f - 0.5;
+          const at = (positions[k * 3 + c] + 0.5) / f - 0.5;
           lo[c] = Math.min(lo[c], Math.floor(at));
           hi[c] = Math.max(hi[c], Math.floor(at) + 1);
         }
       }
-      if (!whole) continue;
+      if (corners === 0) continue;
       for (const chunk of level.chunksBetween(lo, hi)) keys.set(chunk.join("/"), chunk);
     }
   return [...keys.values()];

@@ -1,25 +1,22 @@
 /**
- * @file A flattened piece of papyrus: a grid over one sheet, and for every grid point where each
- * neighbouring sheet is, found by following the sheet normal through the field.
+ * @file A flattened piece of papyrus: a grid of points over one sheet, and the same grid over each of
+ * the sheets either side of it.
  *
  * The result is a table P[k][i][j] of scan positions: row i and column j of the grid on layer
- * w = k / per, where whole w are sheets and halves the gaps between them.  Drawing a layer is then
- * looking positions up in the table and sampling the scan there (`render.ts`).  Built in four steps:
+ * w = k / per, where whole w are sheets and the rest lie evenly between them.  Drawing a layer is
+ * then looking positions up in the table and sampling the scan there (`render.ts`).
  *
- *   1. the base surface: a height field over the tangent plane at the seed whose slopes match the
- *      normals (least squares), so that the grid lies along the sheet;
- *   2. every grid point moved along its normal onto the nearest sheet;
- *   3. from every grid point, a streamline along the normal both ways, on which the sheets it
- *      crossed are whole w and the gaps between them half w;
- *   4. those sheets labelled consistently across the grid, from the centre outward, each taking the
- *      label of the nearest one on a labelled neighbour — so that a streamline that saw one sheet
- *      more or less than its neighbours does not tear the layer.
+ * Each sheet is *fitted*, not traced: the grid is held together — its edges keep the length they were
+ * laid out with, its diagonals too, so that the card's scale stays honest — while the prediction
+ * pulls each point along its normal onto the nearest sheet, gently at first.  Points that end up on
+ * no sheet are holes, and the card shows them as nothing rather than as a plausible picture of the
+ * wrong place.
  *
- * Where a sheet is comes from the surface prediction where the scan has one, and from the phase
- * where it has not (`field.ts`).  Measured against Scrolls 1, 3 and PHerc1447: with the prediction
- * whole layers land on papyrus 92–100% of the time, with the phase 1–100%.  Between two sheets the
- * layers are spaced evenly along the streamline; the density is not used for this, because the
- * windings it counts are not the same size from one scan to the next.
+ * The obvious alternative — follow a streamline from every point and work out afterwards which sheet
+ * each one landed on — is what this replaced, and it tore: measured on Scroll 1, 7.5% of neighbouring
+ * points ended up on different sheets, against 0.0% here, and whole layers slid into the gaps between
+ * sheets.  A grid that is held together cannot do that, because a point would have to drag its
+ * neighbours with it.
  */
 
 import type { LasagnaField, Vec3 } from "./field";
@@ -62,55 +59,6 @@ export function outward(
   const dy = p[1] - (a.y + (b.y - a.y) * t), dx = p[2] - (a.x + (b.x - a.x) * t);
   const length = Math.hypot(dy, dx);
   return length < 1 ? undefined : [0, dy / length, dx / length];
-}
-
-/**
- * How far along `n` from `p` the middle of the nearest band of the surface prediction is, looking
- * `span` voxels either way; undefined if there is none in reach.  A band is 20–40 µm of a sheet's
- * face, so its middle is the sheet.
- */
-function bandCentre(field: LasagnaField, p: Vec3, n: Vec3, span: number) {
-  let best: number | undefined;
-  let start: number | undefined;
-  let t = -span;
-  for (; t <= span; t += 0.5) {
-    const on = field.band(p[0] + n[0] * t, p[1] + n[1] * t, p[2] + n[2] * t) > 127;
-    if (on && start === undefined) start = t;
-    if (!on && start !== undefined) {
-      const middle = (start + t - 0.5) / 2;
-      if (best === undefined || Math.abs(middle) < Math.abs(best)) best = middle;
-      start = undefined;
-    }
-  }
-  if (start !== undefined) {
-    const middle = (start + t - 0.5) / 2;
-    if (best === undefined || Math.abs(middle) < Math.abs(best)) best = middle;
-  }
-  return best;
-}
-
-// Moves `p` along `n` onto the nearest sheet within half a sheet spacing either way.
-export function snapToSheet(field: LasagnaField, p: Vec3, n: Vec3) {
-  const span = 0.5 / (field.density(p[0], p[1], p[2]) || 1 / 40);
-  if (field.hasBands) {
-    const t = bandCentre(field, p, n, span);
-    return t === undefined ? undefined : add(p, mul(n, t));
-  }
-  let best: { t: number; phase: number } | undefined;
-  let before = -1, previous = -1;
-  for (let t = -span - 1; t <= span + 1; t += 0.5) {
-    const q = add(p, mul(n, t));
-    const value = field.phase(q[0], q[1], q[2]);
-    if (previous > before && previous >= value && previous > 0.5) {
-      const at = t - 0.5;
-      if (Math.abs(at) <= span && (best === undefined || Math.abs(at) < Math.abs(best.t))) {
-        best = { t: at, phase: previous };
-      }
-    }
-    before = previous;
-    previous = value;
-  }
-  return best === undefined ? undefined : add(p, mul(n, best.t));
 }
 
 /**
@@ -211,144 +159,175 @@ function baseSurface(field: LasagnaField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
   return { X, N, right, down };
 }
 
-// Moves every base point along its normal onto the nearest sheet, the moves smoothed (median of
-// 5×5) so that neighbours do not land on different sheets.
-function snapBase(field: LasagnaField, grid: PatchGrid, X: Float64Array, N: Float64Array) {
-  const { nu, nv } = grid;
-  const offsets = new Float64Array(nu * nv);
-  for (let k = 0; k < nu * nv; k++) {
-    const p: Vec3 = [X[k * 3], X[k * 3 + 1], X[k * 3 + 2]];
-    const n: Vec3 = [N[k * 3], N[k * 3 + 1], N[k * 3 + 2]];
-    const span = 0.4 / (field.density(p[0], p[1], p[2]) || 1 / 40) / 1.5;
-    if (field.hasBands) {
-      offsets[k] = bandCentre(field, p, n, span) ?? 0;
-      continue;
+// Passes of the fit: the prediction's pull grows over the first part of them, the rest settles.
+const SWEEPS = 30;
+// Of a sheet's spacing: how far the fit looks for a sheet, and how far a sheet may drift from where
+// it started before it is no longer the same sheet.
+const LOOK = 0.45;
+
+function resampleNormals(field: LasagnaField, X: Float64Array, N: Float64Array, count: number, reference: Vec3) {
+  for (let k = 0; k < count; k++) {
+    const o = k * 3;
+    if (field.normal(X[o], X[o + 1], X[o + 2], reference[0], reference[1], reference[2])) {
+      N[o] = field.out[0];
+      N[o + 1] = field.out[1];
+      N[o + 2] = field.out[2];
+    } else {
+      N[o] = reference[0];
+      N[o + 1] = reference[1];
+      N[o + 2] = reference[2];
     }
-    let best = 0, bestValue = -1;
-    for (let t = -span; t <= span; t += 0.5) {
-      const value = field.phase(p[0] + n[0] * t, p[1] + n[1] * t, p[2] + n[2] * t) - 0.002 * Math.abs(t);
-      if (value > bestValue) (bestValue = value), (best = t);
-    }
-    offsets[k] = best;
   }
+}
+
+// Each point's move replaced by the middle one of its 3×3 neighbourhood: one point jumping to a
+// sheet of its own is what stretches the grid, and the median simply outvotes it.
+function median3(from: Float64Array, into: Float64Array, nu: number, nv: number) {
   const around: number[] = [];
   for (let i = 0; i < nv; i++)
     for (let j = 0; j < nu; j++) {
       around.length = 0;
-      for (let di = -2; di <= 2; di++)
-        for (let dj = -2; dj <= 2; dj++) {
+      for (let di = -1; di <= 1; di++)
+        for (let dj = -1; dj <= 1; dj++) {
           const a = i + di, b = j + dj;
-          if (a >= 0 && b >= 0 && a < nv && b < nu) around.push(offsets[a * nu + b]);
+          if (a < 0 || b < 0 || a >= nv || b >= nu) continue;
+          const value = from[a * nu + b];
+          if (!Number.isNaN(value)) around.push(value);
         }
-      around.sort((p, q) => p - q);
-      const t = around[around.length >> 1], k = (i * nu + j) * 3;
-      X[k] += N[k] * t;
-      X[k + 1] += N[k + 1] * t;
-      X[k + 2] += N[k + 2] * t;
+      if (around.length === 0) {
+        into[i * nu + j] = NaN;
+        continue;
+      }
+      around.sort((x, y) => x - y);
+      into[i * nu + j] = around[around.length >> 1];
     }
 }
 
-interface Anchor {
-  // Index on the line, and the sheet count the line itself found there (whole = sheet, half = gap).
-  i: number;
-  raw: number;
-  label?: number;
+// Pulls an edge back to the length it should have, moving both ends half way.
+function holdEdge(X: Float64Array, a: number, b: number, rest: number, stiffness: number) {
+  const p = a * 3, q = b * 3;
+  const dz = X[q] - X[p], dy = X[q + 1] - X[p + 1], dx = X[q + 2] - X[p + 2];
+  const length = Math.sqrt(dz * dz + dy * dy + dx * dx);
+  if (length < 1e-6) return;
+  const move = (stiffness * (length - rest)) / length / 2;
+  X[p] += dz * move;
+  X[p + 1] += dy * move;
+  X[p + 2] += dx * move;
+  X[q] -= dz * move;
+  X[q + 1] -= dy * move;
+  X[q + 2] -= dx * move;
 }
 
-interface Line {
-  n: number;
-  xs: Float64Array;
-  anchors: Anchor[];
-  normal: Vec3;
-}
+/**
+ * Fits the grid `X` onto one sheet.  The edges are held at the spacing the grid was laid out with —
+ * and the diagonals too, which is what keeps the card's scale honest — the bend is smoothed, and the
+ * prediction pulls each point along its normal, the pull growing from nothing so that the grid
+ * settles into a shape before it starts believing the data.
+ *
+ * Three things keep a sheet from tearing, and all three are needed: no point may move further in one
+ * sweep than the grid's own step, so it cannot outrun its neighbours; no point may drift more than
+ * half a sheet from where it started, or many small pulls walk it onto the next sheet; and the pull
+ * is the median of a neighbourhood, so a single point cannot drag the grid after it.
+ *
+ * Returns which points ended up on a sheet.  The rest are holes: the papyrus has parted there, or is
+ * not there at all, and a card showing a plausible picture of the wrong place would be worse.
+ */
+function fitSheet(
+  field: LasagnaField,
+  X: Float64Array,
+  grid: PatchGrid,
+  spacing: number,
+  reference: Vec3,
+) {
+  const { nu, nv, hu, hv } = grid;
+  const count = nu * nv;
+  const N = new Float64Array(count * 3);
+  const start = X.slice();
+  const moves = new Float64Array(count);
+  const smooth = new Float64Array(count);
+  const held = new Uint8Array(count);
+  const span = spacing * LOOK;
+  const stray = spacing * LOOK;
+  const most = Math.min(hu, hv);
+  const diagonal = Math.hypot(hu, hv);
 
-const DS = 2; // streamline step, voxels
-const HYSTERESIS = 0.1; // phase change that makes a peak or a trough
-const MATCH = 0.3; // of a sheet spacing: how close two neighbours' anchors must be to be the same
-
-// The sheets a line crossed, as the surface prediction has them: the middle of each band, with the
-// middle of each gap between two bands as a half sheet.  The band the base point is in, or the one
-// nearest it, is sheet 0.
-function bandAnchors(bd: Float64Array, n: number, i0: number): Anchor[] {
-  const middles: number[] = [];
-  let start: number | undefined;
-  for (let i = 0; i < n; i++) {
-    const on = bd[i] > 127;
-    if (on && start === undefined) start = i;
-    if (!on && start !== undefined) (middles.push((start + i - 1) / 2), (start = undefined));
-  }
-  if (start !== undefined) middles.push((start + n - 1) / 2);
-  if (middles.length === 0) return [];
-  let here = 0;
-  middles.forEach((m, i) => {
-    if (Math.abs(m - i0) < Math.abs(middles[here] - i0)) here = i;
-  });
-  const anchors: Anchor[] = middles.map((m, i) => ({ i: Math.round(m), raw: i - here }));
-  for (let i = 0; i + 1 < middles.length; i++) {
-    anchors.push({ i: Math.round((middles[i] + middles[i + 1]) / 2), raw: i - here + 0.5 });
-  }
-  return anchors.sort((p, q) => p.i - q.i);
-}
-
-// The sheets a line crossed, as the phase has them: its peaks, walked out from the base, which sits
-// on one, with its troughs between them as half sheets.
-function phaseAnchors(ph: Float64Array, n: number, i0: number): Anchor[] {
-  const smooth = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    let s = 0, c = 0;
-    for (let d = -1; d <= 1; d++) if (i + d >= 0 && i + d < n) (s += ph[i + d]), c++;
-    smooth[i] = s / c;
-  }
-  const anchors: Anchor[] = [{ i: i0, raw: 0 }];
-  for (const dir of [1, -1]) {
-    let wantPeak = false, extI = i0, extV = smooth[i0], raw = 0;
-    for (let i = i0 + dir; i >= 0 && i < n; i += dir) {
-      const v = smooth[i];
-      const turned = wantPeak ? v < extV - HYSTERESIS : v > extV + HYSTERESIS;
-      if (turned) {
-        raw += 0.5 * dir;
-        anchors.push({ i: extI, raw });
-        wantPeak = !wantPeak;
-        extV = v;
-        extI = i;
-      } else if (wantPeak ? v > extV : v < extV) {
-        extV = v;
-        extI = i;
+  for (let sweep = 0; sweep < SWEEPS; sweep++) {
+    if (sweep % 10 === 0) resampleNormals(field, X, N, count, reference);
+    const settling = Math.min(1, sweep / (SWEEPS * 0.6));
+    const pull = settling * settling;
+    // Asking the prediction is most of the work and the answer hardly changes between one sweep and
+    // the next, so it is asked every other sweep and the grid settles in between.
+    if (sweep % 2 === 0 || sweep >= SWEEPS - 2) {
+      for (let k = 0; k < count; k++) {
+        const o = k * 3;
+        moves[k] = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span);
+      }
+      median3(moves, smooth, nu, nv);
+    }
+    if (pull > 0) {
+      for (let k = 0; k < count; k++) {
+        const t = smooth[k];
+        if (Number.isNaN(t)) continue;
+        const o = k * 3;
+        let move = Math.max(-most, Math.min(most, t * pull * 0.7));
+        const drift =
+          (X[o] + N[o] * move - start[o]) * N[o] +
+          (X[o + 1] + N[o + 1] * move - start[o + 1]) * N[o + 1] +
+          (X[o + 2] + N[o + 2] * move - start[o + 2]) * N[o + 2];
+        if (Math.abs(drift) > stray) move += Math.sign(drift) * stray - drift;
+        X[o] += N[o] * move;
+        X[o + 1] += N[o + 1] * move;
+        X[o + 2] += N[o + 2] * move;
       }
     }
+    // The grid answers back: three passes, so that its shape weighs as much as the pull.
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 0; i < nv; i++)
+        for (let j = 0; j < nu; j++) {
+          const k = i * nu + j;
+          if (j + 1 < nu) holdEdge(X, k, k + 1, hu, 0.6);
+          if (i + 1 < nv) holdEdge(X, k, k + nu, hv, 0.6);
+          if (i + 1 < nv && j + 1 < nu) holdEdge(X, k, k + nu + 1, diagonal, 0.3);
+          if (i + 1 < nv && j > 0) holdEdge(X, k, k + nu - 1, diagonal, 0.3);
+        }
+    }
+    for (const [di, dj] of [[0, 1], [1, 0]] as const) {
+      for (let i = di; i < nv - di; i++)
+        for (let j = dj; j < nu - dj; j++) {
+          const k = (i * nu + j) * 3, a = k - (di * nu + dj) * 3, b = k + (di * nu + dj) * 3;
+          for (let c = 0; c < 3; c++) X[k + c] += ((X[a + c] + X[b + c]) / 2 - X[k + c]) * 0.12;
+        }
+    }
   }
-  return anchors.sort((p, q) => p.i - q.i);
+
+  resampleNormals(field, X, N, count, reference);
+  for (let k = 0; k < count; k++) {
+    const o = k * 3;
+    const t = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], Math.max(2, most * 0.6));
+    held[k] = Number.isNaN(t) ? 0 : 1;
+  }
+  return held;
 }
 
-// A streamline through base point `x0`, both ways until it has crossed `sheets` sheets, with the
-// sheets it crossed marked on it.
-function traceLine(field: LasagnaField, x0: Vec3, normal: Vec3, sheets: number): Line {
-  const a = field.trace(x0, normal, -1, sheets, DS);
-  const b = field.trace(x0, normal, 1, sheets, DS);
-  const n = a.n + 1 + b.n, i0 = a.n;
-  const xs = new Float64Array(n * 3), ph = new Float64Array(n), bd = new Float64Array(n);
-  for (let i = 0; i < a.n; i++) {
-    const j = a.n - 1 - i;
-    xs.set(a.xs.subarray(j * 3, j * 3 + 3), i * 3);
-    ph[i] = a.ph[j];
-    bd[i] = a.bd[j];
-  }
-  xs.set(x0, i0 * 3);
-  ph[i0] = field.phase(x0[0], x0[1], x0[2]);
-  bd[i0] = field.band(x0[0], x0[1], x0[2]);
-  xs.set(b.xs.subarray(0, b.n * 3), (i0 + 1) * 3);
-  ph.set(b.ph.subarray(0, b.n), i0 + 1);
-  bd.set(b.bd.subarray(0, b.n), i0 + 1);
-  const anchors = field.hasBands ? bandAnchors(bd, n, i0) : phaseAnchors(ph, n, i0);
-  return { n, xs, anchors, normal };
+/**
+ * The next sheet out: the whole layer moved one sheet's spacing along its own normals.  Where it
+ * lands is left to the fit, which reaches half a sheet either way; letting each point find its own
+ * next sheet first sounds better but is not — where the prediction is patchy the points disagree and
+ * the layer arrives already torn.
+ */
+function nextSheet(field: LasagnaField, X: Float64Array, count: number, dir: 1 | -1, spacing: number, reference: Vec3) {
+  const out = new Float64Array(count * 3);
+  const N = new Float64Array(count * 3);
+  resampleNormals(field, X, N, count, reference);
+  for (let k = 0; k < count * 3; k++) out[k] = X[k] + N[k] * dir * spacing;
+  return out;
 }
 
 /**
  * The patch over `grid` around `seed` (full-resolution voxels, z/y/x), `K` sheets each way, or
  * undefined where there is no sheet to build it on.  w grows in the direction of the normal that
- * agrees with `towards` — away from the scroll's axis, or the way a previous patch went.  The
- * streamlines are followed until they have crossed `sheets` sheets; without a surface prediction
- * that count is the density's, which has to allow for it being wrong.
+ * agrees with `towards` — away from the scroll's axis, or the way a previous patch went.  `spacing`
+ * is how many voxels apart the sheets are here, which sets the whole patch's scale.
  */
 export function buildPatch(
   field: LasagnaField,
@@ -357,112 +336,117 @@ export function buildPatch(
   grid: PatchGrid,
   K = 3,
   per = 8,
-  sheets = (K + 0.5) * 1.6,
+  spacing = 40,
 ): Patch | undefined {
   const n00 = normalAt(field, seed, towards);
   if (n00 === null) return undefined;
-  const p0 = snapToSheet(field, seed, n00);
-  if (p0 === undefined) return undefined;
+  const onto = field.nearestSheet(seed[0], seed[1], seed[2], n00[0], n00[1], n00[2], spacing * LOOK);
+  if (Number.isNaN(onto)) return undefined;
+  const p0 = add(seed, mul(n00, onto));
   const n0 = normalAt(field, p0, n00);
   if (n0 === null) return undefined;
+
   const { nu, nv } = grid;
-  const { X, N, right, down } = baseSurface(field, p0, n0, grid);
-  snapBase(field, grid, X, N);
-
-  const lines: Line[] = [];
-  for (let k = 0; k < nu * nv; k++) {
-    lines.push(
-      traceLine(
-        field,
-        [X[k * 3], X[k * 3 + 1], X[k * 3 + 2]],
-        [N[k * 3], N[k * 3 + 1], N[k * 3 + 2]],
-        sheets,
-      ),
-    );
+  const count = nu * nv;
+  const { X, right, down } = baseSurface(field, p0, n0, grid);
+  const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
+  sheets.set(0, { X, held: fitSheet(field, X, grid, spacing, n0) });
+  for (const dir of [1, -1] as const) {
+    let from = X;
+    for (let k = 1; k <= K; k++) {
+      const next = nextSheet(field, from, count, dir, spacing, n0);
+      sheets.set(k * dir, { X: next, held: fitSheet(field, next, grid, spacing, n0) });
+      from = next;
+    }
   }
 
-  // The sheet spacing, from the centre line.
-  const centre = ((nv - 1) / 2) * nu + (nu - 1) / 2;
-  const gaps = lines[centre].anchors.slice(1).map((a, i) => (a.i - lines[centre].anchors[i].i) * DS);
-  gaps.sort((p, q) => p - q);
-  const halfSpacing = gaps[gaps.length >> 1] ?? 20;
-
-  // Labels, from the centre outward.
-  for (const a of lines[centre].anchors) a.label = a.raw;
-  const distance = (k: number) =>
-    Math.hypot(Math.floor(k / nu) - (nv - 1) / 2, (k % nu) - (nu - 1) / 2);
-  const order = [...Array(nu * nv).keys()].sort((p, q) => distance(p) - distance(q));
-  const done = new Uint8Array(nu * nv);
-  done[centre] = 1;
-  for (const k of order) {
-    if (done[k]) continue;
-    const i = Math.floor(k / nu), j = k % nu, line = lines[k];
-    const neighbours: Line[] = [];
-    for (let di = -1; di <= 1; di++)
-      for (let dj = -1; dj <= 1; dj++) {
-        const a = i + di, b = j + dj;
-        if ((di || dj) && a >= 0 && b >= 0 && a < nv && b < nu && done[a * nu + b]) {
-          neighbours.push(lines[a * nu + b]);
-        }
-      }
-    const [nz, ny, nx] = line.normal;
-    for (const a of line.anchors) {
-      const az = line.xs[a.i * 3], ay = line.xs[a.i * 3 + 1], ax = line.xs[a.i * 3 + 2];
-      const whole = Number.isInteger(a.raw);
-      const votes = new Map<number, number>();
-      for (const other of neighbours)
-        for (const b of other.anchors) {
-          if (b.label === undefined || Number.isInteger(b.label) !== whole) continue;
-          const d = Math.abs(
-            (az - other.xs[b.i * 3]) * nz + (ay - other.xs[b.i * 3 + 1]) * ny + (ax - other.xs[b.i * 3 + 2]) * nx,
-          );
-          if (d < MATCH * 2 * halfSpacing) votes.set(b.label, (votes.get(b.label) ?? 0) + 1 / (1 + d));
-        }
-      let best: number | undefined, bestVotes = 0;
-      for (const [label, value] of votes) if (value > bestVotes) (bestVotes = value), (best = label);
-      a.label = best;
-    }
-    // Only labels that increase along the line are kept.
-    const kept: Anchor[] = [];
-    for (const a of line.anchors) {
-      if (a.label === undefined) continue;
-      while (kept.length && kept[kept.length - 1].label! >= a.label) kept.pop();
-      kept.push(a);
-    }
-    line.anchors = kept;
-    done[k] = 1;
-  }
-
-  // w along every line — evenly between two labelled anchors, at the line's own rate beyond them —
-  // and where it crosses each k / per.
+  // The table: each sheet, and the layers within half a sheet either side of it.  Between two sheets
+  // that are both there the layers follow the way from one to the other; where the next sheet is
+  // missing they follow the normal instead, which is half a sheet of honest extrapolation and is
+  // what keeps a cross-section readable where the prediction is patchy.
   const L = 2 * K * per + 1;
-  const P = new Float32Array(L * nu * nv * 3).fill(NaN);
-  for (let node = 0; node < nu * nv; node++) {
-    const { n, xs, anchors } = lines[node];
-    if (anchors.length === 0) continue;
-    const w = new Float64Array(n);
-    for (let a = 0; a + 1 < anchors.length; a++) {
-      const A = anchors[a], B = anchors[a + 1];
-      for (let i = A.i; i <= B.i; i++) w[i] = A.label! + ((i - A.i) / (B.i - A.i)) * (B.label! - A.label!);
-    }
-    const first = anchors[0], last = anchors[anchors.length - 1];
-    const rate =
-      anchors.length >= 2
-        ? (last.label! - first.label!) / (last.i - first.i)
-        : 0.5 / Math.max(1, halfSpacing / DS);
-    for (let i = 0; i < first.i; i++) w[i] = first.label! + (i - first.i) * rate;
-    for (let i = last.i; i < n; i++) w[i] = last.label! + (i - last.i) * rate;
-    for (let i = 1; i < n; i++) {
-      const w0 = w[i - 1], w1 = w[i];
-      if (w1 <= w0) continue;
-      for (let k = Math.max(Math.ceil(w0 * per), -K * per); k / per <= w1 && k <= K * per; k++) {
-        const t = (k / per - w0) / (w1 - w0);
-        const o = ((K * per + k) * nu * nv + node) * 3;
-        for (let c = 0; c < 3; c++) P[o + c] = xs[(i - 1) * 3 + c] + (xs[i * 3 + c] - xs[(i - 1) * 3 + c]) * t;
+  const P = new Float32Array(L * count * 3).fill(NaN);
+  const N = new Float64Array(count * 3);
+  for (let k = -K; k <= K; k++) {
+    const here = sheets.get(k)!;
+    resampleNormals(field, here.X, N, count, n0);
+    for (let node = 0; node < count; node++) {
+      if (!here.held[node]) continue;
+      const q = node * 3;
+      for (let s = -per / 2; s <= per / 2; s++) {
+        const layer = (k + K) * per + s;
+        if (layer < 0 || layer >= L) continue;
+        const towardsNext = sheets.get(k + Math.sign(s));
+        const t = Math.abs(s) / per;
+        const o = (layer * count + node) * 3;
+        // The sheet's own points win over a neighbour's extrapolation into the same layer.
+        if (s !== 0 && !Number.isNaN(P[o]) && Math.abs(s) === per / 2) continue;
+        for (let c = 0; c < 3; c++) {
+          P[o + c] =
+            towardsNext !== undefined && towardsNext.held[node]
+              ? here.X[q + c] + (towardsNext.X[q + c] - here.X[q + c]) * t
+              : here.X[q + c] + N[q + c] * Math.sign(s) * t * spacing;
+        }
       }
     }
   }
   return { ...grid, K, per, P, right, down, normal: n0 };
+}
+
+/**
+ * What the patch came out like, for a page that asks: how much of each sheet is there at all, how
+ * much of it is torn (neighbouring points further apart than the grid was laid out to be), how far
+ * the scale is off, and how far apart the sheets ended up.  Rounded, and only ever printed.
+ */
+export function patchFacts(patch: Patch) {
+  const { nu, nv, K, per, P, hu, hv } = patch;
+  const count = nu * nv;
+  const step = Math.min(hu, hv);
+  const at = (k: number, node: number) => (((k + K) * per * count + node) * 3);
+  const there = (o: number) => !Number.isNaN(P[o]);
+  const holes: number[] = [], torn: number[] = [], apart: number[] = [];
+  const stretch: number[] = [];
+  for (let k = -K; k <= K; k++) {
+    let missing = 0, tears = 0, pairs = 0;
+    for (let i = 0; i < nv; i++)
+      for (let j = 0; j < nu; j++) {
+        const node = i * nu + j, o = at(k, node);
+        if (!there(o)) {
+          missing++;
+          continue;
+        }
+        for (const [di, dj] of [[0, 1], [1, 0]] as const) {
+          if (i + di >= nv || j + dj >= nu) continue;
+          const q = at(k, (i + di) * nu + j + dj);
+          if (!there(q)) continue;
+          const d = Math.hypot(P[o] - P[q], P[o + 1] - P[q + 1], P[o + 2] - P[q + 2]);
+          pairs++;
+          stretch.push(d / (di ? hv : hu));
+          if (d > step * 2.5) tears++;
+        }
+      }
+    holes.push(missing / count);
+    torn.push(tears / (pairs || 1));
+    if (k < K) {
+      const gaps: number[] = [];
+      for (let node = 0; node < count; node++) {
+        const o = at(k, node), q = at(k + 1, node);
+        if (there(o) && there(q)) gaps.push(Math.hypot(P[o] - P[q], P[o + 1] - P[q + 1], P[o + 2] - P[q + 2]));
+      }
+      gaps.sort((a, b) => a - b);
+      if (gaps.length) apart.push(gaps[gaps.length >> 1]);
+    }
+  }
+  stretch.sort((a, b) => a - b);
+  const percent = (xs: number[]) => xs.map((x) => `${Math.round(x * 100)}%`).join(" ");
+  return {
+    holes: percent(holes),
+    torn: percent(torn),
+    apart: apart.map((a) => Math.round(a)).join(" "),
+    stretch: stretch.length
+      ? `${stretch[Math.floor(stretch.length * 0.05)].toFixed(2)}–${stretch[Math.floor(stretch.length * 0.95)].toFixed(2)}`
+      : "–",
+  };
 }
 
 /**

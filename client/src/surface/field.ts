@@ -179,47 +179,83 @@ export class LasagnaField {
   }
 
   /**
-   * Follows the normal from `x0` (RK2, steps of `ds` voxels), on the side `dir` of `n0`, until it has
-   * crossed `sheets` sheets or the field ends.  Sheets are counted as bands of the surface prediction
-   * where there is one and by the density's winding integral where there is not — and the density
-   * can be out by several times, so a caller relying on it has to ask for more than it needs.
+   * How far along the normal (`nz`, `ny`, `nx`) from a point the nearest sheet is, looking no further
+   * than `span` voxels either way; NaN if there is none in reach.  This is the one question the patch
+   * asks of the prediction, and the answer comes from the surface prediction where the scan has one
+   * and from the phase where it has not.
    *
-   * Returns the positions (flat z, y, x) and the phase and band at every step after the start.  The
-   * steps are all `ds` long, so the index along a line is its arc length, which is what the layers
-   * between two sheets are spaced by.
+   * A face of a sheet is a band 20–40 µm thick, but a line crossing it at an angle can find it in
+   * pieces, so runs closer together than one voxel of the prediction are one band — otherwise a
+   * sheet is read as two and everything built on it counts half sheets.
    */
-  trace(x0: Vec3, n0: Vec3, dir: 1 | -1, sheets: number, ds: number) {
-    const cap = 4096;
-    const xs = new Float64Array(cap * 3), ph = new Float64Array(cap), bd = new Float64Array(cap);
-    let [z, y, x] = x0;
-    let rz = n0[0] * dir, ry = n0[1] * dir, rx = n0[2] * dir;
-    let w = 0, n = 0, crossed = 0;
-    let on = this.band(z, y, x) > 127;
-    const o = this.out;
-    while (n < cap && (this.hasBands ? crossed <= sheets : w < sheets)) {
-      if (!this.normal(z, y, x, rz, ry, rx)) break;
-      const mz = z + o[0] * ds * 0.5, my = y + o[1] * ds * 0.5, mx = x + o[2] * ds * 0.5;
-      if (!this.normal(mz, my, mx, o[0], o[1], o[2])) break;
-      const rho = this.density(mz, my, mx);
-      if (rho === 0) break;
-      rz = o[0];
-      ry = o[1];
-      rx = o[2];
-      z += rz * ds;
-      y += ry * ds;
-      x += rx * ds;
-      w += rho * ds;
-      xs[n * 3] = z;
-      xs[n * 3 + 1] = y;
-      xs[n * 3 + 2] = x;
-      ph[n] = this.phase(z, y, x);
-      bd[n] = this.band(z, y, x);
-      const wasOn = on;
-      on = bd[n] > 127;
-      if (on && !wasOn) crossed++;
-      n++;
+  nearestSheet(z: number, y: number, x: number, nz: number, ny: number, nx: number, span: number) {
+    if (!this.hasBands) return this.nearestPeak(z, y, x, nz, ny, nx, span);
+    const merge = Math.max(2, this.fm);
+    const step = Math.max(1, merge / 2);
+    const on = (t: number) => this.band(z + nz * t, y + ny * t, x + nx * t) > 127;
+    let found = NaN;
+    for (let d = 0; d <= span && Number.isNaN(found); d += step) {
+      if (on(d)) found = d;
+      else if (d > 0 && on(-d)) found = -d;
     }
-    return { n, xs, ph, bd };
+    if (Number.isNaN(found)) return NaN;
+    // The whole band around it, jumping gaps smaller than `merge`.  A face is 20–40 µm thick, so
+    // there is no point walking further than a few of the prediction's own voxels.
+    const walk = merge * 4;
+    let low = found, high = found;
+    for (const dir of [-1, 1]) {
+      let last = found, gap = 0;
+      for (let t = found + dir * step; Math.abs(t - found) <= walk && Math.abs(t) <= span + merge; t += dir * step) {
+        if (on(t)) (last = t), (gap = 0);
+        else if ((gap += step) > merge) break;
+      }
+      if (dir < 0) low = last;
+      else high = last;
+    }
+    return (low + high) / 2;
+  }
+
+  /**
+   * How far apart the sheets are at a point, along its normal: the middle gap between the sheets
+   * within `reach` voxels either way, or NaN where fewer than two were found.  This is the one
+   * number the whole patch is scaled by, so it is measured rather than taken from the density, whose
+   * winding scale differs from scan to scan.
+   */
+  spacingAt(z: number, y: number, x: number, nz: number, ny: number, nx: number, reach: number) {
+    const merge = Math.max(2, this.fm);
+    const step = Math.max(1, merge / 2);
+    const middles: number[] = [];
+    let start = NaN, last = NaN, gap = 0;
+    for (let t = -reach; t <= reach; t += step) {
+      if (this.band(z + nz * t, y + ny * t, x + nx * t) > 127) {
+        if (Number.isNaN(start)) start = t;
+        last = t;
+        gap = 0;
+      } else if (!Number.isNaN(start) && (gap += step) > merge) {
+        middles.push((start + last) / 2);
+        start = NaN;
+      }
+    }
+    if (!Number.isNaN(start)) middles.push((start + last) / 2);
+    if (middles.length < 2) return NaN;
+    const gaps = middles.slice(1).map((m, i) => m - middles[i]).sort((a, b) => a - b);
+    return gaps[gaps.length >> 1];
+  }
+
+  // The nearest peak of the phase, for the scans with no surface prediction.
+  private nearestPeak(z: number, y: number, x: number, nz: number, ny: number, nx: number, span: number) {
+    let best = NaN, bestValue = 0.5;
+    let before = -1, previous = -1;
+    for (let t = -span - 1; t <= span + 1; t += 0.5) {
+      const value = this.phase(z + nz * t, y + ny * t, x + nx * t);
+      const at = t - 0.5;
+      if (previous > before && previous >= value && previous > bestValue && Math.abs(at) <= span) {
+        if (Number.isNaN(best) || Math.abs(at) < Math.abs(best)) (best = at), (bestValue = previous);
+      }
+      before = previous;
+      previous = value;
+    }
+    return best;
   }
 }
 

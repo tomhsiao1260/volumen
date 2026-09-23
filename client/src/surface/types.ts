@@ -57,6 +57,13 @@ export interface SurfaceFacts {
   // Reading the prediction, and building the sheet, in milliseconds.
   read: number;
   built: number;
+  // How the fit came out, for a debug page: per sheet, how much of it is missing and how much is
+  // torn; how far apart the sheets ended up; and how far the grid's edges are from the length they
+  // were laid out with, which is the card's scale.
+  holes: string;
+  torn: string;
+  apart: string;
+  stretch: string;
 }
 
 export interface StatusEvent {

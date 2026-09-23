@@ -58,7 +58,8 @@ function describe(facts: SurfaceFacts) {
   return (
     `sheets ${facts.spacing.toFixed(0)} voxels apart, ` +
     `${facts.across} × ${facts.down} points ${facts.step} voxels apart, ` +
-    `prediction read in ${(facts.read / 1000).toFixed(1)} s, sheet built in ${facts.built} ms`
+    `prediction read in ${(facts.read / 1000).toFixed(1)} s, sheet built in ${facts.built} ms\n` +
+    `   sheets ${facts.apart} voxels apart · holes ${facts.holes} · torn ${facts.torn} · edges ×${facts.stretch}`
   );
 }
 
