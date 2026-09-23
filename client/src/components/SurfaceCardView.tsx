@@ -121,6 +121,25 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
     );
   };
 
+  /*
+   * The browser's GPU process can die under the page — on an Intel Mac, Brave 152 does it to itself
+   * through a bug of its own — and it takes the canvas's pixels with it, leaving the card blank until
+   * something happens to draw it again.  The frame last drawn is still here, so it is put back as
+   * soon as the canvas has somewhere to put it.  A slice card comes back by itself: the viewer
+   * already listens for its WebGL context being lost.
+   */
+  useEffect(() => {
+    const element = canvas.current;
+    if (element === null) return;
+    const repaint = () => {
+      const context = element.getContext("2d");
+      const last = image.current;
+      if (context !== null && last !== undefined) context.putImageData(last, 0, 0);
+    };
+    element.addEventListener("contextrestored", repaint);
+    return () => element.removeEventListener("contextrestored", repaint);
+  }, []);
+
   useEffect(() => {
     if (sourceId === null) {
       setStatus("no-source");

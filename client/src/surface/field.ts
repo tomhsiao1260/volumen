@@ -1,19 +1,25 @@
 /**
- * @file Lasagna's prediction around a patch, as a field over positions of the full-resolution scan
+ * @file The prediction around a patch, as a field over positions of the full-resolution scan
  * (z, y, x voxels; voxel i is centred on i):
  *
  *   normal(z, y, x, ref)   the sheet normal, its sign chosen to agree with `ref` (the prediction is
  *                          unsigned), written to `out`
  *   density(z, y, x)       sheets crossed per voxel along the normal, 0 where there is no prediction
  *   phase(z, y, x)         1 on a sheet, 0 halfway between two sheets
+ *   band(z, y, x)          the surface prediction: above 127 where a sheet's face is
  *
  * Copied out of the chunks into dense arrays once per patch, because building a patch samples it a
- * few million times.  Of the three, the phase is what says where the sheets are: the density agreed
- * with the actual spacing only to within about 1.5× on Scrolls 1 and 3, so it is used to shape the
- * steps between sheets, never to count them.
+ * few million times.
+ *
+ * What says where the sheets are is the band, where the scan has one: it is 2–10 µm a voxel against
+ * the phase's 19 µm, and measured on Scrolls 1, 3 and PHerc1447 it puts whole layers on papyrus
+ * 92–100% of the time against the phase's 1–100%.  The phase is the fallback for the scans with no
+ * surface prediction.  The density is never counted on: its winding scale is not the same from one
+ * scan to the next — on PHerc1447 it under-counts by about four — so it only says where there is a
+ * prediction at all, and roughly how far apart the sheets are.
  */
 
-import type { ZarrLevel } from "./store";
+import type { Dense, ZarrLevel } from "./store";
 
 export type Vec3 = [number, number, number];
 
@@ -28,6 +34,12 @@ export class LasagnaField {
   private oc: number[];
   private dc: number[];
   private ph: Uint8Array;
+  private fm = 0;
+  private om: number[] = [];
+  private dm: number[] = [];
+  private mk: Uint8Array | undefined;
+  // Whether the surface prediction is there, and so whether `band` says anything.
+  readonly hasBands: boolean;
   // Where `normal` writes its answer.
   readonly out = new Float64Array(3);
 
@@ -39,6 +51,7 @@ export class LasagnaField {
     channels: { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel },
     lo: Vec3,
     hi: Vec3,
+    mask?: MaskBox,
   ) {
     const { nx, ny, grad_mag: gm, cos } = channels;
     this.f = nx.factor;
@@ -62,6 +75,13 @@ export class LasagnaField {
     const c = cos.copyBox(cbox.lo, cbox.hi);
     this.dc = c.dims;
     this.ph = c.data;
+    this.hasBands = mask !== undefined;
+    if (mask !== undefined) {
+      this.fm = mask.factor;
+      this.om = mask.lo;
+      this.dm = mask.dims;
+      this.mk = mask.data;
+    }
   }
 
   normal(z: number, y: number, x: number, rz: number, ry: number, rx: number) {
@@ -136,19 +156,47 @@ export class LasagnaField {
     return v / 255;
   }
 
+  band(z: number, y: number, x: number) {
+    const mk = this.mk;
+    if (mk === undefined) return 0;
+    const f = this.fm, d = this.dm;
+    const lz = (z + 0.5) / f - 0.5 - this.om[0];
+    const ly = (y + 0.5) / f - 0.5 - this.om[1];
+    const lx = (x + 0.5) / f - 0.5 - this.om[2];
+    const z0 = Math.floor(lz), y0 = Math.floor(ly), x0 = Math.floor(lx);
+    if (z0 < 0 || y0 < 0 || x0 < 0 || z0 + 1 >= d[0] || y0 + 1 >= d[1] || x0 + 1 >= d[2]) return 0;
+    const tz = lz - z0, ty = ly - y0, tx = lx - x0;
+    let v = 0;
+    for (let c = 0; c < 8; c++) {
+      const cz = c >> 2, cy = (c >> 1) & 1, cx = c & 1;
+      v +=
+        (cz ? tz : 1 - tz) *
+        (cy ? ty : 1 - ty) *
+        (cx ? tx : 1 - tx) *
+        mk[((z0 + cz) * d[1] + y0 + cy) * d[2] + x0 + cx];
+    }
+    return v;
+  }
+
   /**
-   * Follows the normal from `x0` (RK2, steps of `ds` voxels), on the side `dir` of `n0`, until the
-   * density has counted `maxW` sheets or the field ends.  Returns the positions (flat z, y, x), the
-   * signed density integral and the phase at every step after the start.
+   * Follows the normal from `x0` (RK2, steps of `ds` voxels), on the side `dir` of `n0`, until it has
+   * crossed `sheets` sheets or the field ends.  Sheets are counted as bands of the surface prediction
+   * where there is one and by the density's winding integral where there is not — and the density
+   * can be out by several times, so a caller relying on it has to ask for more than it needs.
+   *
+   * Returns the positions (flat z, y, x) and the phase and band at every step after the start.  The
+   * steps are all `ds` long, so the index along a line is its arc length, which is what the layers
+   * between two sheets are spaced by.
    */
-  trace(x0: Vec3, n0: Vec3, dir: 1 | -1, maxW: number, ds: number) {
+  trace(x0: Vec3, n0: Vec3, dir: 1 | -1, sheets: number, ds: number) {
     const cap = 4096;
-    const xs = new Float64Array(cap * 3), wg = new Float64Array(cap), ph = new Float64Array(cap);
+    const xs = new Float64Array(cap * 3), ph = new Float64Array(cap), bd = new Float64Array(cap);
     let [z, y, x] = x0;
     let rz = n0[0] * dir, ry = n0[1] * dir, rx = n0[2] * dir;
-    let w = 0, n = 0;
+    let w = 0, n = 0, crossed = 0;
+    let on = this.band(z, y, x) > 127;
     const o = this.out;
-    while (n < cap && w < maxW) {
+    while (n < cap && (this.hasBands ? crossed <= sheets : w < sheets)) {
       if (!this.normal(z, y, x, rz, ry, rx)) break;
       const mz = z + o[0] * ds * 0.5, my = y + o[1] * ds * 0.5, mx = x + o[2] * ds * 0.5;
       if (!this.normal(mz, my, mx, o[0], o[1], o[2])) break;
@@ -164,11 +212,14 @@ export class LasagnaField {
       xs[n * 3] = z;
       xs[n * 3 + 1] = y;
       xs[n * 3 + 2] = x;
-      wg[n] = w * dir;
       ph[n] = this.phase(z, y, x);
+      bd[n] = this.band(z, y, x);
+      const wasOn = on;
+      on = bd[n] > 127;
+      if (on && !wasOn) crossed++;
       n++;
     }
-    return { n, xs, wg, ph };
+    return { n, xs, ph, bd };
   }
 }
 
@@ -180,6 +231,21 @@ function fieldBox(level: ZarrLevel, lo: Vec3, hi: Vec3) {
     lo: lo.map((v) => Math.floor(v / f) - 1),
     hi: hi.map((v) => Math.floor(v / f) + 1),
   };
+}
+
+/**
+ * The surface prediction over the box, read out chunk by chunk rather than through the store like
+ * the other channels: its chunks are far too big to keep (see `readBox`).
+ */
+export interface MaskBox extends Dense {
+  lo: number[];
+  factor: number;
+}
+
+export async function readMask(level: ZarrLevel, lo: Vec3, hi: Vec3): Promise<MaskBox> {
+  const box = fieldBox(level, lo, hi);
+  const dense = await level.readBox(box.lo, box.hi);
+  return { ...dense, lo: box.lo, factor: level.factor };
 }
 
 // The chunks of each channel the field for this box needs.

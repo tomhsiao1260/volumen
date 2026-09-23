@@ -1,5 +1,5 @@
 /**
- * The Lasagna prediction of a scan, which a surface card flattens the papyrus with:
+ * What a surface card flattens the papyrus with.  The Lasagna prediction gives the sheet normals:
  *
  *   s3://vesuvius-challenge-open-data/<sample>/representations/predictions/lasagna/<scanId>-lasagna-<model>[-L2]/
  *     <name>.lasagna.json          which array holds each channel, and at which level
@@ -7,11 +7,15 @@
  *     <name>_grad_mag.ome.zarr/4   sheets crossed per voxel (u8 / 4000)
  *     <name>_nx.ome.zarr/4, _ny    the sheet normal's x and y (unsigned)
  *
- * and the scroll's axis, which tells which way is outward:
+ * the surface prediction says where the sheets themselves are, far more finely than the phase does:
  *
- *   s3://vesuvius-challenge-open-data/<sample>/representations/umbilicus/<scanId>-umbilicus-<date>.json
+ *   s3://…/<sample>/representations/predictions/surfaces/<scanId>-surface-<model>-L<n>-th<t>.zarr/<level>
  *
- * Both are found by the scan's id, the timestamp its folder name starts with.  Each channel becomes a
+ * and the scroll's axis tells which way is outward:
+ *
+ *   s3://…/<sample>/representations/umbilicus/<scanId>-umbilicus-<date>.json
+ *
+ * All are found by the scan's id, the timestamp its folder name starts with.  Each array becomes a
  * source of its own, so that its chunks are downloaded once and kept like a scan's.
  */
 
@@ -26,6 +30,10 @@ export type Channel = (typeof CHANNELS)[number];
 export interface Lasagna {
   // The source serving each channel's array, and the scan level the array is on.
   channels: Record<Channel, { sourceId: string; level: number }>;
+  // The surface prediction, 255 where the model has a sheet's face: the source serving one level of
+  // it, about 10 µm a voxel, and which scan level that is.  Null where the bucket has none for this
+  // scan, and then the phase has to say where the sheets are instead.
+  mask: { sourceId: string; level: number } | null;
   // The scroll's axis, in voxels of the full-resolution scan and in order of z, or null where there
   // is none.
   umbilicus: { x: number; y: number; z: number }[] | null;
@@ -57,11 +65,38 @@ async function getJson(url: string) {
   return response.json();
 }
 
-// `.../PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr` -> PHercParis4, 20260411134726
+// `.../PHercParis4/volumes/20260411134726-2.400um-0.2m-78keV-masked.zarr` -> PHercParis4, 20260411134726, 2.4
 function parseScanUrl(url: string) {
-  const match = url.match(/^(.*)\/([^/]+)\/volumes\/(\d+)-[^/]*\.zarr$/);
+  const match = url.match(/^(.*)\/([^/]+)\/volumes\/(\d+)-([\d.]+)um-[^/]*\.zarr$/);
   if (match === null || match[1] !== BUCKET_URL) return undefined;
-  return { sample: match[2], scanId: match[3] };
+  return { sample: match[2], scanId: match[3], micron: Number(match[4]) };
+}
+
+/**
+ * The surface prediction for a scan.  Its folder name says which scan level the prediction's own
+ * level 0 is (`-L2`) — the arrays claim a scale of 1 whatever they are — and of its levels the one
+ * nearest 10 µm is taken: the sheets are 100–250 µm apart, so that is fine enough to follow them
+ * and small enough to read a card's worth of.
+ */
+async function findMask(sample: string, scanId: string, micron: number) {
+  const prefix = `${sample}/representations/predictions/surfaces/`;
+  const { folders } = await list(prefix);
+  const folder = folders
+    .filter((name) => name.startsWith(`${scanId}-surface-`) && name.endsWith(".zarr"))
+    .sort((a, b) => Number(/-L(\d)/.exec(a)?.[1] ?? 9) - Number(/-L(\d)/.exec(b)?.[1] ?? 9))[0];
+  if (folder === undefined) return null;
+  const base = Number(/-L(\d)/.exec(folder)?.[1] ?? 0);
+  const wanted = micron > 0 ? Math.round(Math.log2(10 / (micron * 2 ** base))) : 0;
+  const { folders: levels } = await list(`${prefix}${folder}/`);
+  const there = levels.map(Number).filter((level) => Number.isInteger(level));
+  if (there.length === 0) return null;
+  const level = there.filter((one) => one <= wanted).sort((a, b) => b - a)[0] ?? Math.min(...there);
+  const source = await upsertSource({
+    local: "",
+    http: `${BUCKET_URL}/${prefix}${folder}/${level}`,
+    name: `${sample} · surfaces`,
+  });
+  return { sourceId: source.id, level: base + level };
 }
 
 async function findUmbilicus(sample: string, scanId: string) {
@@ -104,7 +139,11 @@ async function find(scanUrl: string): Promise<Lasagna | null> {
     });
     channels[channel] = { sourceId: source.id, level: group.scaledown };
   }
-  return { channels, umbilicus: await findUmbilicus(sample, scanId) };
+  return {
+    channels,
+    mask: await findMask(sample, scanId, scan.micron),
+    umbilicus: await findUmbilicus(sample, scanId),
+  };
 }
 
 /**

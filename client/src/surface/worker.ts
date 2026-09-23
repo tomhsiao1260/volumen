@@ -10,7 +10,7 @@
  */
 
 import { SERVER_API_ENDPOINT } from "../config";
-import { chunksFor, LasagnaField } from "./field";
+import { chunksFor, LasagnaField, readMask } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, layerGrid, outward } from "./patch";
@@ -22,9 +22,11 @@ import type { FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./ty
 // Sheets each side of the one the card sits on, and table layers per sheet.
 const K = 3;
 const PER = 8;
-// How far the streamlines are followed, in sheets as the density counts them: past K, with room for
-// the density to be out by the 1.5–2× seen on Scrolls 1 and 3.
-const TRACE_SHEETS = (K + 0.5) * 1.6;
+// How far the streamlines are followed, in sheets: one past K, so that the table is filled to its
+// edge.  Without a surface prediction they are counted by the density instead, which can be out by
+// 1.5–2× on the scans measured, so more are asked for.
+const TRACE_SHEETS = K + 1;
+const TRACE_SHEETS_BY_DENSITY = (K + 0.5) * 1.6;
 
 const worker = self as unknown as {
   onmessage: ((message: MessageEvent<SurfaceRequest>) => void) | null;
@@ -91,6 +93,29 @@ const REDRAW_MS = 120;
  * follow them and the flattening suffers — but no more than 65 a side, which caps what building one
  * costs.
  */
+// Voxels either side of the seed read before the rest, to find the normal and the sheet spacing.
+const NEAR = 96;
+
+/**
+ * How far apart the sheets are at `p`, in voxels: the middles of the surface prediction's bands
+ * along the normal where there are two to measure between, and the density's guess otherwise, which
+ * is only ever right to within a few times.
+ */
+function sheetSpacing(field: LasagnaField, p: Vec3, n: Vec3) {
+  const guess = Math.min(150, Math.max(15, 1 / (field.density(p[0], p[1], p[2]) || 1 / 60)));
+  if (!field.hasBands) return guess;
+  const middles: number[] = [];
+  let start: number | undefined;
+  for (let t = -NEAR; t <= NEAR; t += 1) {
+    const on = field.band(p[0] + n[0] * t, p[1] + n[1] * t, p[2] + n[2] * t) > 127;
+    if (on && start === undefined) start = t;
+    if (!on && start !== undefined) (middles.push((start + t - 1) / 2), (start = undefined));
+  }
+  if (middles.length < 2) return guess;
+  const gaps = middles.slice(1).map((m, i) => m - middles[i]).sort((a, b) => a - b);
+  return Math.min(300, Math.max(15, gaps[gaps.length >> 1]));
+}
+
 function gridFor(width: number, height: number, zoom: number): PatchGrid {
   const spacing = Math.min(24, Math.max(6, zoom * 4));
   const count = (extent: number) => {
@@ -105,7 +130,9 @@ class Card {
   private closed = false;
   private patch: Patch | undefined;
   private scan: ZarrLevel[] | undefined;
-  private channels: { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel } | undefined;
+  private channels:
+    | { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel; mask?: ZarrLevel }
+    | undefined;
   // The sheet the piece was built on, counted from the one the card was opened on.
   private baseW = 0;
   private wanted: number;
@@ -152,6 +179,10 @@ class Card {
         grad_mag: await channelLevel(lasagna.channels.grad_mag.sourceId, lasagna.channels.grad_mag.level),
         nx: await channelLevel(lasagna.channels.nx.sourceId, lasagna.channels.nx.level),
         ny: await channelLevel(lasagna.channels.ny.sourceId, lasagna.channels.ny.level),
+        mask:
+          lasagna.mask === null
+            ? undefined
+            : await channelLevel(lasagna.mask.sourceId, lasagna.mask.level),
       };
       const at: Vec3 = [seed.z, seed.y, seed.x];
       const built = await this.build(at, outward(lasagna.umbilicus, at));
@@ -190,27 +221,32 @@ class Card {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
-    const channels = this.channels!;
+    const { mask, ...channels } = this.channels!;
+    const bands = mask !== undefined;
     const all = [channels.cos, channels.grad_mag, channels.nx, channels.ny];
     const started = performance.now();
     const load = async (lo: Vec3, hi: Vec3) => {
-      await Promise.all(all.map((level) => level.loadAll(chunksFor(level, lo, hi))));
-      return new LasagnaField(channels, lo, hi);
+      const [box] = await Promise.all([
+        mask === undefined ? undefined : readMask(mask, lo, hi),
+        ...all.map((level) => level.loadAll(chunksFor(level, lo, hi))),
+      ]);
+      return new LasagnaField(channels, lo, hi, box);
     };
 
     // A small box first, for the normal and the sheet spacing, which decide how much is needed.
-    const near = await load(seed.map((v) => v - 64) as Vec3, seed.map((v) => v + 64) as Vec3);
+    const near = await load(seed.map((v) => v - NEAR) as Vec3, seed.map((v) => v + NEAR) as Vec3);
     if (this.closed) return undefined;
     const reference = towards ?? [0, 1, 0];
     if (!near.normal(seed[0], seed[1], seed[2], reference[0], reference[1], reference[2])) {
       return undefined;
     }
     const n: Vec3 = [near.out[0], near.out[1], near.out[2]];
-    const spacing = Math.min(150, Math.max(15, 1 / (near.density(seed[0], seed[1], seed[2]) || 1 / 60)));
+    const spacing = sheetSpacing(near, seed, n);
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
-    const depth = TRACE_SHEETS * spacing;
+    const sheets = bands ? TRACE_SHEETS : TRACE_SHEETS_BY_DENSITY;
+    const depth = (sheets + 0.5) * spacing;
     const tangent = Math.hypot(across, down) * zoom * 0.6;
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(
@@ -219,7 +255,7 @@ class Card {
     );
     if (this.closed) return undefined;
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, gridFor(across, down, zoom), K, PER, TRACE_SHEETS);
+    const patch = buildPatch(field, seed, n, gridFor(across, down, zoom), K, PER, sheets);
     return patch === undefined ? undefined : { patch, spacing, read };
   }
 

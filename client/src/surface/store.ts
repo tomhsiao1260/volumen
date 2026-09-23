@@ -158,26 +158,69 @@ export class ZarrLevel {
   }
 
   /**
+   * Copies the voxels between `lo` and `hi` into a dense array, one chunk at a time: each chunk is
+   * loaded, copied and then dropped again unless it was already in the store.  For an array whose
+   * chunks are too big to hold together — the surface prediction's are 192³ or 256³, 7–17 MB each
+   * decoded, and a card's worth of them would fill the whole store several times over.
+   */
+  async readBox(lo: number[], hi: number[], signal?: AbortSignal) {
+    const box = this.chunksBetween(lo, hi);
+    const out = empty(lo, hi);
+    const at = { next: 0 };
+    const one = async () => {
+      while (at.next < box.length) {
+        const [cz, cy, cx] = box[at.next++];
+        const key = this.key(cz, cy, cx);
+        const had = chunks.has(key);
+        await this.load(cz, cy, cx, signal);
+        this.copyChunkInto(out, lo, hi, cz, cy, cx);
+        if (!had) {
+          used -= chunks.get(key)?.byteLength ?? 0;
+          chunks.delete(key);
+        }
+      }
+    };
+    // A few at a time: the waiting is on the network, but every one in flight is another chunk held.
+    await Promise.all([one(), one(), one()]);
+    return out;
+  }
+
+  /**
    * Copies the voxels between `lo` and `hi` (inclusive, level voxels) into a dense array, zero where
    * the array has nothing; the chunks must be loaded.
    */
   copyBox(lo: number[], hi: number[]) {
-    const [dz, dy, dx] = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
-    const out = new Uint8Array(dz * dy * dx);
-    const [kz, ky, kx] = this.meta.chunks;
+    const out = empty(lo, hi);
     for (const [cz, cy, cx] of this.chunksBetween(lo, hi)) {
-      const data = this.get(cz, cy, cx);
-      if (!data) continue;
-      const z0 = Math.max(lo[0], cz * kz), z1 = Math.min(hi[0], cz * kz + kz - 1);
-      const y0 = Math.max(lo[1], cy * ky), y1 = Math.min(hi[1], cy * ky + ky - 1);
-      const x0 = Math.max(lo[2], cx * kx), x1 = Math.min(hi[2], cx * kx + kx - 1);
-      for (let z = z0; z <= z1; z++)
-        for (let y = y0; y <= y1; y++) {
-          const from = ((z - cz * kz) * ky + (y - cy * ky)) * kx + (x0 - cx * kx);
-          const to = ((z - lo[0]) * dy + (y - lo[1])) * dx + (x0 - lo[2]);
-          out.set(data.subarray(from, from + x1 - x0 + 1), to);
-        }
+      this.copyChunkInto(out, lo, hi, cz, cy, cx);
     }
-    return { data: out, dims: [dz, dy, dx] as [number, number, number] };
+    return out;
   }
+
+  private copyChunkInto(out: Dense, lo: number[], hi: number[], cz: number, cy: number, cx: number) {
+    const data = this.get(cz, cy, cx);
+    if (!data) return;
+    const [kz, ky, kx] = this.meta.chunks;
+    const [, dy, dx] = out.dims;
+    const z0 = Math.max(lo[0], cz * kz), z1 = Math.min(hi[0], cz * kz + kz - 1);
+    const y0 = Math.max(lo[1], cy * ky), y1 = Math.min(hi[1], cy * ky + ky - 1);
+    const x0 = Math.max(lo[2], cx * kx), x1 = Math.min(hi[2], cx * kx + kx - 1);
+    for (let z = z0; z <= z1; z++)
+      for (let y = y0; y <= y1; y++) {
+        const from = ((z - cz * kz) * ky + (y - cy * ky)) * kx + (x0 - cx * kx);
+        const to = ((z - lo[0]) * dy + (y - lo[1])) * dx + (x0 - lo[2]);
+        out.data.set(data.subarray(from, from + x1 - x0 + 1), to);
+      }
+  }
+}
+
+// A box of voxels copied out of an array, all zero to begin with.
+export interface Dense {
+  data: Uint8Array;
+  dims: [number, number, number];
+}
+
+function empty(lo: number[], hi: number[]): Dense {
+  const dims: [number, number, number] = [hi[0] - lo[0] + 1, hi[1] - lo[1] + 1, hi[2] - lo[2] + 1];
+  return { data: new Uint8Array(dims[0] * dims[1] * dims[2]), dims };
 }

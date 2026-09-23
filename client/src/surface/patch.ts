@@ -1,6 +1,6 @@
 /**
  * @file A flattened piece of papyrus: a grid over one sheet, and for every grid point where each
- * neighbouring sheet is, found by following the sheet normal through the Lasagna field.
+ * neighbouring sheet is, found by following the sheet normal through the field.
  *
  * The result is a table P[k][i][j] of scan positions: row i and column j of the grid on layer
  * w = k / per, where whole w are sheets and halves the gaps between them.  Drawing a layer is then
@@ -8,15 +8,18 @@
  *
  *   1. the base surface: a height field over the tangent plane at the seed whose slopes match the
  *      normals (least squares), so that the grid lies along the sheet;
- *   2. every grid point moved along its normal onto the nearest phase peak, i.e. onto the sheet;
- *   3. from every grid point, a streamline along the normal both ways, on which the phase's peaks
- *      are sheets (whole w) and its troughs gaps (half w);
- *   4. those peaks and troughs labelled consistently across the grid, from the centre outward, each
- *      taking the label of the nearest one on a labelled neighbour — so that a streamline that saw
- *      one sheet more or less than its neighbours does not tear the layer.
+ *   2. every grid point moved along its normal onto the nearest sheet;
+ *   3. from every grid point, a streamline along the normal both ways, on which the sheets it
+ *      crossed are whole w and the gaps between them half w;
+ *   4. those sheets labelled consistently across the grid, from the centre outward, each taking the
+ *      label of the nearest one on a labelled neighbour — so that a streamline that saw one sheet
+ *      more or less than its neighbours does not tear the layer.
  *
- * Tried against Scrolls 1 and 3 before it was written here: where the sheets are distinct, the
- * whole layers land on papyrus 85–100% of the time; where they are crumpled, it fails.
+ * Where a sheet is comes from the surface prediction where the scan has one, and from the phase
+ * where it has not (`field.ts`).  Measured against Scrolls 1, 3 and PHerc1447: with the prediction
+ * whole layers land on papyrus 92–100% of the time, with the phase 1–100%.  Between two sheets the
+ * layers are spaced evenly along the streamline; the density is not used for this, because the
+ * windings it counts are not the same size from one scan to the next.
  */
 
 import type { LasagnaField, Vec3 } from "./field";
@@ -61,9 +64,38 @@ export function outward(
   return length < 1 ? undefined : [0, dy / length, dx / length];
 }
 
-// Moves `p` along `n` onto the nearest phase peak within half a sheet spacing either way.
+/**
+ * How far along `n` from `p` the middle of the nearest band of the surface prediction is, looking
+ * `span` voxels either way; undefined if there is none in reach.  A band is 20–40 µm of a sheet's
+ * face, so its middle is the sheet.
+ */
+function bandCentre(field: LasagnaField, p: Vec3, n: Vec3, span: number) {
+  let best: number | undefined;
+  let start: number | undefined;
+  let t = -span;
+  for (; t <= span; t += 0.5) {
+    const on = field.band(p[0] + n[0] * t, p[1] + n[1] * t, p[2] + n[2] * t) > 127;
+    if (on && start === undefined) start = t;
+    if (!on && start !== undefined) {
+      const middle = (start + t - 0.5) / 2;
+      if (best === undefined || Math.abs(middle) < Math.abs(best)) best = middle;
+      start = undefined;
+    }
+  }
+  if (start !== undefined) {
+    const middle = (start + t - 0.5) / 2;
+    if (best === undefined || Math.abs(middle) < Math.abs(best)) best = middle;
+  }
+  return best;
+}
+
+// Moves `p` along `n` onto the nearest sheet within half a sheet spacing either way.
 export function snapToSheet(field: LasagnaField, p: Vec3, n: Vec3) {
   const span = 0.5 / (field.density(p[0], p[1], p[2]) || 1 / 40);
+  if (field.hasBands) {
+    const t = bandCentre(field, p, n, span);
+    return t === undefined ? undefined : add(p, mul(n, t));
+  }
   let best: { t: number; phase: number } | undefined;
   let before = -1, previous = -1;
   for (let t = -span - 1; t <= span + 1; t += 0.5) {
@@ -179,7 +211,7 @@ function baseSurface(field: LasagnaField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
   return { X, N, right, down };
 }
 
-// Moves every base point along its normal onto the nearest phase peak, the moves smoothed (median of
+// Moves every base point along its normal onto the nearest sheet, the moves smoothed (median of
 // 5×5) so that neighbours do not land on different sheets.
 function snapBase(field: LasagnaField, grid: PatchGrid, X: Float64Array, N: Float64Array) {
   const { nu, nv } = grid;
@@ -188,6 +220,10 @@ function snapBase(field: LasagnaField, grid: PatchGrid, X: Float64Array, N: Floa
     const p: Vec3 = [X[k * 3], X[k * 3 + 1], X[k * 3 + 2]];
     const n: Vec3 = [N[k * 3], N[k * 3 + 1], N[k * 3 + 2]];
     const span = 0.4 / (field.density(p[0], p[1], p[2]) || 1 / 40) / 1.5;
+    if (field.hasBands) {
+      offsets[k] = bandCentre(field, p, n, span) ?? 0;
+      continue;
+    }
     let best = 0, bestValue = -1;
     for (let t = -span; t <= span; t += 0.5) {
       const value = field.phase(p[0] + n[0] * t, p[1] + n[1] * t, p[2] + n[2] * t) - 0.002 * Math.abs(t);
@@ -222,7 +258,6 @@ interface Anchor {
 interface Line {
   n: number;
   xs: Float64Array;
-  wg: Float64Array;
   anchors: Anchor[];
   normal: Vec3;
 }
@@ -231,25 +266,33 @@ const DS = 2; // streamline step, voxels
 const HYSTERESIS = 0.1; // phase change that makes a peak or a trough
 const MATCH = 0.3; // of a sheet spacing: how close two neighbours' anchors must be to be the same
 
-// A streamline through base point `x0`, both ways as far as the density counts `sheets`, with the
-// peaks and troughs of its phase.
-function traceLine(field: LasagnaField, x0: Vec3, normal: Vec3, sheets: number): Line {
-  const a = field.trace(x0, normal, -1, sheets, DS);
-  const b = field.trace(x0, normal, 1, sheets, DS);
-  const n = a.n + 1 + b.n, i0 = a.n;
-  const xs = new Float64Array(n * 3), wg = new Float64Array(n), ph = new Float64Array(n);
-  for (let i = 0; i < a.n; i++) {
-    const j = a.n - 1 - i;
-    xs.set(a.xs.subarray(j * 3, j * 3 + 3), i * 3);
-    wg[i] = a.wg[j];
-    ph[i] = a.ph[j];
+// The sheets a line crossed, as the surface prediction has them: the middle of each band, with the
+// middle of each gap between two bands as a half sheet.  The band the base point is in, or the one
+// nearest it, is sheet 0.
+function bandAnchors(bd: Float64Array, n: number, i0: number): Anchor[] {
+  const middles: number[] = [];
+  let start: number | undefined;
+  for (let i = 0; i < n; i++) {
+    const on = bd[i] > 127;
+    if (on && start === undefined) start = i;
+    if (!on && start !== undefined) (middles.push((start + i - 1) / 2), (start = undefined));
   }
-  xs.set(x0, i0 * 3);
-  ph[i0] = field.phase(x0[0], x0[1], x0[2]);
-  xs.set(b.xs.subarray(0, b.n * 3), (i0 + 1) * 3);
-  wg.set(b.wg.subarray(0, b.n), i0 + 1);
-  ph.set(b.ph.subarray(0, b.n), i0 + 1);
-  // The phase smoothed over ±2 voxels, then walked out from the base, which sits on a peak.
+  if (start !== undefined) middles.push((start + n - 1) / 2);
+  if (middles.length === 0) return [];
+  let here = 0;
+  middles.forEach((m, i) => {
+    if (Math.abs(m - i0) < Math.abs(middles[here] - i0)) here = i;
+  });
+  const anchors: Anchor[] = middles.map((m, i) => ({ i: Math.round(m), raw: i - here }));
+  for (let i = 0; i + 1 < middles.length; i++) {
+    anchors.push({ i: Math.round((middles[i] + middles[i + 1]) / 2), raw: i - here + 0.5 });
+  }
+  return anchors.sort((p, q) => p.i - q.i);
+}
+
+// The sheets a line crossed, as the phase has them: its peaks, walked out from the base, which sits
+// on one, with its troughs between them as half sheets.
+function phaseAnchors(ph: Float64Array, n: number, i0: number): Anchor[] {
   const smooth = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     let s = 0, c = 0;
@@ -274,16 +317,38 @@ function traceLine(field: LasagnaField, x0: Vec3, normal: Vec3, sheets: number):
       }
     }
   }
-  anchors.sort((p, q) => p.i - q.i);
-  return { n, xs, wg, anchors, normal };
+  return anchors.sort((p, q) => p.i - q.i);
+}
+
+// A streamline through base point `x0`, both ways until it has crossed `sheets` sheets, with the
+// sheets it crossed marked on it.
+function traceLine(field: LasagnaField, x0: Vec3, normal: Vec3, sheets: number): Line {
+  const a = field.trace(x0, normal, -1, sheets, DS);
+  const b = field.trace(x0, normal, 1, sheets, DS);
+  const n = a.n + 1 + b.n, i0 = a.n;
+  const xs = new Float64Array(n * 3), ph = new Float64Array(n), bd = new Float64Array(n);
+  for (let i = 0; i < a.n; i++) {
+    const j = a.n - 1 - i;
+    xs.set(a.xs.subarray(j * 3, j * 3 + 3), i * 3);
+    ph[i] = a.ph[j];
+    bd[i] = a.bd[j];
+  }
+  xs.set(x0, i0 * 3);
+  ph[i0] = field.phase(x0[0], x0[1], x0[2]);
+  bd[i0] = field.band(x0[0], x0[1], x0[2]);
+  xs.set(b.xs.subarray(0, b.n * 3), (i0 + 1) * 3);
+  ph.set(b.ph.subarray(0, b.n), i0 + 1);
+  bd.set(b.bd.subarray(0, b.n), i0 + 1);
+  const anchors = field.hasBands ? bandAnchors(bd, n, i0) : phaseAnchors(ph, n, i0);
+  return { n, xs, anchors, normal };
 }
 
 /**
  * The patch over `grid` around `seed` (full-resolution voxels, z/y/x), `K` sheets each way, or
  * undefined where there is no sheet to build it on.  w grows in the direction of the normal that
  * agrees with `towards` — away from the scroll's axis, or the way a previous patch went.  The
- * streamlines are followed as far as the density counts `sheets`, which has to allow for it being
- * wrong.
+ * streamlines are followed until they have crossed `sheets` sheets; without a surface prediction
+ * that count is the density's, which has to allow for it being wrong.
  */
 export function buildPatch(
   field: LasagnaField,
@@ -368,26 +433,25 @@ export function buildPatch(
     done[k] = 1;
   }
 
-  // w along every line — the density's share between two labelled anchors, the density scaled by
-  // the line's own sheet spacing beyond them — and where it crosses each k / per.
+  // w along every line — evenly between two labelled anchors, at the line's own rate beyond them —
+  // and where it crosses each k / per.
   const L = 2 * K * per + 1;
   const P = new Float32Array(L * nu * nv * 3).fill(NaN);
   for (let node = 0; node < nu * nv; node++) {
-    const { n, xs, wg, anchors } = lines[node];
+    const { n, xs, anchors } = lines[node];
     if (anchors.length === 0) continue;
     const w = new Float64Array(n);
     for (let a = 0; a + 1 < anchors.length; a++) {
       const A = anchors[a], B = anchors[a + 1];
-      const span = wg[B.i] - wg[A.i] || 1;
-      for (let i = A.i; i <= B.i; i++) w[i] = A.label! + ((wg[i] - wg[A.i]) / span) * (B.label! - A.label!);
+      for (let i = A.i; i <= B.i; i++) w[i] = A.label! + ((i - A.i) / (B.i - A.i)) * (B.label! - A.label!);
     }
     const first = anchors[0], last = anchors[anchors.length - 1];
-    const scale =
+    const rate =
       anchors.length >= 2
-        ? Math.max(0.4, Math.min(1.5, (last.label! - first.label!) / (wg[last.i] - wg[first.i] || 1)))
-        : 1;
-    for (let i = 0; i < first.i; i++) w[i] = first.label! + (wg[i] - wg[first.i]) * scale;
-    for (let i = last.i; i < n; i++) w[i] = last.label! + (wg[i] - wg[last.i]) * scale;
+        ? (last.label! - first.label!) / (last.i - first.i)
+        : 0.5 / Math.max(1, halfSpacing / DS);
+    for (let i = 0; i < first.i; i++) w[i] = first.label! + (i - first.i) * rate;
+    for (let i = last.i; i < n; i++) w[i] = last.label! + (i - last.i) * rate;
     for (let i = 1; i < n; i++) {
       const w0 = w[i - 1], w1 = w[i];
       if (w1 <= w0) continue;
