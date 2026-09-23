@@ -161,6 +161,8 @@ export function useBoardGestures({
       const target = event.target as HTMLElement;
       // Buttons in a card's chrome keep their click.
       if (target.closest("button") !== null) return;
+      // So does a field being typed into: dragging across it selects text, as it does anywhere else.
+      if (target.closest("input, textarea") !== null) return;
       const id = cardAt(event.target);
       if (event.button === 1 || (event.button === 0 && spaceHeld)) {
         drag(event, () => 1, panBy);
