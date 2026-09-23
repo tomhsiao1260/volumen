@@ -30,10 +30,14 @@ export type Channel = (typeof CHANNELS)[number];
 export interface Lasagna {
   // The source serving each channel's array, and the scan level the array is on.
   channels: Record<Channel, { sourceId: string; level: number }>;
-  // The surface prediction, 255 where the model has a sheet's face: the source serving one level of
-  // it, about 10 µm a voxel, and which scan level that is.  Null where the bucket has none for this
-  // scan, and then the phase has to say where the sheets are instead.
-  mask: { sourceId: string; level: number } | null;
+  // The surface prediction, 255 where the model has a sheet's face: the source serving the whole
+  // store, and which scan level its own level 0 is — the folder's `-L<n>`, since the arrays all
+  // claim a scale of 1 whatever they are.  A card picks the level it needs from that.  Null where
+  // the bucket has none for this scan, and then the phase has to say where the sheets are instead.
+  mask: { sourceId: string; base: number; micron: number } | null;
+  // How big a voxel of the full-resolution scan is, in µm: what a card needs to turn the size it
+  // covers into a level to read the prediction at.
+  micron: number;
   // The scroll's axis, in voxels of the full-resolution scan and in order of z, or null where there
   // is none.
   umbilicus: { x: number; y: number; z: number }[] | null;
@@ -73,10 +77,9 @@ function parseScanUrl(url: string) {
 }
 
 /**
- * The surface prediction for a scan.  Its folder name says which scan level the prediction's own
- * level 0 is (`-L2`) — the arrays claim a scale of 1 whatever they are — and of its levels the one
- * nearest 10 µm is taken: the sheets are 100–250 µm apart, so that is fine enough to follow them
- * and small enough to read a card's worth of.
+ * The surface prediction for a scan: the whole store, and which scan level its own level 0 is.  The
+ * folder name says that (`-L2`) and nothing else does — every level's `.zattrs` claims a scale of 1 —
+ * so it is read from there and passed on, for a card to pick a level against how much it covers.
  */
 async function findMask(sample: string, scanId: string, micron: number) {
   const prefix = `${sample}/representations/predictions/surfaces/`;
@@ -85,18 +88,13 @@ async function findMask(sample: string, scanId: string, micron: number) {
     .filter((name) => name.startsWith(`${scanId}-surface-`) && name.endsWith(".zarr"))
     .sort((a, b) => Number(/-L(\d)/.exec(a)?.[1] ?? 9) - Number(/-L(\d)/.exec(b)?.[1] ?? 9))[0];
   if (folder === undefined) return null;
-  const base = Number(/-L(\d)/.exec(folder)?.[1] ?? 0);
-  const wanted = micron > 0 ? Math.round(Math.log2(10 / (micron * 2 ** base))) : 0;
-  const { folders: levels } = await list(`${prefix}${folder}/`);
-  const there = levels.map(Number).filter((level) => Number.isInteger(level));
-  if (there.length === 0) return null;
-  const level = there.filter((one) => one <= wanted).sort((a, b) => b - a)[0] ?? Math.min(...there);
   const source = await upsertSource({
     local: "",
-    http: `${BUCKET_URL}/${prefix}${folder}/${level}`,
+    http: `${BUCKET_URL}/${prefix}${folder}`,
     name: `${sample} · surfaces`,
   });
-  return { sourceId: source.id, level: base + level };
+  const base = Number(/-L(\d)/.exec(folder)?.[1] ?? 0);
+  return { sourceId: source.id, base, micron: micron * 2 ** base };
 }
 
 async function findUmbilicus(sample: string, scanId: string) {
@@ -142,6 +140,7 @@ async function find(scanUrl: string): Promise<Lasagna | null> {
   return {
     channels,
     mask: await findMask(sample, scanId, scan.micron),
+    micron: scan.micron,
     umbilicus: await findUmbilicus(sample, scanId),
   };
 }

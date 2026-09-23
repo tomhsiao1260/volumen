@@ -10,9 +10,11 @@ export type LasagnaChannel = "cos" | "grad_mag" | "nx" | "ny";
 export interface Lasagna {
   // The source serving each channel's array, and the scan level the array is on.
   channels: Record<LasagnaChannel, { sourceId: string; level: number }>;
-  // The surface prediction — 255 where a sheet's face is — at about 10 µm a voxel, or null where the
-  // bucket has none for this scan.
-  mask: { sourceId: string; level: number } | null;
+  // The surface prediction — 255 where a sheet's face is — as the whole store, with which scan level
+  // its own level 0 is; null where the bucket has none for this scan.
+  mask: { sourceId: string; base: number; micron: number } | null;
+  // How big a voxel of the full-resolution scan is, in µm.
+  micron: number;
   // The scroll's axis in full-resolution voxels, or null where the bucket has none.
   umbilicus: { x: number; y: number; z: number }[] | null;
 }

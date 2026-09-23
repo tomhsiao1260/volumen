@@ -48,7 +48,7 @@ export class LasagnaField {
    * it must be loaded (see `chunksFor`).
    */
   constructor(
-    channels: { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel },
+    channels: { cos?: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel },
     lo: Vec3,
     hi: Vec3,
     mask?: MaskBox,
@@ -69,12 +69,22 @@ export class LasagnaField {
       this.ny[k] = (b.data[k] - 128) / 127;
       this.gm[k] = g.data[k] / 4000;
     }
-    this.fc = cos.factor;
-    const cbox = fieldBox(cos, lo, hi);
-    this.oc = cbox.lo;
-    const c = cos.copyBox(cbox.lo, cbox.hi);
-    this.dc = c.dims;
-    this.ph = c.data;
+    // The phase is only read where there is no surface prediction, and it is the largest of the
+    // channels — a card's worth of it at 19 µm is more than everything else together — so it is not
+    // read at all when the bands are there to say where the sheets are.
+    if (cos === undefined) {
+      this.fc = 1;
+      this.oc = [0, 0, 0];
+      this.dc = [0, 0, 0];
+      this.ph = new Uint8Array(0);
+    } else {
+      this.fc = cos.factor;
+      const cbox = fieldBox(cos, lo, hi);
+      this.oc = cbox.lo;
+      const c = cos.copyBox(cbox.lo, cbox.hi);
+      this.dc = c.dims;
+      this.ph = c.data;
+    }
     this.hasBands = mask !== undefined;
     if (mask !== undefined) {
       this.fm = mask.factor;

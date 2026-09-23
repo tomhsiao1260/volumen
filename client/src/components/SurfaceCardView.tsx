@@ -27,7 +27,12 @@ const MAX_DENSITY = 2;
 
 // Sheets per wheel notch, and per pixel of a trackpad's scroll.
 const NOTCH = 1 / 8;
-const PER_PIXEL = 1 / 400;
+const PER_PIXEL = 1 / 1200;
+// A gap this long starts a new scroll; and once a scroll has fallen to this much of its strongest
+// push, what is left of it is the trackpad coasting after the fingers have gone, which the card
+// ignores so that it stops when the hand stops.
+const GESTURE_GAP_MS = 120;
+const COASTING = 0.4;
 
 // What the card found is for whoever is working on it, not for the board: it is written to the
 // console of a page opened with `?debug`, like the rest of the handles there.
@@ -207,18 +212,38 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   /*
    * Alt and the wheel moves through the sheets: a notch is an eighth of one and a trackpad moves
    * smoothly.  Without Alt the board takes the wheel, as it does over a slice card.
+   *
+   * A trackpad goes on sending the scroll after the fingers have lifted, with the pushes fading
+   * away, and a card that followed them would keep sliding on its own — so once a scroll has faded
+   * well below its strongest push, the rest of it is left alone until the next one begins.
    */
   useEffect(() => {
     const element = body.current;
     if (element === null) return;
+    const scroll = { at: 0, strongest: 0, coasting: false };
     const onWheel = (event: WheelEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return;
       event.preventDefault();
       event.stopPropagation();
       const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
       if (delta === 0) return;
+      const pixels = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL && Math.abs(delta) < 40;
+      const now = event.timeStamp;
+      if (now - scroll.at > GESTURE_GAP_MS) {
+        scroll.strongest = 0;
+        scroll.coasting = false;
+      }
+      scroll.at = now;
+      if (pixels) {
+        const size = Math.abs(delta);
+        // Coasting only fades away, so a push stronger than what is left means a hand is back on.
+        if (size > scroll.strongest * 0.6) scroll.coasting = false;
+        scroll.strongest = Math.max(scroll.strongest, size);
+        if (size < scroll.strongest * COASTING) scroll.coasting = true;
+        if (scroll.coasting) return;
+      }
       let next = wanted.current;
-      if (event.deltaMode !== WheelEvent.DOM_DELTA_PIXEL || Math.abs(delta) >= 40) {
+      if (!pixels) {
         next += Math.sign(delta) * NOTCH;
       } else {
         next += delta * PER_PIXEL;

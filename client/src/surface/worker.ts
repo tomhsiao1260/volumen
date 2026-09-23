@@ -64,6 +64,18 @@ function scanLevels(sourceId: string) {
   return levels;
 }
 
+/**
+ * The level of the surface prediction to read a box of `micron` µm across: fine enough that a sheet's
+ * face is more than a voxel thick (10 µm), coarse enough that the box is a couple of hundred voxels
+ * across.  A card twice as wide covers four times the area, and at one fixed level that is four times
+ * the downloading — which is what left a large card waiting for minutes.
+ */
+function maskLevel(mask: { sourceId: string; base: number; micron: number }, micron: number) {
+  const wanted = Math.max(10, Math.min(20, micron / 220));
+  const level = Math.max(0, Math.min(5, Math.round(Math.log2(wanted / mask.micron))));
+  return channelLevel(`${mask.sourceId}/${level}`, mask.base + level);
+}
+
 function channelLevel(sourceId: string, level: number) {
   const key = `${sourceId}@${level}`;
   let array = opened.get(key);
@@ -118,9 +130,7 @@ class Card {
   private closed = false;
   private patch: Patch | undefined;
   private scan: ZarrLevel[] | undefined;
-  private channels:
-    | { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel; mask?: ZarrLevel }
-    | undefined;
+  private channels: { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel } | undefined;
   // The sheet the piece was built on, counted from the one the card was opened on.
   private baseW = 0;
   private wanted: number;
@@ -167,10 +177,6 @@ class Card {
         grad_mag: await channelLevel(lasagna.channels.grad_mag.sourceId, lasagna.channels.grad_mag.level),
         nx: await channelLevel(lasagna.channels.nx.sourceId, lasagna.channels.nx.level),
         ny: await channelLevel(lasagna.channels.ny.sourceId, lasagna.channels.ny.level),
-        mask:
-          lasagna.mask === null
-            ? undefined
-            : await channelLevel(lasagna.mask.sourceId, lasagna.mask.level),
       };
       const at: Vec3 = [seed.z, seed.y, seed.x];
       const built = await this.build(at, outward(lasagna.umbilicus, at));
@@ -210,19 +216,31 @@ class Card {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
-    const { mask, ...channels } = this.channels!;
-    const all = [channels.cos, channels.grad_mag, channels.nx, channels.ny];
+    const channels = this.channels!;
+    const lasagna = this.request.lasagna;
     const started = performance.now();
-    const load = async (lo: Vec3, hi: Vec3) => {
+    // Without a surface prediction the phase has to say where the sheets are; with one it is never
+    // read, and reading it would be most of the card's downloading for nothing.
+    const withPhase = lasagna.mask === null;
+    const all = [channels.grad_mag, channels.nx, channels.ny, ...(withPhase ? [channels.cos] : [])];
+    const load = async (lo: Vec3, hi: Vec3, mask?: ZarrLevel) => {
       const [box] = await Promise.all([
         mask === undefined ? undefined : readMask(mask, lo, hi),
         ...all.map((level) => level.loadAll(chunksFor(level, lo, hi))),
       ]);
-      return new LasagnaField(channels, lo, hi, box);
+      return new LasagnaField(withPhase ? channels : { ...channels, cos: undefined }, lo, hi, box);
     };
 
-    // A small box first, for the normal and the sheet spacing, which decide how much is needed.
-    const near = await load(seed.map((v) => v - NEAR) as Vec3, seed.map((v) => v + NEAR) as Vec3);
+    /*
+     * A small box first, for the normal and the sheet spacing, which decide how much is needed.  The
+     * prediction is read at its finest here: it is a small box, and the spacing measured on it sets
+     * the scale of everything after.
+     */
+    const near = await load(
+      seed.map((v) => v - NEAR) as Vec3,
+      seed.map((v) => v + NEAR) as Vec3,
+      lasagna.mask === null ? undefined : await maskLevel(lasagna.mask, 2 * NEAR * lasagna.micron),
+    );
     if (this.closed) return undefined;
     const reference = towards ?? [0, 1, 0];
     if (!near.normal(seed[0], seed[1], seed[2], reference[0], reference[1], reference[2])) {
@@ -239,6 +257,9 @@ class Card {
     const field = await load(
       seed.map((v, i) => v - half[i]) as Vec3,
       seed.map((v, i) => v + half[i]) as Vec3,
+      lasagna.mask === null
+        ? undefined
+        : await maskLevel(lasagna.mask, 2 * Math.max(...half) * lasagna.micron),
     );
     if (this.closed) return undefined;
     const read = performance.now() - started;
