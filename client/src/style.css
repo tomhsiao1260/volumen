@@ -244,6 +244,29 @@ button {
   color: #b9becb;
 }
 
+/* The card's coordinates, which are also the way to go somewhere: click them and type a place. */
+.card-place {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-shadow: inherit;
+  cursor: text;
+}
+
+.card-place:hover {
+  text-decoration: underline dotted;
+}
+
+.card-typing {
+  min-width: 15em;
+  border-radius: 3px;
+  outline: 1px solid #6f7ba0;
+  background: #0b0d12cc;
+  color: #e6e9f2;
+}
+
 /* The voxel under the pointer, which takes the place of the card's own while there is one. */
 .card-pointer {
   color: rgb(241, 227, 98);

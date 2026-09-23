@@ -28,6 +28,17 @@ export function formatVoxel({ x, y, z }: Point) {
   return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
 }
 
+/**
+ * The three numbers in what someone typed, in the order x, y, z.  Anything between them is ignored,
+ * so the card's own `x 20048 · y 7856 · z 37888` can be pasted straight back, and so can
+ * `20048 7856 37888` or `20048, 7856, 37888`.
+ */
+function parsePlace(text: string) {
+  const numbers = text.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+  if (numbers.length !== 3 || numbers.some((n) => !Number.isFinite(n))) return undefined;
+  return { x: numbers[0], y: numbers[1], z: numbers[2] };
+}
+
 // A scan is named for the card without saying that it is masked, which nearly all of them are.
 export function shorten(name: string) {
   return name.replace(/\s*·\s*masked$/, "");
@@ -81,6 +92,8 @@ export function CardView({
   const [loaded, setLoaded] = useState(false);
   const [centre, setCentre] = useState<Point>();
   const [pointer, setPointer] = useState<Point>();
+  // The place being typed into the card's own coordinates, while someone is typing one.
+  const [typed, setTyped] = useState<string>();
   const [planeMenu, setPlaneMenu] = useState(false);
   const [menu, setMenu] = useState<CardMenu>();
   const { sourceId, orientation, groupId } = card;
@@ -296,9 +309,38 @@ export function CardView({
       )}
 
       <div className="card-bottom">
-        <span className={pointer === undefined ? "card-centre" : "card-pointer"}>
-          {voxel === undefined ? "" : formatVoxel(voxel)}
-        </span>
+        {typed === undefined ? (
+          <button
+            type="button"
+            className={`card-place${pointer === undefined ? " card-centre" : " card-pointer"}`}
+            title="Click to go to a place"
+            onClick={() => {
+              if (centre !== undefined) {
+                setTyped(`${Math.round(centre.x)} ${Math.round(centre.y)} ${Math.round(centre.z)}`);
+              }
+            }}
+          >
+            {voxel === undefined ? "" : formatVoxel(voxel)}
+          </button>
+        ) : (
+          <input
+            className="card-place card-typing"
+            autoFocus
+            spellCheck={false}
+            value={typed}
+            onChange={(event) => setTyped(event.target.value)}
+            onBlur={() => setTyped(undefined)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                const place = parsePlace(typed);
+                if (place !== undefined) session.group(groupId).navigation?.setPosition(place);
+                setTyped(undefined);
+              } else if (event.key === "Escape") {
+                setTyped(undefined);
+              }
+            }}
+          />
+        )}
       </div>
     </div>
   );
