@@ -85,9 +85,13 @@ export interface Patch extends PatchGrid {
   // Whole sheets on each side of the base in the table, and table layers per sheet.
   K: number;
   per: number;
-  // P[((k + K·per)·nv + i)·nu + j]·3: the position of grid point (i, j) on layer k / per; NaN where
-  // it could not be followed that far.
+  // P[((k + K·per)·nv + i)·nu + j]·3: the position of grid point (i, j) on layer k / per.
   P: Float32Array;
+  // A[…]: how much of a sheet is there, 0 to 1.  Whole where the fit ended on a predicted face,
+  // nothing where the papyrus has parted or is missing, and between the two over the half sheet
+  // leading to a neighbour that is not there — which is what makes the edge of a hole a fade rather
+  // than a staircase of grid cells.
+  A: Float32Array;
   right: Vec3;
   down: Vec3;
   // The normal at the base's centre: the direction w grows in.
@@ -310,6 +314,32 @@ function fitSheet(
 }
 
 /**
+ * Fills the small holes: a point with no sheet of its own, ringed by points that have one, is on the
+ * papyrus too — the fit's springs have already put it where the surface goes, and the prediction
+ * simply has nothing to say there.  Only holes a point or two across close this way; a real gap
+ * stays a gap.
+ */
+function fillHoles(held: Uint8Array, nu: number, nv: number) {
+  for (let round = 0; round < 2; round++) {
+    const was = held.slice();
+    for (let i = 0; i < nv; i++)
+      for (let j = 0; j < nu; j++) {
+        const k = i * nu + j;
+        if (was[k]) continue;
+        let around = 0, ringed = 0;
+        for (let di = -1; di <= 1; di++)
+          for (let dj = -1; dj <= 1; dj++) {
+            const a = i + di, b = j + dj;
+            if ((di === 0 && dj === 0) || a < 0 || b < 0 || a >= nv || b >= nu) continue;
+            around++;
+            if (was[a * nu + b]) ringed++;
+          }
+        if (around >= 5 && ringed >= around - 2) held[k] = 1;
+      }
+  }
+}
+
+/**
  * The next sheet out: the whole layer moved one sheet's spacing along its own normals.  Where it
  * lands is left to the fit, which reaches half a sheet either way; letting each point find its own
  * next sheet first sounds better but is not — where the prediction is patchy the points disagree and
@@ -350,47 +380,52 @@ export function buildPatch(
   const count = nu * nv;
   const { X, right, down } = baseSurface(field, p0, n0, grid);
   const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
-  sheets.set(0, { X, held: fitSheet(field, X, grid, spacing, n0) });
+  const first = fitSheet(field, X, grid, spacing, n0);
+  fillHoles(first, nu, nv);
+  sheets.set(0, { X, held: first });
   for (const dir of [1, -1] as const) {
     let from = X;
     for (let k = 1; k <= K; k++) {
       const next = nextSheet(field, from, count, dir, spacing, n0);
-      sheets.set(k * dir, { X: next, held: fitSheet(field, next, grid, spacing, n0) });
+        const held = fitSheet(field, next, grid, spacing, n0);
+      fillHoles(held, nu, nv);
+      sheets.set(k * dir, { X: next, held });
       from = next;
     }
   }
 
   // The table: each sheet, and the layers within half a sheet either side of it.  Between two sheets
-  // that are both there the layers follow the way from one to the other; where the next sheet is
-  // missing they follow the normal instead, which is half a sheet of honest extrapolation and is
-  // what keeps a cross-section readable where the prediction is patchy.
+  // the layers follow the way from one to the other; where the next sheet is missing they follow the
+  // normal instead, and the coverage fades to nothing over that half sheet.
   const L = 2 * K * per + 1;
   const P = new Float32Array(L * count * 3).fill(NaN);
+  const A = new Float32Array(L * count);
   const N = new Float64Array(count * 3);
   for (let k = -K; k <= K; k++) {
     const here = sheets.get(k)!;
     resampleNormals(field, here.X, N, count, n0);
     for (let node = 0; node < count; node++) {
-      if (!here.held[node]) continue;
       const q = node * 3;
       for (let s = -per / 2; s <= per / 2; s++) {
         const layer = (k + K) * per + s;
         if (layer < 0 || layer >= L) continue;
-        const towardsNext = sheets.get(k + Math.sign(s));
+        const neighbour = sheets.get(k + Math.sign(s));
         const t = Math.abs(s) / per;
-        const o = (layer * count + node) * 3;
-        // The sheet's own points win over a neighbour's extrapolation into the same layer.
-        if (s !== 0 && !Number.isNaN(P[o]) && Math.abs(s) === per / 2) continue;
+        const o = layer * count + node;
+        // Where two sheets meet in the same layer, the one that has something there wins.
+        const coverage = here.held[node] * (1 - t) + (neighbour?.held[node] ?? 0) * t;
+        if (!Number.isNaN(P[o * 3]) && coverage <= A[o]) continue;
+        A[o] = coverage;
         for (let c = 0; c < 3; c++) {
-          P[o + c] =
-            towardsNext !== undefined && towardsNext.held[node]
-              ? here.X[q + c] + (towardsNext.X[q + c] - here.X[q + c]) * t
+          P[o * 3 + c] =
+            neighbour !== undefined && neighbour.held[node]
+              ? here.X[q + c] + (neighbour.X[q + c] - here.X[q + c]) * t
               : here.X[q + c] + N[q + c] * Math.sign(s) * t * spacing;
         }
       }
     }
   }
-  return { ...grid, K, per, P, right, down, normal: n0 };
+  return { ...grid, K, per, P, A, right, down, normal: n0 };
 }
 
 /**
@@ -402,8 +437,8 @@ export function patchFacts(patch: Patch) {
   const { nu, nv, K, per, P, hu, hv } = patch;
   const count = nu * nv;
   const step = Math.min(hu, hv);
-  const at = (k: number, node: number) => (((k + K) * per * count + node) * 3);
-  const there = (o: number) => !Number.isNaN(P[o]);
+  const at = (k: number, node: number) => (k + K) * per * count + node;
+  const there = (o: number) => patch.A[o] >= 0.5 && !Number.isNaN(P[o * 3]);
   const holes: number[] = [], torn: number[] = [], apart: number[] = [];
   const stretch: number[] = [];
   for (let k = -K; k <= K; k++) {
@@ -419,7 +454,7 @@ export function patchFacts(patch: Patch) {
           if (i + di >= nv || j + dj >= nu) continue;
           const q = at(k, (i + di) * nu + j + dj);
           if (!there(q)) continue;
-          const d = Math.hypot(P[o] - P[q], P[o + 1] - P[q + 1], P[o + 2] - P[q + 2]);
+          const d = Math.hypot(P[o * 3] - P[q * 3], P[o * 3 + 1] - P[q * 3 + 1], P[o * 3 + 2] - P[q * 3 + 2]);
           pairs++;
           stretch.push(d / (di ? hv : hu));
           if (d > step * 2.5) tears++;
@@ -431,7 +466,9 @@ export function patchFacts(patch: Patch) {
       const gaps: number[] = [];
       for (let node = 0; node < count; node++) {
         const o = at(k, node), q = at(k + 1, node);
-        if (there(o) && there(q)) gaps.push(Math.hypot(P[o] - P[q], P[o + 1] - P[q + 1], P[o + 2] - P[q + 2]));
+        if (there(o) && there(q)) {
+          gaps.push(Math.hypot(P[o * 3] - P[q * 3], P[o * 3 + 1] - P[q * 3 + 1], P[o * 3 + 2] - P[q * 3 + 2]));
+        }
       }
       gaps.sort((a, b) => a - b);
       if (gaps.length) apart.push(gaps[gaps.length >> 1]);
@@ -477,19 +514,45 @@ export function positionAt(patch: Patch, w: number, gi: number, gj: number, out:
 }
 
 /**
+ * How much of a sheet there is at grid point (`gi`, `gj`) of layer `w`: 1 on the papyrus, 0 where
+ * there is none, and between the two at the edge of a hole.
+ */
+export function coverageAt(patch: Patch, w: number, gi: number, gj: number) {
+  const { nu, nv, K, per, A } = patch;
+  const count = nu * nv;
+  const at = (w + K) * per;
+  if (at < 0 || at > 2 * K * per || gi < 0 || gj < 0 || gi > nv - 1 || gj > nu - 1) return 0;
+  const k0 = Math.min(Math.floor(at), 2 * K * per - 1), tk = at - k0;
+  const i0 = Math.min(Math.floor(gi), nv - 2), ti = gi - i0;
+  const j0 = Math.min(Math.floor(gj), nu - 2), tj = gj - j0;
+  let value = 0;
+  for (let dk = 0; dk < 2; dk++)
+    for (let di = 0; di < 2; di++)
+      for (let dj = 0; dj < 2; dj++) {
+        const weight = (dk ? tk : 1 - tk) * (di ? ti : 1 - ti) * (dj ? tj : 1 - tj);
+        if (weight === 0) continue;
+        value += weight * A[(k0 + dk) * count + (i0 + di) * nu + j0 + dj];
+      }
+  return value;
+}
+
+/**
  * The grid of layer `w` (sheets from the base, fractional): positions (flat z, y, x, row by row),
  * NaN where the table has nothing, linear between the table's layers.
  */
 export function layerGrid(patch: Patch, w: number) {
-  const { nu, nv, K, per, P } = patch;
+  const { nu, nv, K, per, P, A } = patch;
   const count = nu * nv;
   const out = new Float32Array(count * 3).fill(NaN);
   const at = Math.min(Math.max((w + K) * per, 0), 2 * K * per);
   const k0 = Math.min(Math.floor(at), 2 * K * per - 1), t = at - k0;
   for (let node = 0; node < count; node++) {
-    const a = (k0 * count + node) * 3, b = ((k0 + 1) * count + node) * 3;
+    const a = k0 * count + node, b = (k0 + 1) * count + node;
+    // Half covered is not a sheet to stand a new piece on.
+    if (A[a] * (1 - t) + A[b] * t < 0.5) continue;
     for (let c = 0; c < 3; c++) {
-      out[node * 3 + c] = t === 0 ? P[a + c] : t === 1 ? P[b + c] : P[a + c] * (1 - t) + P[b + c] * t;
+      out[node * 3 + c] =
+        t === 0 ? P[a * 3 + c] : t === 1 ? P[b * 3 + c] : P[a * 3 + c] * (1 - t) + P[b * 3 + c] * t;
     }
   }
   return out;

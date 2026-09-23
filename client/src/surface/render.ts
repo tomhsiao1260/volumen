@@ -15,7 +15,7 @@
  */
 
 import type { Patch } from "./patch";
-import { positionAt } from "./patch";
+import { coverageAt, positionAt } from "./patch";
 import type { ZarrLevel } from "./store";
 
 export type SurfacePlane = "uv" | "uw" | "vw";
@@ -129,15 +129,19 @@ export function drawPlane(
   const where = mapping(patch, plane, w, span, width, height);
   const point = new Float64Array(3);
 
-  // Where the piece is, at every STEP-th pixel across and down, and whether it is there at all.
+  // Where the piece is, at every STEP-th pixel across and down, whether it is there at all, and how
+  // much of a sheet is there — which the pixels in between are shaded by, so that the edge of a hole
+  // is a fade and not a staircase of grid cells.
   const across = Math.ceil(width / STEP) + 1, down = Math.ceil(height / STEP) + 1;
   const places = new Float64Array(across * down * 3);
+  const cover = new Float32Array(across * down);
   const there = new Uint8Array(across * down);
   for (let i = 0; i < down; i++)
     for (let j = 0; j < across; j++) {
       const [sheet, gi, gj] = where(Math.min(i * STEP, height - 1), Math.min(j * STEP, width - 1));
       if (!positionAt(patch, sheet, gi, gj, point)) continue;
       places.set(point, (i * across + j) * 3);
+      cover[i * across + j] = coverageAt(patch, sheet, gi, gj);
       there[i * across + j] = 1;
     }
 
@@ -148,6 +152,7 @@ export function drawPlane(
       const o = (r * width + c) * 4;
       const j0 = Math.min(Math.floor(c / STEP), across - 2), tj = (c - j0 * STEP) / STEP;
       const topLeft = i0 * across + j0, bottomLeft = topLeft + across;
+      let alpha = 0;
       if (there[topLeft] && there[topLeft + 1] && there[bottomLeft] && there[bottomLeft + 1]) {
         const a = topLeft * 3, b = a + 3, d = bottomLeft * 3, e = d + 3;
         for (let axis = 0; axis < 3; axis++) {
@@ -155,6 +160,9 @@ export function drawPlane(
           const bottom = places[d + axis] * (1 - tj) + places[e + axis] * tj;
           point[axis] = top * (1 - ti) + bottom * ti;
         }
+        const top = cover[topLeft] * (1 - tj) + cover[topLeft + 1] * tj;
+        const bottom = cover[bottomLeft] * (1 - tj) + cover[bottomLeft + 1] * tj;
+        alpha = top * (1 - ti) + bottom * ti;
       } else {
         // Near the edge of what the piece reaches, where interpolating would round it off.
         const [sheet, gi, gj] = where(r, c);
@@ -162,6 +170,13 @@ export function drawPlane(
           out[o + 3] = 0;
           continue;
         }
+        alpha = coverageAt(patch, sheet, gi, gj);
+      }
+      if (alpha <= 0.02) {
+        out[o + 3] = 0;
+        for (let rr = r; rr < Math.min(r + step, height); rr++)
+          for (let cc = c; cc < Math.min(c + step, width); cc++) out[(rr * width + cc) * 4 + 3] = 0;
+        continue;
       }
       let value = -1, l = level;
       for (; l < readers.length; l++) {
@@ -179,7 +194,7 @@ export function drawPlane(
         continue;
       }
       out[o] = out[o + 1] = out[o + 2] = value;
-      out[o + 3] = 255;
+      out[o + 3] = Math.round(255 * Math.min(1, alpha));
       drawn++;
       // The rest of this pixel's square, while it is standing in for them.
       for (let rr = r; rr < Math.min(r + step, height); rr++)
@@ -187,7 +202,7 @@ export function drawPlane(
           if (rr === r && cc === c) continue;
           const q = (rr * width + cc) * 4;
           out[q] = out[q + 1] = out[q + 2] = value;
-          out[q + 3] = 255;
+          out[q + 3] = out[o + 3];
         }
     }
   }
@@ -219,7 +234,9 @@ export function planeChunks(
         (i / (LATTICE - 1)) * (height - 1),
         (j / (LATTICE - 1)) * (width - 1),
       );
-      if (positionAt(patch, sheet, gi, gj, point)) positions.set(point, (i * LATTICE + j) * 3);
+      if (coverageAt(patch, sheet, gi, gj) > 0.02 && positionAt(patch, sheet, gi, gj, point)) {
+        positions.set(point, (i * LATTICE + j) * 3);
+      }
     }
   const f = level.factor;
   const keys = new Map<string, Chunk>();
