@@ -138,6 +138,8 @@ class Card {
   private drawing = false;
   // Resolves the wait of the drawing in progress when another sheet is asked for.
   private changed: (() => void) | undefined;
+  // The sheet whose line the page has, so that it is sent once rather than with every frame.
+  private sent: string | undefined;
 
   constructor(private request: OpenRequest) {
     this.wanted = request.w;
@@ -340,6 +342,16 @@ class Card {
         };
 
         drawn = asked;
+        // The sheet itself, for the slice cards to draw the line where it cuts them.
+        const line = `${this.baseW} ${sheet}`;
+        if (this.sent !== line) {
+          this.sent = line;
+          const grid = layerGrid(patch, sheet);
+          this.post(
+            { type: "sheet", id, w: reached, nu: patch.nu, nv: patch.nv, grid: grid.buffer },
+            [grid.buffer],
+          );
+        }
         // A quick half-resolution look first, so that turning the wheel keeps up, then the whole
         // thing; another sheet asked for in between leaves the whole one for it instead.
         send(2);

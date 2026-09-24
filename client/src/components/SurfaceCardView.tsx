@@ -184,6 +184,8 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
               if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
               return;
             }
+            // Where the sheet is goes straight to the slice cards, not through this one.
+            if (event.type === "sheet") return;
             setStatus(event.status);
             if (event.facts !== undefined && DEBUG) console.info(`${id}: ${describe(event.facts)}`);
             if (event.message !== undefined) console.error(event.message);

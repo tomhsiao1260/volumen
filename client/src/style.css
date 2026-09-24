@@ -138,6 +138,15 @@ button {
   touch-action: none;
 }
 
+/* Lines drawn over a slice: where the sheets of the surface cards cut it. */
+.card-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 .card-overlay {
   position: absolute;
   inset: 0;

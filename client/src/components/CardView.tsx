@@ -20,9 +20,24 @@ import { sourceLabel } from "../api/sources";
 import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
 import type { BoardAction, CardState } from "../board/state";
+import { crossSection, sheetsOf, watchSheets } from "../surface/layers";
 import { SourcePicker } from "./SourcePicker";
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
+
+/**
+ * Which way each plane is laid out, as indices into a point read as (z, y, x): across the view, down
+ * it, and the axis it is a slice of.  x goes right, y down, z right or down, as the viewer arranges
+ * them, so a sheet's line lands where the papyrus under it does.
+ */
+const AXES: Record<ViewOrientation, [number, number, number]> = {
+  xy: [2, 1, 0],
+  xz: [2, 0, 1],
+  yz: [0, 1, 2],
+};
+
+// The line where a surface card's sheet cuts this slice.
+const SHEET_LINE = "rgba(120, 220, 255, 0.85)";
 
 export function formatVoxel({ x, y, z }: Point) {
   return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
@@ -94,6 +109,9 @@ export function CardView({
   const [pointer, setPointer] = useState<Point>();
   // The place being typed into the card's own coordinates, while someone is typing one.
   const [typed, setTyped] = useState<string>();
+  // Bumped when a surface card moves to another sheet, so that its line is drawn again.
+  const [sheetsMoved, setSheetsMoved] = useState(0);
+  const lines = useRef<HTMLCanvasElement>(null);
   const [planeMenu, setPlaneMenu] = useState(false);
   const [menu, setMenu] = useState<CardMenu>();
   const { sourceId, orientation, groupId } = card;
@@ -156,6 +174,54 @@ export function CardView({
     // take the view apart and add it again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, generation, sourceId, groupId, orientation]);
+
+  useEffect(() => watchSheets(() => setSheetsMoved((moved) => moved + 1)), []);
+
+  /*
+   * The sheets of the surface cards on this scan, drawn where they cut this slice.  It is the
+   * plainest check on the flattening there is: the line should ride along the papyrus, and turning a
+   * surface card's wheel should walk it from one sheet to the next.  Where it cuts across the grain
+   * instead, the piece is wrong there, and no number says it half as clearly.
+   */
+  useEffect(() => {
+    const canvas = lines.current;
+    if (canvas === null) return;
+    const context = canvas.getContext("2d");
+    if (context === null) return;
+    const density = Math.min(2, window.devicePixelRatio || 1);
+    const width = Math.max(1, Math.round(canvas.clientWidth * density));
+    const height = Math.max(1, Math.round(canvas.clientHeight * density));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+    }
+    context.clearRect(0, 0, width, height);
+    const navigation = session.group(groupId).navigation;
+    const looking = navigation?.position;
+    const zoom = navigation?.zoom;
+    if (looking === undefined || zoom === undefined || !Number.isFinite(zoom) || zoom <= 0) return;
+    const at = [looking.z, looking.y, looking.x];
+    const [across, down, sliced] = AXES[orientation];
+    context.strokeStyle = SHEET_LINE;
+    context.lineWidth = 1.5 * density;
+    context.lineCap = "round";
+    for (const sheet of sheetsOf(sourceId)) {
+      const segments = crossSection(sheet, sliced, at[sliced]);
+      if (segments.length === 0) continue;
+      context.beginPath();
+      for (const segment of segments) {
+        context.moveTo(
+          width / 2 + ((segment[across] - at[across]) / zoom) * density,
+          height / 2 + ((segment[down] - at[down]) / zoom) * density,
+        );
+        context.lineTo(
+          width / 2 + ((segment[3 + across] - at[across]) / zoom) * density,
+          height / 2 + ((segment[3 + down] - at[down]) / zoom) * density,
+        );
+      }
+      context.stroke();
+    }
+  }, [sheetsMoved, centre, orientation, sourceId, groupId, session, card.width, card.height]);
 
   const name = source === undefined ? "" : shorten(sourceLabel(source));
   const voxel = pointer ?? centre;
@@ -256,6 +322,7 @@ export function CardView({
       >
         {/* The viewer puts its canvas inside this element, so it has no border or padding. */}
         <div className="card-slice" ref={slice} />
+        <canvas className="card-lines" ref={lines} />
         {sourceId === null && (
           <div className="card-overlay">
             <SourcePicker

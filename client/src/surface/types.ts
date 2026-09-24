@@ -91,4 +91,19 @@ export interface FrameEvent {
   loading: boolean;
 }
 
-export type SurfaceEvent = StatusEvent | FrameEvent;
+/**
+ * Where the sheet being shown is, for the slice cards to draw its line.  Sent when the card moves to
+ * another sheet, not with every frame: the picture is redrawn as chunks arrive, but the sheet itself
+ * does not move while they do.
+ */
+export interface SheetEvent {
+  type: "sheet";
+  id: string;
+  w: number;
+  // Points across and down the grid, and their positions (z, y, x each), NaN where there is no sheet.
+  nu: number;
+  nv: number;
+  grid: ArrayBuffer;
+}
+
+export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent;

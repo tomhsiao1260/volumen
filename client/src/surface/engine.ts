@@ -3,6 +3,7 @@
  * the chunks they read.  A card opens itself with its parameters and hears back how it is doing.
  */
 
+import { forgetSheet, setSheet } from "./layers";
 import type { OpenRequest, SurfaceEvent, SurfacePlane, SurfaceRequest } from "./types";
 
 class SurfaceEngine {
@@ -10,10 +11,27 @@ class SurfaceEngine {
     type: "module",
   });
   private listeners = new Map<string, (event: SurfaceEvent) => void>();
+  // The scan each card is on, which the sheet it shows is drawn on.
+  private scans = new Map<string, string>();
 
   constructor() {
     this.worker.onmessage = (message: MessageEvent<SurfaceEvent>) => {
-      this.listeners.get(message.data.id)?.(message.data);
+      const event = message.data;
+      if (event.type === "sheet") {
+        const sourceId = this.scans.get(event.id);
+        if (sourceId !== undefined) {
+          setSheet({
+            cardId: event.id,
+            sourceId,
+            w: event.w,
+            nu: event.nu,
+            nv: event.nv,
+            grid: new Float32Array(event.grid),
+          });
+        }
+        return;
+      }
+      this.listeners.get(event.id)?.(event);
     };
     this.worker.onerror = (error) => console.error("Surface worker failed:", error);
   }
@@ -24,6 +42,7 @@ class SurfaceEngine {
 
   open(request: Omit<OpenRequest, "type">, listener: (event: SurfaceEvent) => void) {
     this.listeners.set(request.id, listener);
+    this.scans.set(request.id, request.scanSourceId);
     this.post({ type: "open", ...request });
   }
 
@@ -33,6 +52,8 @@ class SurfaceEngine {
 
   close(id: string) {
     this.listeners.delete(id);
+    this.scans.delete(id);
+    forgetSheet(id);
     this.post({ type: "close", id });
   }
 }
