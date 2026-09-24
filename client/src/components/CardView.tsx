@@ -55,6 +55,40 @@ const AXES: Record<ViewOrientation, [number, number, number]> = {
 const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
 const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
 
+/*
+ * The marked voxel: a ring with four ticks, in a warm colour so that it is never taken for a sheet's
+ * line.  Solid on the slice the mark is on, dashed and faint on a card looking at another slice —
+ * where it says where the place is across the picture, but not that it is in it.
+ */
+const MARK = "rgba(255, 205, 100, 0.95)";
+const MARK_EDGE = "rgba(20, 10, 0, 0.6)";
+
+export function drawMark(context: CanvasRenderingContext2D, x: number, y: number, density: number, here: boolean) {
+  const radius = 7 * density;
+  const gap = 2.5 * density;
+  const tick = 5 * density;
+  const path = () => {
+    context.beginPath();
+    context.arc(x, y, radius, 0, 2 * Math.PI);
+    for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      context.moveTo(x + ax * (radius + gap), y + ay * (radius + gap));
+      context.lineTo(x + ax * (radius + gap + tick), y + ay * (radius + gap + tick));
+    }
+  };
+  context.save();
+  context.globalAlpha = here ? 1 : 0.5;
+  context.setLineDash(here ? [] : [3 * density, 3 * density]);
+  context.strokeStyle = MARK_EDGE;
+  context.lineWidth = 3.4 * density;
+  path();
+  context.stroke();
+  context.strokeStyle = MARK;
+  context.lineWidth = 1.4 * density;
+  path();
+  context.stroke();
+  context.restore();
+}
+
 export function formatVoxel({ x, y, z }: Point) {
   return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
 }
@@ -82,6 +116,8 @@ export interface CardViewProps {
   selected: boolean;
   // How many cards move with this one, itself included.
   linked: number;
+  // The voxel the group has marked, if it has one.
+  mark: Point | undefined;
   session: Session;
   // Bumped when the viewer is replaced, so that the view is added to the new one.
   generation: number;
@@ -90,6 +126,7 @@ export interface CardViewProps {
   onLooked: () => void;
   // Takes this card out of its group, keeping it where it is looking.
   onUnlink: () => void;
+  onMark: (at: Point | null) => void;
   // Opens a surface card on the sheet at `seed`.
   onOpenSurface: (seed: Point) => void;
 }
@@ -111,11 +148,13 @@ export function CardView({
   hue,
   selected,
   linked,
+  mark,
   session,
   generation,
   dispatch,
   onLooked,
   onUnlink,
+  onMark,
   onOpenSurface,
 }: CardViewProps) {
   const slice = useRef<HTMLDivElement>(null);
@@ -263,7 +302,17 @@ export function CardView({
       context.lineWidth = 1.4 * density;
       context.stroke();
     }
-  }, [sheetsMoved, centre, orientation, sourceId, groupId, session, card.width, card.height]);
+    if (mark !== undefined) {
+      const point = [mark.z, mark.y, mark.x];
+      drawMark(
+        context,
+        (canvas.clientWidth / 2 + (point[across] - at[across]) / zoom) * density,
+        (canvas.clientHeight / 2 + (point[down] - at[down]) / zoom) * density,
+        density,
+        Math.abs(point[sliced] - at[sliced]) <= 0.5,
+      );
+    }
+  }, [sheetsMoved, centre, mark, orientation, sourceId, groupId, session, card.width, card.height]);
 
   // The sheet's line under the pointer, in the card's own pixels.
   const lineUnder = (x: number, y: number) => {
@@ -449,6 +498,10 @@ export function CardView({
       <div
         className="card-body"
         ref={body}
+        // Double-clicking the data marks the voxel under the pointer for the whole group: the other
+        // cards move to it and show it.  The board's own double-click, which adds a card, is only
+        // for the space between cards.
+        onDoubleClick={() => pointer !== undefined && onMark(pointer)}
         onContextMenu={(event) => {
           event.preventDefault();
           if (sourceId === null || pointer === undefined) return;

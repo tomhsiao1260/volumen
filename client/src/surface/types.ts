@@ -7,6 +7,24 @@ import type { SurfacePlane } from "./render";
 
 export type { SurfacePlane };
 
+/*
+ * How many sheets either side of its own a cut shows.  Here rather than in the worker because the
+ * card works out where a marked place falls in its frame, which is the same mapping the other way
+ * round (`mapping` in `render.ts`).
+ */
+export const SPAN = 2;
+
+/*
+ * A place on a piece: which sheet, and how far along u and across v it is, 0 to 1 — fractions of the
+ * piece rather than grid points, so that a card can put it in its frame knowing only its own plane
+ * and the sheet it is on.
+ */
+export interface PieceSpot {
+  w: number;
+  fu: number;
+  fv: number;
+}
+
 // Opens a surface card: finds the sheet at `seed` and builds the piece of it the card covers, with
 // the sheets either side of it.
 export interface OpenRequest {
@@ -29,6 +47,24 @@ export interface OpenRequest {
   height: number;
 }
 
+/*
+ * Asks where a voxel sits on this card's piece — answered with a `place` — or, the other way round,
+ * which voxel a point of the card's frame is, `fx` and `fy` being 0 to 1 across and down it.  It is
+ * what lets one place pointed at on any card be shown on all the others.
+ */
+export interface PointRequest {
+  type: "point";
+  id: string;
+  at: [number, number, number];
+}
+
+export interface WhereRequest {
+  type: "where";
+  id: string;
+  fx: number;
+  fy: number;
+}
+
 // Shows another sheet, or another of the sheet's planes.
 export interface ShowRequest {
   type: "show";
@@ -42,7 +78,7 @@ export interface CloseRequest {
   id: string;
 }
 
-export type SurfaceRequest = OpenRequest | ShowRequest | CloseRequest;
+export type SurfaceRequest = OpenRequest | ShowRequest | PointRequest | WhereRequest | CloseRequest;
 
 export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "failed";
 
@@ -119,4 +155,16 @@ export interface SheetEvent {
   spacing: number;
 }
 
-export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent;
+/*
+ * The answer to a `point`: where the voxel is on the piece, or null when the piece does not reach
+ * it — the place is somewhere else in the scroll, and this card has nothing to show for it.  The
+ * answer to a `where` carries the voxel instead.
+ */
+export interface PlaceEvent {
+  type: "place";
+  id: string;
+  spot: PieceSpot | null;
+  voxel: [number, number, number] | null;
+}
+
+export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent | PlaceEvent;

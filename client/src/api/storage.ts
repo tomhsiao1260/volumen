@@ -17,6 +17,8 @@ export interface StoredBoard {
     hue: number;
     position: { x: number; y: number; z: number } | null;
     zoom: number | null;
+    // The voxel this group has marked, pointed at on one of its cards and shown on them all.
+    mark?: { x: number; y: number; z: number } | null;
   }[];
   cards: {
     id: string;

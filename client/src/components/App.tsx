@@ -24,6 +24,7 @@ import {
   serialize,
 } from "../board/state";
 import { cssTransform, toBoard } from "../board/transform";
+import type { Point } from "viewer";
 import { BoardMenu } from "./BoardMenu";
 import { CardView } from "./CardView";
 import { SurfaceCardView } from "./SurfaceCardView";
@@ -212,6 +213,16 @@ export function App() {
 
   // A card leaving its group keeps the place it was looking at, rather than jumping to the middle of
   // the volume.
+  /*
+   * Marks a place for the card's group: the slices move to it, so that every card of the group is
+   * looking at the same voxel, and each draws it.  The move is the group's shared position, which is
+   * what makes "the other cards go there" nothing more than what linked cards already do.
+   */
+  const mark = (card: CardState, at: Point | null) => {
+    dispatch({ type: "mark", groupId: card.groupId, at });
+    if (at !== null) sessionRef.current?.group(card.groupId).navigation?.setPosition(at);
+  };
+
   const unlink = (card: CardState) => {
     const groupId = newGroupId();
     const place = sessionRef.current?.places().get(card.groupId);
@@ -260,8 +271,10 @@ export function App() {
                 hue={state.hues[card.groupId] ?? 0}
                 selected={state.selection.includes(card.id)}
                 linked={groupSize(state, card)}
+                mark={state.marks[card.groupId]}
                 dispatch={dispatch}
                 onUnlink={() => unlink(card)}
+                onMark={(at) => mark(card, at)}
               />
             ) : (
               <CardView
@@ -276,6 +289,8 @@ export function App() {
                 dispatch={dispatch}
                 onLooked={() => restoredRef.current && store.schedule()}
                 onUnlink={() => unlink(card)}
+                mark={state.marks[card.groupId]}
+                onMark={(at) => mark(card, at)}
                 onOpenSurface={(seed) =>
                   dispatch({
                     type: "addSurfaceCard",

@@ -15,9 +15,11 @@ import { getLasagna } from "../api/lasagna";
 import type { Source } from "../api/sources";
 import { sourceLabel } from "../api/sources";
 import type { BoardAction, CardState } from "../board/state";
+import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
-import type { FrameEvent, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
-import { formatVoxel, shorten } from "./CardView";
+import type { FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
+import { SPAN } from "../surface/types";
+import { drawMark, formatVoxel, shorten } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
 
@@ -62,12 +64,6 @@ const DEBUG = new URLSearchParams(window.location.search).has("debug");
 
 const PLANES: SurfacePlane[] = ["uv", "uw", "vw"];
 
-/*
- * Sheets either side of the card's own that a cut across them shows — the worker's `SPAN`, which the
- * lines drawn over such a cut have to agree with.
- */
-const SPAN = 2;
-
 // The sheets marked on a cut across them, in the colour the slice cards use for the same thing.
 const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
 const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
@@ -110,11 +106,14 @@ export interface SurfaceCardViewProps {
   // wears the same link as the slices it was opened from.
   hue: number;
   linked: number;
+  // The voxel the group has marked, which this card shows on its own piece.
+  mark: Point | undefined;
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
+  onMark: (at: Point | null) => void;
 }
 
-export function SurfaceCardView({ card, source, selected, hue, linked, dispatch, onUnlink }: SurfaceCardViewProps) {
+export function SurfaceCardView({ card, source, selected, hue, linked, mark, dispatch, onUnlink, onMark }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   // The sheets drawn over a cut across them, and what is being pulled.
@@ -128,6 +127,9 @@ export function SurfaceCardView({ card, source, selected, hue, linked, dispatch,
   const sketched = useRef<ImageData>(undefined);
   // The sheet last drawn, which is not the one asked for while a frame for it is on its way.
   const shown = useRef<number>(undefined);
+  // Where the group's mark falls on this piece, null when the piece does not reach it.
+  const spot = useRef<PieceSpot | null>(null);
+  const [spotted, setSpotted] = useState(0);
   const [status, setStatus] = useState<Status>("loading");
   const [drawn, setDrawn] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -145,6 +147,11 @@ export function SurfaceCardView({ card, source, selected, hue, linked, dispatch,
     wanted.current = w;
     wantedPlane.current = plane;
   }, [w, plane]);
+  // The listener below is set up once, and what it should do with an answer may have changed since.
+  const onMarkRef = useRef(onMark);
+  useEffect(() => {
+    onMarkRef.current = onMark;
+  }, [onMark]);
   // The size the sheet was built for; it is not built again while the card is resized, since the
   // sheet it shows does not change.
   const size = useRef({ width: card.width, height: card.height });
@@ -273,6 +280,24 @@ export function SurfaceCardView({ card, source, selected, hue, linked, dispatch,
             }
             // Where the sheet is goes straight to the slice cards, not through this one.
             if (event.type === "sheet") return;
+            if (event.type === "place") {
+              // The answer to "where is this place on your piece", or to "which voxel is this".
+              if (event.voxel !== null) {
+                const [z, y, x] = event.voxel;
+                onMarkRef.current({ x, y, z });
+              } else if (event.spot !== null) {
+                spot.current = event.spot;
+                setSpotted((count) => count + 1);
+                // The place is on another sheet of this piece: turn to it, as the slices move.
+                if (Math.abs(event.spot.w - wanted.current) > 1e-3) {
+                  dispatch({ type: "setSurfaceLayer", id, w: event.spot.w });
+                }
+              } else {
+                spot.current = null;
+                setSpotted((count) => count + 1);
+              }
+              return;
+            }
             setStatus(event.status);
             if (event.facts !== undefined && DEBUG) console.info(`${id}: ${describe(event.facts)}`);
             if (event.message !== undefined) console.error(event.message);
@@ -403,6 +428,25 @@ export function SurfaceCardView({ card, source, selected, hue, linked, dispatch,
       element.height = height;
     }
     context.clearRect(0, 0, width, height);
+    /*
+     * The place the group has marked, where it falls in this frame.  Along u and v it is a fraction
+     * of the piece; across the sheets it is how far from the sheet this card is on, which is the
+     * middle of the cut (`mapping` in `render.ts`, the same way round).
+     */
+    const here = spot.current;
+    const sheet = shown.current ?? wanted.current;
+    if (here !== null && shown.current !== undefined) {
+      const across = 0.5 + (here.w - sheet) / (2 * SPAN);
+      const at =
+        wantedPlane.current === "uv"
+          ? [here.fu, here.fv]
+          : wantedPlane.current === "uw"
+            ? [here.fu, across]
+            : [across, here.fv];
+      if (at[0] >= 0 && at[0] <= 1 && at[1] >= 0 && at[1] <= 1) {
+        drawMark(context, at[0] * width, at[1] * height, density, Math.abs(here.w - sheet) <= 1 / 16);
+      }
+    }
     if (wantedPlane.current === "uv" || shown.current === undefined) return;
     /*
      * One line: where the card itself is in the stack, which is the middle of a cut.  Its neighbours
@@ -430,7 +474,21 @@ export function SurfaceCardView({ card, source, selected, hue, linked, dispatch,
     context.stroke();
   };
 
-  useEffect(markSheets, [plane, card.width, card.height, drawn]);
+  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted]);
+
+  /*
+   * Where the group's mark is on this piece.  Asked again whenever the mark moves or the piece is
+   * built, since only the worker knows the piece; the answer turns the card to the sheet it is on.
+   */
+  useEffect(() => {
+    if (mark === undefined) {
+      spot.current = null;
+      setSpotted((count) => count + 1);
+      return;
+    }
+    if (status !== "ready") return;
+    surfaceEngine().point(id, [mark.z, mark.y, mark.x]);
+  }, [id, mark, status]);
 
   // Pulling a sheet on a cut: the one taken hold of follows the hand, and the card moves under it.
   useEffect(() => {
@@ -554,7 +612,25 @@ export function SurfaceCardView({ card, source, selected, hue, linked, dispatch,
         </button>
       </div>
 
-      <div className="card-body" ref={body} data-loading={loading}>
+      <div
+        className="card-body"
+        ref={body}
+        data-loading={loading}
+        /*
+         * Double-clicking the papyrus marks the voxel there for the whole group, as it does on a
+         * slice card: the worker is asked which voxel this point of the frame is, and the answer
+         * goes to the board.
+         */
+        onDoubleClick={(event) => {
+          const element = canvas.current;
+          if (element === null) return;
+          const box = element.getBoundingClientRect();
+          const fx = (event.clientX - box.left) / box.width;
+          const fy = (event.clientY - box.top) / box.height;
+          if (fx < 0 || fx > 1 || fy < 0 || fy > 1) return;
+          surfaceEngine().where(id, fx, fy);
+        }}
+      >
         <canvas className="card-surface" ref={canvas} />
         <canvas className="card-lines card-sheets" ref={lines} />
         {message !== undefined && (

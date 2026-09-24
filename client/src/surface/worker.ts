@@ -13,11 +13,12 @@ import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
 import { chunksFor, LasagnaField, readMask } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
-import { buildPatch, layerGrid, outward, patchFacts } from "./patch";
+import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt } from "./patch";
 import type { SurfacePlane } from "./render";
-import { drawPlane, planeChunks } from "./render";
+import { drawPlane, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
 import type { FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./types";
+import { SPAN } from "./types";
 
 // Sheets each side of the one the card sits on, and table layers per sheet.
 const K = 3;
@@ -104,8 +105,12 @@ function channelLevel(sourceId: string, level: number) {
 
 // How far from its own sheet a piece is used before another is built around the sheet reached.
 const REBASE_AT = K - 0.75;
-// Sheets either side of the one the card is on that the cross-sections show.
-const SPAN = 2;
+/*
+ * How far from the piece a voxel may be and still be a place on it, in voxels.  A point inside the
+ * slab of papyrus the piece covers comes back a fraction of a voxel away; one outside comes back as
+ * far away as the edge it was measured to, which is the answer "not on this piece".
+ */
+const ON_PIECE = 3;
 // The level drawn first while the one asked for arrives: this many levels coarser.
 const PREVIEW_LEVELS = 2;
 // While chunks arrive, the sheet is drawn again at most this often.
@@ -180,6 +185,42 @@ class Card {
     this.askedAt = performance.now();
     this.changed?.();
     if (!this.drawing) this.run().catch((error) => this.fail(error));
+  }
+
+  /*
+   * Where a voxel of the scan sits on this piece, so that a place pointed at on another card can be
+   * shown here — and nothing, honestly, when the piece does not reach it or has a hole there.
+   */
+  point(at: [number, number, number]) {
+    const { patch } = this;
+    const found = patch === undefined ? undefined : nearestOn(patch, at);
+    const on =
+      patch !== undefined &&
+      found !== undefined &&
+      found.away <= ON_PIECE &&
+      coverageAt(patch, found.w, found.gi, found.gj) >= 0.5;
+    this.post({
+      type: "place",
+      id: this.request.id,
+      spot: on
+        ? { w: found!.w + this.baseW, fu: found!.gj / (patch!.nu - 1), fv: found!.gi / (patch!.nv - 1) }
+        : null,
+      voxel: null,
+    });
+  }
+
+  // And the other way: the voxel under a point of the card, `fx` and `fy` across and down its frame.
+  where(fx: number, fy: number) {
+    const { patch } = this;
+    const out = new Float64Array(3);
+    let voxel: [number, number, number] | null = null;
+    if (patch !== undefined) {
+      const spot = pieceAt(patch, this.plane, this.wanted - this.baseW, fx, fy);
+      if (positionAt(patch, spot.w, spot.gi, spot.gj, out) && coverageAt(patch, spot.w, spot.gi, spot.gj) >= 0.5) {
+        voxel = [out[0], out[1], out[2]];
+      }
+    }
+    this.post({ type: "place", id: this.request.id, spot: null, voxel });
   }
 
   private fail(error: unknown) {
@@ -520,6 +561,12 @@ worker.onmessage = ({ data: request }) => {
     }
     case "show":
       cards.get(request.id)?.show(request.w, request.plane);
+      break;
+    case "point":
+      cards.get(request.id)?.point(request.at);
+      break;
+    case "where":
+      cards.get(request.id)?.where(request.fx, request.fy);
       break;
     case "close":
       cards.get(request.id)?.close();

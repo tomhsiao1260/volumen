@@ -17,6 +17,7 @@
 import type { Patch } from "./patch";
 import { coverageAt, positionAt } from "./patch";
 import type { ZarrLevel } from "./store";
+import { SPAN } from "./types";
 
 export type SurfacePlane = "uv" | "uw" | "vw";
 
@@ -42,6 +43,16 @@ function mapping(
   if (plane === "uw") return (r: number, c: number) => [acrossRow(r), lastV / 2, alongU(c)];
   if (plane === "vw") return (r: number, c: number) => [acrossColumn(c), alongV(r), lastU / 2];
   return (r: number, c: number) => [w, alongV(r), alongU(c)];
+}
+
+/**
+ * Where a point of a drawn frame sits in the piece — `fx` and `fy` being 0 to 1 across and down it,
+ * `w` the sheet the card is on.  It is `mapping` asked about one point instead of every pixel, for
+ * turning a place pointed at on the card into a place in the scan.
+ */
+export function pieceAt(patch: Patch, plane: SurfacePlane, w: number, fx: number, fy: number) {
+  const [sheet, gi, gj] = mapping(patch, plane, w, SPAN, 1, 1)(fy - 0.5, fx - 0.5);
+  return { w: sheet, gi, gj };
 }
 
 // Reads voxels of one level, remembering the chunks it has looked up during one drawing.

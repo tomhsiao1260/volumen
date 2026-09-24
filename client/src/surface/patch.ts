@@ -537,6 +537,61 @@ export function coverageAt(patch: Patch, w: number, gi: number, gj: number) {
 }
 
 /**
+ * Where a voxel sits on the piece: the sheet and the grid point whose position is nearest to it, and
+ * how far away that is in voxels.  The table is searched first — a couple of hundred thousand points,
+ * a millisecond — and then the place between its points is found by halving steps, since the table
+ * is an eighth of a sheet apart along w and some ten voxels apart across the sheet.
+ *
+ * It is how a place pointed at on a slice card is shown on a surface card: the piece is a curved
+ * slab, so a voxel inside it comes back a fraction of a voxel away, and one outside comes back as
+ * far away as it is — which is what says the place is not on this piece at all.
+ */
+export function nearestOn(patch: Patch, at: Vec3) {
+  const { nu, nv, K, per, P } = patch;
+  const count = nu * nv;
+  let best = Infinity, bk = -1, bi = 0, bj = 0;
+  for (let k = 0; k <= 2 * K * per; k++)
+    for (let i = 0; i < nv; i++)
+      for (let j = 0; j < nu; j++) {
+        const o = (k * count + i * nu + j) * 3;
+        if (Number.isNaN(P[o])) continue;
+        const dz = P[o] - at[0], dy = P[o + 1] - at[1], dx = P[o + 2] - at[2];
+        const away = dz * dz + dy * dy + dx * dx;
+        if (away < best) {
+          best = away;
+          bk = k;
+          bi = i;
+          bj = j;
+        }
+      }
+  if (bk < 0) return undefined;
+  const out = new Float64Array(3);
+  const measure = (w: number, gi: number, gj: number) =>
+    positionAt(patch, w, gi, gj, out)
+      ? Math.hypot(out[0] - at[0], out[1] - at[1], out[2] - at[2])
+      : Infinity;
+  let w = bk / per - K, gi = bi, gj = bj, away = Math.sqrt(best);
+  const moves = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+  for (let step = 0.5; step > 1 / 64; step /= 2)
+    for (let pass = 0; pass < 8; pass++) {
+      let moved = false;
+      for (const [dk, di, dj] of moves) {
+        const w2 = w + (dk * step) / per, gi2 = gi + di * step, gj2 = gj + dj * step;
+        const closer = measure(w2, gi2, gj2);
+        if (closer < away) {
+          away = closer;
+          w = w2;
+          gi = gi2;
+          gj = gj2;
+          moved = true;
+        }
+      }
+      if (!moved) break;
+    }
+  return { w, gi, gj, away };
+}
+
+/**
  * The grid of layer `w` (sheets from the base, fractional): positions (flat z, y, x, row by row),
  * NaN where the table has nothing, linear between the table's layers.
  */

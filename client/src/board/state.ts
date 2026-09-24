@@ -53,6 +53,12 @@ export interface BoardState {
   cards: CardState[];
   // The hue each group of linked cards is marked with.
   hues: Record<string, number>;
+  /*
+   * The voxel each group has marked: a place pointed at on one card, which every card of the group
+   * then shows — the slices by moving to it, a surface card by turning to the sheet it lies on.  It
+   * is how the same spot is looked at from three cuts and from the sheet laid flat at once.
+   */
+  marks: Record<string, Point>;
   view: BoardTransform;
   // The sources the cards name, by id.
   sources: Record<string, Source>;
@@ -65,6 +71,7 @@ export interface BoardState {
 export const emptyBoard: BoardState = {
   cards: [],
   hues: {},
+  marks: {},
   view: { x: 0, y: 0, scale: 1 },
   sources: {},
   selection: [],
@@ -105,6 +112,8 @@ export type BoardAction =
   | { type: "paste" }
   | { type: "setView"; view: BoardTransform }
   | { type: "fitToCards"; size: { width: number; height: number } }
+  // Marks a voxel for the group, or takes the mark away.
+  | { type: "mark"; groupId: string; at: Point | null }
   | { type: "restore"; board: StoredBoard; sources: Source[] };
 
 export function boardReducer(
@@ -185,6 +194,13 @@ export function boardReducer(
           samePiece(card, moved) ? { ...card, surface: { ...card.surface!, w: action.w } } : card,
         ),
       };
+    }
+
+    case "mark": {
+      const marks = { ...state.marks };
+      if (action.at === null) delete marks[action.groupId];
+      else marks[action.groupId] = { ...action.at };
+      return { ...state, marks };
     }
 
     case "removeCard":
@@ -368,7 +384,11 @@ export function boardReducer(
       const sources = { ...state.sources };
       for (const source of action.sources) sources[source.id] = source;
       const hues: Record<string, number> = {};
-      for (const group of action.board.groups) hues[group.id] = group.hue;
+      const marks: Record<string, Point> = {};
+      for (const group of action.board.groups) {
+        hues[group.id] = group.hue;
+        if (group.mark != null) marks[group.id] = { ...group.mark };
+      }
       const cards = [...action.board.cards]
         .sort((a, b) => a.z - b.z)
         .map((card, index) => ({
@@ -404,6 +424,7 @@ export function boardReducer(
         ...state,
         cards,
         hues,
+        marks,
         sources,
         view: { ...action.board.view },
         selection: [],
@@ -487,6 +508,7 @@ export function serialize(
       hue: state.hues[id] ?? 0,
       position: places.get(id)?.position ?? null,
       zoom: places.get(id)?.zoom ?? null,
+      mark: state.marks[id] ?? null,
     })),
     cards: state.cards.map((card) => ({
       id: card.id,

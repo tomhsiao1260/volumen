@@ -61,6 +61,18 @@ class SurfaceEngine {
     this.alongWith(id, w);
   }
 
+  /*
+   * Asks a card where a voxel is on its piece, or which voxel a point of its frame is; the answer
+   * comes back to the card's own listener as a `place`.
+   */
+  point(id: string, at: [number, number, number]) {
+    this.post({ type: "point", id, at });
+  }
+
+  where(id: string, fx: number, fy: number) {
+    this.post({ type: "where", id, fx, fy });
+  }
+
   // Another sheet of a card, without saying which plane: whatever it is showing.
   showLayer(id: string, w: number) {
     const plane = this.planes.get(id);

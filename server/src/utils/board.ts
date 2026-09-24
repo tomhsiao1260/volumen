@@ -13,12 +13,14 @@ export interface Board {
   updatedAt: string;
   // The board's own pan and zoom.
   view: { x: number; y: number; scale: number };
-  // The cards that move together, and where each set is looking.
+  // The cards that move together, where each set is looking, and the voxel it has marked: one
+  // place pointed at on one card and shown on all the others.
   groups: {
     id: string;
     hue: number;
     position: { x: number; y: number; z: number } | null;
     zoom: number | null;
+    mark?: { x: number; y: number; z: number } | null;
   }[];
   cards: {
     id: string;
@@ -116,6 +118,14 @@ export function parseBoard(value: any): Board {
               z: number(group.position.z, 0),
             },
       zoom: group.zoom == null ? null : number(group.zoom, 1),
+      mark:
+        group.mark == null
+          ? null
+          : {
+              x: number(group.mark.x, 0),
+              y: number(group.mark.y, 0),
+              z: number(group.mark.z, 0),
+            },
     }));
   const known = new Set(board.groups.map((group) => group.id));
   const cards = Array.isArray(value.cards) ? value.cards : [];
@@ -128,7 +138,7 @@ export function parseBoard(value: any): Board {
       let groupId = text(card.groupId);
       if (!known.has(groupId)) {
         groupId = `${text(card.id)}-group`;
-        board.groups.push({ id: groupId, hue: 0, position: null, zoom: null });
+        board.groups.push({ id: groupId, hue: 0, position: null, zoom: null, mark: null });
         known.add(groupId);
       }
       const surface = parseSurface(card.surface);
