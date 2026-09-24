@@ -106,10 +106,15 @@ export interface SurfaceCardViewProps {
   card: CardState;
   source: Source | undefined;
   selected: boolean;
+  // The group's colour, and how many cards are in it: a surface card is one panel of a place, and
+  // wears the same link as the slices it was opened from.
+  hue: number;
+  linked: number;
   dispatch: (action: BoardAction) => void;
+  onUnlink: () => void;
 }
 
-export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCardViewProps) {
+export function SurfaceCardView({ card, source, selected, hue, linked, dispatch, onUnlink }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   // The sheets drawn over a cut across them, and what is being pulled.
@@ -491,7 +496,7 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
 
   return (
     <div
-      className={`card${selected ? " selected" : ""}`}
+      className={`card${selected ? " selected" : ""}${linked > 1 ? " grouped" : ""}`}
       data-card={card.id}
       data-status={status}
       style={{
@@ -500,6 +505,7 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
         width: card.width,
         height: card.height,
         zIndex: card.z,
+        ["--group-hue" as string]: hue,
       }}
     >
       <div className="card-top">
@@ -530,6 +536,15 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
           )}
         </span>
         <span className="card-name">{source === undefined ? "" : shorten(sourceLabel(source))}</span>
+        {linked > 1 && (
+          <button
+            className="card-link"
+            title={`Linked to ${linked - 1} other card${linked === 2 ? "" : "s"}; click to unlink`}
+            onClick={onUnlink}
+          >
+            {`⛓ ${linked}`}
+          </button>
+        )}
         <button
           className="card-close"
           title="Remove"

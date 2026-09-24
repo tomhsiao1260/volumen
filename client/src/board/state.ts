@@ -137,7 +137,9 @@ export function boardReducer(
     case "addSurfaceCard": {
       const from = find(state, action.from);
       if (from === undefined || from.sourceId === null) return state;
-      const groupId = newGroupId();
+      // In the group of the card it was opened from: the slices and the sheet laid flat are one
+      // family, and the link on each of them says how many panels of that place are open.
+      const groupId = from.groupId;
       const card: CardState = {
         id: `c${nextCardId++}`,
         ...beside(state, from),
@@ -153,7 +155,7 @@ export function boardReducer(
       return {
         ...state,
         cards: [...state.cards, card],
-        hues: { ...state.hues, [groupId]: newGroupHue() },
+        hues: { ...state.hues, [groupId]: state.hues[groupId] ?? newGroupHue() },
         selection: [card.id],
       };
     }
@@ -168,15 +170,22 @@ export function boardReducer(
         ),
       };
 
-    case "setSurfaceLayer":
+    case "setSurfaceLayer": {
+      /*
+       * Every card showing the same piece moves to the same sheet — which is what makes a pair of
+       * them worth having: one piece of papyrus, laid flat on one card and cut across the sheets on
+       * another, moving together.  Which plane each shows stays its own.  Another piece opened from
+       * the same slices is in the same group but is not the same papyrus, and stays where it is.
+       */
+      const moved = state.cards.find((card) => card.id === action.id);
+      if (moved?.surface === undefined) return state;
       return {
         ...state,
         cards: state.cards.map((card) =>
-          card.id === action.id && card.surface !== undefined
-            ? { ...card, surface: { ...card.surface, w: action.w } }
-            : card,
+          samePiece(card, moved) ? { ...card, surface: { ...card.surface!, w: action.w } } : card,
         ),
       };
+    }
 
     case "removeCard":
       return {
@@ -320,15 +329,13 @@ export function boardReducer(
       if (clipboard === undefined) return state;
       let z = topZ(state);
       const hues = { ...state.hues };
-      // Each copy joins the group of the card it came from, so that the two move together; a group
-      // whose cards have all been removed since the copy is made again.  A surface card does not
-      // move with anything yet, so its copy is on its own.
+      // Each copy joins the group of the card it came from, so that the two move together — slice
+      // cards on the same place, surface cards on the same sheet; a group whose cards have all been
+      // removed since the copy was made is made again.
       const pasted = clipboard.cards.map((card) => {
-        const groupId =
-          card.kind === "slice" &&
-          state.cards.some((other) => other.groupId === card.groupId)
-            ? card.groupId
-            : newGroupId();
+        const groupId = state.cards.some((other) => other.groupId === card.groupId)
+          ? card.groupId
+          : newGroupId();
         hues[groupId] ??= newGroupHue();
         return {
           ...card,
@@ -374,6 +381,24 @@ export function boardReducer(
               ? card.sourceId
               : null,
         }));
+      /*
+       * Surface cards saved before they joined the slices they were opened from: a group of nothing
+       * but surface cards is put back with the slices of its scan, when there is one group of them,
+       * so that a board made earlier shows one family rather than two halves of one.
+       */
+      const slices = new Map<string, string | null>();
+      for (const card of cards) {
+        if (card.kind !== "slice" || card.sourceId === null) continue;
+        const seen = slices.get(card.sourceId);
+        slices.set(card.sourceId, seen === undefined || seen === card.groupId ? card.groupId : null);
+      }
+      const lonely = new Set(cards.filter((card) => card.kind === "surface").map((card) => card.groupId));
+      for (const card of cards) if (card.kind !== "surface") lonely.delete(card.groupId);
+      for (const card of cards) {
+        if (!lonely.has(card.groupId) || card.sourceId === null) continue;
+        const group = slices.get(card.sourceId);
+        if (group !== undefined && group !== null) card.groupId = group;
+      }
       for (const card of cards) hues[card.groupId] ??= newGroupHue();
       return {
         ...state,
@@ -432,7 +457,17 @@ export function selected(state: BoardState) {
   return state.cards.filter((card) => ids.has(card.id));
 }
 
-// How many cards move with this one, including itself.
+/*
+ * Whether two cards show the same piece of papyrus: the same scan, the same seed and the same scale
+ * are what the worker builds a piece from, so cards agreeing on all three are showing one thing.
+ */
+export function samePiece(card: CardState, other: CardState) {
+  const a = card.surface, b = other.surface;
+  if (a === undefined || b === undefined || card.sourceId !== other.sourceId) return false;
+  return a.zoom === b.zoom && a.seed.x === b.seed.x && a.seed.y === b.seed.y && a.seed.z === b.seed.z;
+}
+
+// How many cards are linked with this one, including itself.
 export function groupSize(state: BoardState, card: CardState) {
   return state.cards.filter((other) => other.groupId === card.groupId).length;
 }

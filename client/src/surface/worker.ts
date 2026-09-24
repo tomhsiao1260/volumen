@@ -9,7 +9,7 @@
  * long as the sheets can be followed, while `w` keeps counting from the sheet it was opened on.
  */
 
-import { SERVER_API_ENDPOINT } from "../config";
+import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
 import { chunksFor, LasagnaField, readMask } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
@@ -30,7 +30,22 @@ const worker = self as unknown as {
   postMessage(message: SurfaceEvent, transfer?: Transferable[]): void;
 };
 
-const dataUrl = (sourceId: string) => `${SERVER_API_ENDPOINT}/api/data/${sourceId}`;
+const dataUrl = (sourceId: string) => `${SERVER_DATA_ENDPOINT}/api/data/${sourceId}`;
+
+/*
+ * Pieces by everything that decides one: the scan, the voxel, the way w grows, the zoom and the
+ * grid.  Cards of a pair ask for the very same piece, and so does a copy of a card, and building it
+ * again would be several seconds of reading and fitting for an answer already in hand — or being
+ * worked out at that moment, which is why what is kept here is the work and not only its result.
+ *
+ * And one at a time.  Three cards building at once read three boxes of prediction into a store that
+ * holds 128 MB, and the chunks of one card's box are dropped to make room for another's before it
+ * has copied them out — which leaves cards saying there is no sheet where there plainly is one.
+ */
+type Piece = { patch: Patch; spacing: number; read: number; fitted: number };
+const pieces = new Map<string, Promise<Piece | undefined>>();
+const PIECES_KEPT = 6;
+let building: Promise<unknown> = Promise.resolve();
 
 // Lasagna's arrays and the scan's levels, opened once per source.
 const opened = new Map<string, Promise<ZarrLevel>>();
@@ -213,7 +228,7 @@ class Card {
           down: built.patch.nv,
           step: Math.round(Math.max(built.patch.hu, built.patch.hv)),
           read: Math.round(built.read),
-          built: Math.round(performance.now() - started - built.read),
+          built: Math.round(built.fitted),
           ...patchFacts(built.patch),
         },
       });
@@ -230,6 +245,44 @@ class Card {
   private async build(seed: Vec3, towards: Vec3 | undefined) {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
+    const across = width / density, down = height / density;
+    const grid = gridFor(across, down, zoom);
+    const round = (value: number) => Math.round(value * 100) / 100;
+    const key = [
+      this.request.scanSourceId,
+      seed.map(Math.round).join(","),
+      (towards ?? [0, 1, 0]).map(round).join(","),
+      zoom,
+      `${grid.nu}x${grid.nv}`,
+      `${round(grid.hu)},${round(grid.hv)}`,
+    ].join("|");
+    let shared = pieces.get(key);
+    const fresh = shared === undefined;
+    if (shared === undefined) {
+      // Behind whatever is already reading, so that two boxes of prediction are never in the store
+      // at once, and kept before it finishes so that the cards asking meanwhile wait for this one.
+      shared = building.then(() => this.make(seed, towards, grid));
+      building = shared.catch(() => undefined);
+      pieces.set(key, shared);
+      for (const old of pieces.keys()) {
+        if (pieces.size <= PIECES_KEPT) break;
+        pieces.delete(old);
+      }
+    }
+    const made = await shared;
+    // Somewhere with no sheet is not worth remembering: the reading is what costs, and a card
+    // asking again later — at another zoom, after another card moved — should get a fresh answer.
+    if (made === undefined) {
+      if (pieces.get(key) === shared) pieces.delete(key);
+      return undefined;
+    }
+    // Only the card that started it did the work; the others were handed the answer.
+    return fresh ? made : { ...made, read: 0, fitted: 0 };
+  }
+
+  // Reads what the piece needs and fits it; `build` is what says whether it has to be done at all.
+  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid): Promise<Piece | undefined> {
+    const { zoom, density, width, height } = this.request;
     const across = width / density, down = height / density;
     const channels = this.channels!;
     const lasagna = this.request.lasagna;
@@ -256,7 +309,6 @@ class Card {
       seed.map((v) => v + NEAR) as Vec3,
       lasagna.mask === null ? undefined : await maskLevel(lasagna.mask, 2 * NEAR * lasagna.micron),
     );
-    if (this.closed) return undefined;
     const reference = towards ?? [0, 1, 0];
     if (!near.normal(seed[0], seed[1], seed[2], reference[0], reference[1], reference[2])) {
       return undefined;
@@ -276,10 +328,10 @@ class Card {
         ? undefined
         : await maskLevel(lasagna.mask, 2 * Math.max(...half) * lasagna.micron),
     );
-    if (this.closed) return undefined;
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, gridFor(across, down, zoom), K, PER, spacing);
-    return patch === undefined ? undefined : { patch, spacing, read };
+    const patch = buildPatch(field, seed, n, grid, K, PER, spacing);
+    const fitted = performance.now() - started - read;
+    return patch === undefined ? undefined : { patch, spacing, read, fitted };
   }
 
   /**

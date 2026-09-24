@@ -257,8 +257,11 @@ export function App() {
                 key={card.id}
                 card={card}
                 source={source}
+                hue={state.hues[card.groupId] ?? 0}
                 selected={state.selection.includes(card.id)}
+                linked={groupSize(state, card)}
                 dispatch={dispatch}
+                onUnlink={() => unlink(card)}
               />
             ) : (
               <CardView

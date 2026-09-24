@@ -5,7 +5,7 @@
  */
 
 import type { Viewer, Volume } from "viewer";
-import { SERVER_API_ENDPOINT } from "../config";
+import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
 import { round } from "./catalog";
 
 export interface Source {
@@ -75,7 +75,7 @@ export class VolumeRegistry {
     if (volume === undefined) {
       volume = this.viewer.addVolume({
         kind: "http",
-        url: `${SERVER_API_ENDPOINT}/api/data/${sourceId}`,
+        url: `${SERVER_DATA_ENDPOINT}/api/data/${sourceId}`,
       });
       this.volumes.set(sourceId, volume);
     }
