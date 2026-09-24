@@ -28,7 +28,14 @@ export function getLasagna(sourceId: string): Promise<Lasagna | null> {
     answer = fetch(`${SERVER_API_ENDPOINT}/api/sources/${sourceId}/lasagna`).then(
       async (response) => {
         if (!response.ok) throw new Error(await response.text());
-        return ((await response.json()) as { lasagna: Lasagna | null }).lasagna;
+        const lasagna = ((await response.json()) as { lasagna: Lasagna | null }).lasagna;
+        /*
+         * `?nomask` puts the card back on the phase, which is how sheets were found before the
+         * surface predictions were used.  There are two ways of saying where a sheet is and they do
+         * not always agree; this is how one is held against the other on the same place.
+         */
+        if (lasagna !== null && new URLSearchParams(location.search).has("nomask")) lasagna.mask = null;
+        return lasagna;
       },
     );
     // A failure is not remembered, so that asking again tries again.

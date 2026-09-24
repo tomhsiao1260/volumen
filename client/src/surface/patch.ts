@@ -94,6 +94,9 @@ export interface Patch extends PatchGrid {
   A: Float32Array;
   right: Vec3;
   down: Vec3;
+  // How far the points of each sheet ended up from the prediction's nearest band, in voxels: the
+  // fit's own account of how well it went, the base sheet first and then the ones around it.
+  off: number[];
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
 }
@@ -305,12 +308,17 @@ function fitSheet(
   }
 
   resampleNormals(field, X, N, count, reference);
+  let off = 0, on = 0;
   for (let k = 0; k < count; k++) {
     const o = k * 3;
     const t = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], Math.max(2, most * 0.6));
     held[k] = Number.isNaN(t) ? 0 : 1;
+    if (held[k]) {
+      off += Math.abs(t);
+      on++;
+    }
   }
-  return held;
+  return { held, off: on === 0 ? NaN : off / on };
 }
 
 /**
@@ -380,16 +388,19 @@ export function buildPatch(
   const count = nu * nv;
   const { X, right, down } = baseSurface(field, p0, n0, grid);
   const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
+  const offs: number[] = [];
   const first = fitSheet(field, X, grid, spacing, n0);
-  fillHoles(first, nu, nv);
-  sheets.set(0, { X, held: first });
+  fillHoles(first.held, nu, nv);
+  sheets.set(0, { X, held: first.held });
+  offs.push(first.off);
   for (const dir of [1, -1] as const) {
     let from = X;
     for (let k = 1; k <= K; k++) {
       const next = nextSheet(field, from, count, dir, spacing, n0);
-        const held = fitSheet(field, next, grid, spacing, n0);
-      fillHoles(held, nu, nv);
-      sheets.set(k * dir, { X: next, held });
+      const fitted = fitSheet(field, next, grid, spacing, n0);
+      fillHoles(fitted.held, nu, nv);
+      sheets.set(k * dir, { X: next, held: fitted.held });
+      offs.push(fitted.off);
       from = next;
     }
   }
@@ -425,7 +436,7 @@ export function buildPatch(
       }
     }
   }
-  return { ...grid, K, per, P, A, right, down, normal: n0 };
+  return { ...grid, K, per, P, A, right, down, normal: n0, off: offs };
 }
 
 /**
@@ -476,7 +487,11 @@ export function patchFacts(patch: Patch) {
   }
   stretch.sort((a, b) => a - b);
   const percent = (xs: number[]) => xs.map((x) => `${Math.round(x * 100)}%`).join(" ");
+  const off = patch.off.filter((one) => !Number.isNaN(one));
   return {
+    // How far the fit ended from the prediction it was following, at worst and on average: small
+    // says the piece sits on the predicted sheets, and whatever is wrong is wrong with those.
+    off: off.length ? `${(off.reduce((s, v) => s + v, 0) / off.length).toFixed(1)}–${Math.max(...off).toFixed(1)}` : "–",
     holes: percent(holes),
     torn: percent(torn),
     apart: apart.map((a) => Math.round(a)).join(" "),

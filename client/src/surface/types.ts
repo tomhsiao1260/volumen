@@ -84,6 +84,8 @@ export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "failed";
 
 // What the card found, which is all it shows for now: nothing is drawn yet.
 export interface SurfaceFacts {
+  // How far the fit ended from the prediction's bands, in voxels: mean and worst over the sheets.
+  off: string;
   // Sheets are this many voxels apart at the seed, as the prediction has it.
   spacing: number;
   // Points across and down the piece of sheet, and their spacing in voxels.
