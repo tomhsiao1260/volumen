@@ -226,6 +226,30 @@ export class LasagnaField {
   }
 
   /**
+   * The next band along the normal, looked for from `from` out to `to` voxels — the first one met
+   * rather than the nearest, and its middle.  `nearestSheet` answers "which sheet is this point on";
+   * this answers "where is the next sheet from here", which is a different question and the one
+   * stepping from one sheet to the next has to ask.  NaN where none is met.
+   *
+   * Stepping a fixed distance and snapping to whatever is nearest only works while the sheets are
+   * evenly spaced.  Measured on Scroll 1 they are not: 21 to 55 voxels apart within one card, where
+   * the spacing taken at the seed said 43.  A step too short snaps back onto the sheet it came from
+   * and a step too long overshoots; either way the piece loses a sheet and the card shows a hole.
+   */
+  nextBand(z: number, y: number, x: number, nz: number, ny: number, nx: number, from: number, to: number) {
+    if (!this.hasBands) return NaN;
+    const merge = Math.max(2, this.fm);
+    const step = Math.max(1, merge / 2);
+    for (let t = from; t <= to; t += step) {
+      if (this.band(z + nz * t, y + ny * t, x + nx * t) > 127) {
+        const middle = this.nearestSheet(z + nz * t, y + ny * t, x + nx * t, nz, ny, nx, merge * 4);
+        return Number.isNaN(middle) ? t : t + middle;
+      }
+    }
+    return NaN;
+  }
+
+  /**
    * How far apart the sheets are at a point, along its normal: the middle gap between the sheets
    * within `reach` voxels either way, or NaN where fewer than two were found.  This is the one
    * number the whole patch is scaled by, so it is measured rather than taken from the density, whose

@@ -171,6 +171,24 @@ const SWEEPS = 30;
 // Of a sheet's spacing: how far the fit looks for a sheet, and how far a sheet may drift from where
 // it started before it is no longer the same sheet.
 const LOOK = 0.45;
+/*
+ * Of a sheet's spacing: how near the next sheet may be and how far, when a piece steps from one to
+ * the next.  The search has to start beyond the sheet it is leaving — the prediction marks both of
+ * its faces, and a search that starts too near finds the far one and calls it the next sheet, which
+ * collapses the whole piece into the thickness of one — and stop before the sheet after next.
+ */
+const NEXT_NEAREST = 0.6;
+const NEXT_FURTHEST = 1.5;
+/*
+ * How far a sheet may drift, of its spacing, while it is fitted: from the base surface, which is a
+ * guess made from the normals and has to be free to find the papyrus, and from a step, which has
+ * already landed on the next sheet and only wants tidying.  Left as free as the base, a stepped
+ * sheet slides back onto the one it came from wherever the prediction is stronger there, and the
+ * piece folds up — at one place on Scroll 1 the sheets ended 8 voxels apart where the prediction
+ * said 38.
+ */
+const BASE_STRAY = 0.45;
+const STEP_STRAY = 0.22;
 
 function resampleNormals(field: LasagnaField, X: Float64Array, N: Float64Array, count: number, reference: Vec3) {
   for (let k = 0; k < count; k++) {
@@ -245,6 +263,7 @@ function fitSheet(
   grid: PatchGrid,
   spacing: number,
   reference: Vec3,
+  wander = BASE_STRAY,
 ) {
   const { nu, nv, hu, hv } = grid;
   const count = nu * nv;
@@ -254,7 +273,7 @@ function fitSheet(
   const smooth = new Float64Array(count);
   const held = new Uint8Array(count);
   const span = spacing * LOOK;
-  const stray = spacing * LOOK;
+  const stray = spacing * wander;
   const most = Math.min(hu, hv);
   const diagonal = Math.hypot(hu, hv);
 
@@ -353,11 +372,45 @@ function fillHoles(held: Uint8Array, nu: number, nv: number) {
  * next sheet first sounds better but is not — where the prediction is patchy the points disagree and
  * the layer arrives already torn.
  */
-function nextSheet(field: LasagnaField, X: Float64Array, count: number, dir: 1 | -1, spacing: number, reference: Vec3) {
+function nextSheet(
+  field: LasagnaField,
+  X: Float64Array,
+  grid: PatchGrid,
+  dir: 1 | -1,
+  spacing: number,
+  reference: Vec3,
+) {
+  const { nu, nv } = grid;
+  const count = nu * nv;
   const out = new Float64Array(count * 3);
   const N = new Float64Array(count * 3);
+  const moves = new Float64Array(count);
+  const smooth = new Float64Array(count);
   resampleNormals(field, X, N, count, reference);
-  for (let k = 0; k < count * 3; k++) out[k] = X[k] + N[k] * dir * spacing;
+  /*
+   * Each point to its own next sheet, since the sheets are not evenly spaced (`nextBand`); the
+   * spacing where the prediction has nothing to say there, and the median of the neighbours in
+   * place of an answer that stands out, so that one bad reading cannot drag the grid after it.
+   */
+  for (let k = 0; k < count; k++) {
+    const o = k * 3;
+    moves[k] = field.nextBand(
+      X[o],
+      X[o + 1],
+      X[o + 2],
+      N[o] * dir,
+      N[o + 1] * dir,
+      N[o + 2] * dir,
+      spacing * NEXT_NEAREST,
+      spacing * NEXT_FURTHEST,
+    );
+  }
+  median3(moves, smooth, nu, nv);
+  for (let k = 0; k < count; k++) {
+    const move = Number.isNaN(smooth[k]) ? spacing : smooth[k];
+    const o = k * 3;
+    for (let c = 0; c < 3; c++) out[o + c] = X[o + c] + N[o + c] * dir * move;
+  }
   return out;
 }
 
@@ -396,8 +449,8 @@ export function buildPatch(
   for (const dir of [1, -1] as const) {
     let from = X;
     for (let k = 1; k <= K; k++) {
-      const next = nextSheet(field, from, count, dir, spacing, n0);
-      const fitted = fitSheet(field, next, grid, spacing, n0);
+      const next = nextSheet(field, from, grid, dir, spacing, n0);
+      const fitted = fitSheet(field, next, grid, spacing, n0, STEP_STRAY);
       fillHoles(fitted.held, nu, nv);
       sheets.set(k * dir, { X: next, held: fitted.held });
       offs.push(fitted.off);
