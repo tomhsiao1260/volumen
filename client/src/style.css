@@ -147,6 +147,11 @@ button {
   pointer-events: none;
 }
 
+/* The sheets marked on a surface card's cut across them, which can be taken hold of. */
+.card-sheets {
+  pointer-events: auto;
+}
+
 .card-overlay {
   position: absolute;
   inset: 0;

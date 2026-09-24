@@ -83,12 +83,21 @@ export interface FrameEvent {
   w: number;
   plane: SurfacePlane;
   limited: boolean;
+  // The card's own size in pixels, which the canvas keeps whatever size a frame arrives at.
   width: number;
   height: number;
-  // RGBA, width × height; transparent where the sheet could not be followed or nothing has arrived.
+  /*
+   * How much smaller the frame was drawn than the card: 1 is the whole thing, more is the quick look
+   * that is sent while a hand is still moving.  It is scaled up smoothly rather than drawn in blocks,
+   * which reads as an out-of-focus picture instead of a pattern of its own.
+   */
+  scale: number;
+  // RGBA, ⌈width / scale⌉ × ⌈height / scale⌉; transparent where there is no sheet or nothing yet.
   pixels: ArrayBuffer;
   // Whether finer data is still on its way.
   loading: boolean;
+  // How long the drawing took.
+  drew: number;
 }
 
 /**

@@ -32,6 +32,14 @@ const MAX_DENSITY = 2;
  * a hundred pixels at a time, and counting each of those as a notch ran the card a whole sheet past
  * where the hand stopped.
  */
+/*
+ * How long a card waits for the sheet it asked for before it stops saying so.  A sheet far outside
+ * the piece can take several pieces to reach, and sometimes cannot be reached at all — the papyrus
+ * runs out, or the prediction does — and a card that says "loading" for ever tells nobody anything.
+ * What it has drawn stays on it; this only stops the waiting.
+ */
+const PATIENCE_MS = 8000;
+
 const NOTCH = 1 / 8;
 const PER_PIXEL = 1 / 960;
 /*
@@ -53,6 +61,18 @@ const PER_GESTURE = 3 / 8;
 const DEBUG = new URLSearchParams(window.location.search).has("debug");
 
 const PLANES: SurfacePlane[] = ["uv", "uw", "vw"];
+
+/*
+ * Sheets either side of the card's own that a cut across them shows — the worker's `SPAN`, which the
+ * lines drawn over such a cut have to agree with.
+ */
+const SPAN = 2;
+
+// The sheets marked on a cut across them, in the colour the slice cards use for the same thing.
+const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
+const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
+// How near the pointer has to be to one to take hold of it.
+const GRAB = 7;
 
 const PLANE_TITLES: Record<SurfacePlane, string> = {
   uv: "The sheet, laid flat",
@@ -92,8 +112,15 @@ export interface SurfaceCardViewProps {
 export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
+  // The sheets drawn over a cut across them, and what is being pulled.
+  const lines = useRef<HTMLCanvasElement>(null);
+  const pulling = useRef<{ from: number; w: number; perPixel: number } | undefined>(undefined);
   // Kept between frames: a frame is copied into it rather than a new one being made each time.
   const image = useRef<ImageData>(undefined);
+  // And for the quick looks, which come smaller than the card: somewhere to put one before it is
+  // scaled up onto the card.
+  const sketch = useRef<HTMLCanvasElement>(undefined);
+  const sketched = useRef<ImageData>(undefined);
   // The sheet last drawn, which is not the one asked for while a frame for it is on its way.
   const shown = useRef<number>(undefined);
   const [status, setStatus] = useState<Status>("loading");
@@ -122,6 +149,17 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
     const element = canvas.current;
     const context = element?.getContext("2d");
     if (element == null || context == null) return;
+    if (DEBUG) {
+      const kept = ((window as unknown as { __frames?: unknown[] }).__frames ??= []);
+      kept.push({
+        drew: Math.round(frame.drew),
+        step: frame.scale,
+        w: frame.w,
+        loading: frame.loading,
+        limited: frame.limited,
+      });
+      if (kept.length > 200) kept.shift();
+    }
     /*
      * The canvas is sized only when the size actually changes: setting `width` or `height`, even to
      * the value it already has, makes the browser throw the canvas away and allocate another, which
@@ -130,19 +168,45 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
     if (element.width !== frame.width || element.height !== frame.height) {
       element.width = frame.width;
       element.height = frame.height;
-      image.current = context.createImageData(frame.width, frame.height);
+      image.current = undefined;
+    }
+    const across = Math.max(1, Math.ceil(frame.width / frame.scale));
+    const down = Math.max(1, Math.ceil(frame.height / frame.scale));
+    /*
+     * A quick look comes smaller than the card and is drawn onto it scaled, which the browser does
+     * smoothly: an out-of-focus picture while the sheets go by, rather than a pattern of squares of
+     * its own that the eye reads as part of the papyrus.
+     */
+    if (frame.scale !== 1) {
+      const small = (sketch.current ??= document.createElement("canvas"));
+      if (small.width !== across || small.height !== down) {
+        small.width = across;
+        small.height = down;
+        sketched.current = undefined;
+      }
+      const into = (sketched.current ??= small.getContext("2d")!.createImageData(across, down));
+      into.data.set(new Uint8ClampedArray(frame.pixels));
+      small.getContext("2d")!.putImageData(into, 0, 0);
+      context.clearRect(0, 0, element.width, element.height);
+      context.imageSmoothingEnabled = true;
+      context.imageSmoothingQuality = "high";
+      context.drawImage(small, 0, 0, element.width, element.height);
+      shown.current = frame.w;
+      markSheets();
+      setDrawn(true);
+      return;
     }
     const into = (image.current ??= context.createImageData(frame.width, frame.height));
     into.data.set(new Uint8ClampedArray(frame.pixels));
     context.putImageData(into, 0, 0);
     shown.current = frame.w;
+    markSheets();
     setDrawn(true);
     // Still loading while this is not the sheet and plane asked for last, or not all of it.
-    setLoading(
-      frame.loading ||
-        frame.plane !== wantedPlane.current ||
-        (!frame.limited && frame.w !== wanted.current),
-    );
+    const more =
+      frame.loading || frame.plane !== wantedPlane.current || (!frame.limited && frame.w !== wanted.current);
+    if (!more) clearTimeout(waiting.current);
+    setLoading(more);
   };
 
   /*
@@ -226,7 +290,9 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
 
   useEffect(() => {
     surfaceEngine().show(id, w, plane);
-    setLoading(true);
+    waitFor();
+    // `waitFor` is the same work every time and is not worth being a dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, w, plane]);
 
   /*
@@ -236,17 +302,30 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
    * sheet asked for, and the board only needs to know where the card came to rest.
    */
   const settling = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const waiting = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Says that a sheet has been asked for, and stops saying it if the answer never comes.
+  const waitFor = () => {
+    clearTimeout(waiting.current);
+    setLoading(true);
+    waiting.current = setTimeout(() => setLoading(false), PATIENCE_MS);
+  };
   const askFor = (next: number) => {
     wanted.current = next;
     surfaceEngine().show(id, next, wantedPlane.current);
-    setLoading(true);
+    waitFor();
     if (settling.current !== undefined) clearTimeout(settling.current);
     settling.current = setTimeout(() => {
       settling.current = undefined;
       dispatch({ type: "setSurfaceLayer", id, w: wanted.current });
     }, 200);
   };
-  useEffect(() => () => clearTimeout(settling.current), []);
+  useEffect(
+    () => () => {
+      clearTimeout(settling.current);
+      clearTimeout(waiting.current);
+    },
+    [],
+  );
 
   /*
    * Alt and the wheel moves through the sheets: a notch is an eighth of one and a trackpad moves
@@ -299,6 +378,114 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
     element.addEventListener("wheel", onWheel, { passive: false });
     return () => element.removeEventListener("wheel", onWheel);
   }, [id, dispatch]);
+
+  /*
+   * On a cut across the sheets, each whole sheet is a line of its own: the card's is in the middle
+   * and its neighbours above and below, so that a piece that is right reads as level bands between
+   * level lines.  Drawn as the frames come in rather than through the board's state, which turning
+   * the wheel would otherwise lay out again and again.
+   */
+  const markSheets = () => {
+    const element = lines.current;
+    if (element === null) return;
+    const context = element.getContext("2d");
+    if (context === null) return;
+    const density = Math.min(2, window.devicePixelRatio || 1);
+    const width = Math.max(1, Math.round(element.clientWidth * density));
+    const height = Math.max(1, Math.round(element.clientHeight * density));
+    if (element.width !== width || element.height !== height) {
+      element.width = width;
+      element.height = height;
+    }
+    context.clearRect(0, 0, width, height);
+    if (wantedPlane.current === "uv" || shown.current === undefined) return;
+    /*
+     * One line: where the card itself is in the stack, which is the middle of a cut.  Its neighbours
+     * are only a ruler, and a ruler over the papyrus is in the way of reading it.
+     *
+     * Which way it runs is the plane's: a cut along u has the sheets lying one above another, a cut
+     * along v has them side by side (`mapping` in `render.ts`), so the line lies across the sheets
+     * either way rather than along them.
+     */
+    const down = wantedPlane.current === "uw";
+    context.lineCap = "round";
+    context.beginPath();
+    if (down) {
+      context.moveTo(0, height / 2);
+      context.lineTo(width, height / 2);
+    } else {
+      context.moveTo(width / 2, 0);
+      context.lineTo(width / 2, height);
+    }
+    context.strokeStyle = SHEET_LINE_EDGE;
+    context.lineWidth = 3.4 * density;
+    context.stroke();
+    context.strokeStyle = SHEET_LINE;
+    context.lineWidth = 1.4 * density;
+    context.stroke();
+  };
+
+  useEffect(markSheets, [plane, card.width, card.height, drawn]);
+
+  // Pulling a sheet on a cut: the one taken hold of follows the hand, and the card moves under it.
+  useEffect(() => {
+    const element = lines.current;
+    if (element === null || plane === "uv") return;
+    // A cut along u stacks the sheets downwards; a cut along v lays them out to the right.
+    const down = plane === "uw";
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+      const box = element.getBoundingClientRect();
+      const across = down ? element.clientHeight : element.clientWidth;
+      const at = down ? event.clientY - box.top : event.clientX - box.left;
+      if (Math.abs(at - across / 2) > GRAB) return;
+      event.stopPropagation();
+      pulling.current = {
+        from: down ? event.clientY : event.clientX,
+        w: wanted.current,
+        // Pulling one way brings the sheets on the other side into view, so w falls as the hand goes.
+        perPixel: -(2 * SPAN) / across,
+      };
+      let waiting = false;
+      const move = (moved: PointerEvent) => {
+        const hold = pulling.current;
+        if (hold === undefined) return;
+        moved.preventDefault();
+        const now = down ? moved.clientY : moved.clientX;
+        const next = Math.round((hold.w + (now - hold.from) * hold.perPixel) * 1000) / 1000;
+        wanted.current = next;
+        if (waiting) return;
+        waiting = true;
+        requestAnimationFrame(() => {
+          waiting = false;
+          if (pulling.current !== undefined) surfaceEngine().show(id, wanted.current, wantedPlane.current);
+        });
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move, true);
+        window.removeEventListener("pointerup", stop, true);
+        window.removeEventListener("pointercancel", stop, true);
+        pulling.current = undefined;
+        dispatch({ type: "setSurfaceLayer", id, w: wanted.current });
+      };
+      window.addEventListener("pointermove", move, true);
+      window.addEventListener("pointerup", stop, true);
+      window.addEventListener("pointercancel", stop, true);
+    };
+    const onPointerMove = (event: PointerEvent) => {
+      if (pulling.current !== undefined) return;
+      const box = element.getBoundingClientRect();
+      const across = down ? element.clientHeight : element.clientWidth;
+      const at = down ? event.clientY - box.top : event.clientX - box.left;
+      element.style.cursor = Math.abs(at - across / 2) <= GRAB ? (down ? "ns-resize" : "ew-resize") : "";
+    };
+    element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("pointermove", onPointerMove);
+    return () => {
+      element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("pointermove", onPointerMove);
+    };
+  }, [id, plane, dispatch]);
 
   const message = drawn ? undefined : (MESSAGES[status] ?? MESSAGES.loading);
 
@@ -354,6 +541,7 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
 
       <div className="card-body" ref={body} data-loading={loading}>
         <canvas className="card-surface" ref={canvas} />
+        <canvas className="card-lines card-sheets" ref={lines} />
         {message !== undefined && (
           <div className="card-overlay">
             <div className="card-message">{message}</div>

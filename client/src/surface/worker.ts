@@ -95,6 +95,13 @@ const SPAN = 2;
 const PREVIEW_LEVELS = 2;
 // While chunks arrive, the sheet is drawn again at most this often.
 const REDRAW_MS = 120;
+/*
+ * How long a sheet has to be the one asked for before the card goes and fetches what it needs to
+ * draw it sharply.  While a hand is still turning the wheel, the sharp frame is thrown away before
+ * anyone sees it, and the chunks it asks for are most of what the turning costs: of the second and
+ * a half a sixteen-notch turn took, a second was spent waiting for data nobody looked at.
+ */
+const RESTING_MS = 110;
 
 /**
  * The grid of a patch covering `width` × `height` pixels at `zoom` voxels per pixel.  The points are
@@ -140,6 +147,8 @@ class Card {
   private changed: (() => void) | undefined;
   // The sheet whose line the page has, so that it is sent once rather than with every frame.
   private sent: string | undefined;
+  // When a sheet was last asked for, which says whether the hand has come to rest.
+  private askedAt = 0;
   // How many voxels apart the sheets are here, as the piece was built with.
   private spacing = 40;
 
@@ -153,6 +162,7 @@ class Card {
   show(w: number, plane: SurfacePlane) {
     this.wanted = w;
     this.plane = plane;
+    this.askedAt = performance.now();
     this.changed?.();
     if (!this.drawing) this.run().catch((error) => this.fail(error));
   }
@@ -277,7 +287,14 @@ class Card {
    * nearest sheet it could reach, which is `w` unless the sheets ran out.
    */
   private async reach(w: number) {
-    while (this.patch !== undefined && Math.abs(w - this.baseW) > REBASE_AT) {
+    /*
+     * Pieces built on the way, at most.  Each one is a second or more of reading and fitting, and a
+     * card asked for a sheet twenty away would spend a minute building pieces nobody sees on the way
+     * — better to arrive as far as a few pieces reach and say so, which the card shows as the sheet
+     * it came to rest on.
+     */
+    let left = 4;
+    while (this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
       const patch: Patch = this.patch;
       const step = Math.max(-K, Math.min(K, Math.round(w - this.baseW)));
       // The centre of that sheet, or of the nearest one back towards this piece's own.
@@ -309,6 +326,8 @@ class Card {
     this.drawing = true;
     try {
       let drawn: string | undefined;
+      // The sheet the quick look is already showing, so that resting does not draw it twice.
+      let sketched: string | undefined;
       while (!this.closed && drawn !== `${this.wanted} ${this.plane}`) {
         const w = this.wanted, plane = this.plane;
         const asked = `${w} ${plane}`;
@@ -324,11 +343,23 @@ class Card {
         const preview = Math.min(scan.length - 1, fine + PREVIEW_LEVELS);
         const sheet = reached - this.baseW;
 
-        // Nothing at all is not worth sending: the card goes on saying that it is loading.
-        const send = (step = 1) => {
-          const pixels = new Uint8ClampedArray(width * height * 4);
-          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, SPAN, width, height, scan, fine, pixels, step);
-          if (painted === 0) return coarser;
+        /*
+         * Nothing at all is not worth sending: the card goes on saying that it is loading.  The
+         * quick look is drawn from a coarser level as well as from fewer pixels — most of what a
+         * frame costs is reaching into the scan, and a sheet cuts through it at an angle, so every
+         * pixel of a fine level is its own trip to memory.  A coarse level is small enough to stay
+         * near the processor, and while the wheel is turning nobody is reading the papyrus.
+         */
+        const send = (scale = 1, at = fine, settled = false) => {
+          const across = Math.max(1, Math.ceil(width / scale));
+          const down = Math.max(1, Math.ceil(height / scale));
+          const pixels = new Uint8ClampedArray(across * down * 4);
+          const began = performance.now();
+          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, SPAN, across, down, scan, at, pixels);
+          const drew = performance.now() - began;
+          // Nothing drawn is not worth sending — unless it is the last word, and the last word has
+          // to be said even when it is that there is no sheet here at all.
+          if (painted === 0 && !settled) return coarser;
           const frame: FrameEvent = {
             type: "frame",
             id,
@@ -337,14 +368,17 @@ class Card {
             limited: reached !== w,
             width,
             height,
+            scale,
             pixels: pixels.buffer,
-            loading: coarser > 0 || step > 1,
+            // `settled` is the last word on a sheet: what could not be fetched never will be, and a
+            // card that says it is still loading for ever is worse than one that shows what it has.
+            loading: !settled && (coarser > 0 || scale > 1 || at !== fine),
+            drew,
           };
           this.post(frame, [frame.pixels]);
           return coarser;
         };
 
-        drawn = asked;
         // The sheet itself, for the slice cards to draw the line where it cuts them.
         const line = `${this.baseW} ${sheet}`;
         if (this.sent !== line) {
@@ -364,10 +398,23 @@ class Card {
             [grid.buffer],
           );
         }
-        // A quick half-resolution look first, so that turning the wheel keeps up, then the whole
-        // thing; another sheet asked for in between leaves the whole one for it instead.
-        send(2);
+        /*
+         * A quick, coarse look first, so that turning the wheel keeps up, and then the whole thing —
+         * but only once the hand has rested: drawn while it is still moving, the sharp frame is
+         * thrown away before anyone sees it, and it costs five of the quick ones.
+         */
+        if (sketched !== asked) {
+          send(2, preview);
+          sketched = asked;
+        }
         if (this.wanted !== w || this.plane !== plane) continue;
+        // Still moving: leave the sharp frame, and the fetching it leads to, until the hand rests.
+        const resting = RESTING_MS - (performance.now() - this.askedAt);
+        if (resting > 0) {
+          await Promise.race([new Promise((resolve) => setTimeout(resolve, resting)), changed]);
+          continue;
+        }
+        drawn = asked;
         if (send() > 0) {
           for (const level of preview === fine ? [fine] : [preview, fine]) {
             const chunks = planeChunks(patch, plane, sheet, SPAN, width, height, scan[level]);
@@ -388,6 +435,8 @@ class Card {
             if (arrived) send();
           }
         }
+        // Everything this sheet can have has been fetched, so this frame is the last word on it.
+        if (!this.closed && this.wanted === w && this.plane === plane) send(1, fine, true);
         if (this.closed || this.wanted !== w || this.plane !== plane) continue;
         // The sheets half a step either side, which the wheel most likely asks for next; the
         // cross-sections already cover them.

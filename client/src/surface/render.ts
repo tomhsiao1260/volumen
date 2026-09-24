@@ -47,6 +47,11 @@ function mapping(
 // Reads voxels of one level, remembering the chunks it has looked up during one drawing.
 class LevelReader {
   private cache = new Map<number, Uint8Array | null | undefined>();
+  // The chunk looked up last, kept beside the rest: a sheet crosses a handful of chunks and runs
+  // along each of them for thousands of pixels in a row, so nearly every look-up is the last one
+  // again — and a map look-up for every pixel of every frame was most of what drawing cost.
+  private lastId = -1;
+  private lastChunk: Uint8Array | null | undefined;
   private kz: number;
   private ky: number;
   private kx: number;
@@ -57,11 +62,14 @@ class LevelReader {
 
   private chunk(cz: number, cy: number, cx: number) {
     const id = (cz * 4096 + cy) * 4096 + cx;
+    if (id === this.lastId) return this.lastChunk;
     let data = this.cache.get(id);
     if (data === undefined && !this.cache.has(id)) {
       data = this.level.inside(cz, cy, cx) ? this.level.get(cz, cy, cx) : null;
       this.cache.set(id, data);
     }
+    this.lastId = id;
+    this.lastChunk = data;
     return data;
   }
 
@@ -108,10 +116,9 @@ const STEP = 8;
 
 /**
  * Draws a plane of `patch` into `out` (RGBA, width × height), reading `levels[level]` and coarser
- * levels where it is missing.  Pixels the piece does not reach are left transparent.  With `step`
- * above one, only every `step`-th pixel each way is worked out and the rest of its square copied, for
- * a quick first look at a sheet the wheel has just reached.  Returns how many pixels came from a
- * coarser level than asked for, and how many were drawn at all.
+ * levels where it is missing.  Pixels the piece does not reach are left transparent.  A quick look is
+ * drawn by asking for fewer pixels — the same view, smaller — and scaling it up where it is shown.
+ * Returns how many pixels came from a coarser level than asked for, and how many were drawn at all.
  */
 export function drawPlane(
   patch: Patch,
@@ -123,8 +130,14 @@ export function drawPlane(
   levels: ZarrLevel[],
   level: number,
   out: Uint8ClampedArray,
-  step = 1,
 ) {
+  /*
+   * Written a whole pixel at a time.  Four writes into a clamped array — which rounds and clamps
+   * each one — came to as much as reaching into the scan did; as one 32-bit word there is nothing
+   * to clamp and a quarter of the stores.  Little-endian, so the bytes fall as red, green, blue,
+   * alpha in memory.
+   */
+  const words = new Uint32Array(out.buffer);
   const readers = levels.map((one) => new LevelReader(one));
   const where = mapping(patch, plane, w, span, width, height);
   const point = new Float64Array(3);
@@ -146,10 +159,9 @@ export function drawPlane(
     }
 
   let coarser = 0, drawn = 0;
-  for (let r = 0; r < height; r += step) {
+  for (let r = 0; r < height; r++) {
     const i0 = Math.min(Math.floor(r / STEP), down - 2), ti = (r - i0 * STEP) / STEP;
-    for (let c = 0; c < width; c += step) {
-      const o = (r * width + c) * 4;
+    for (let c = 0; c < width; c++) {
       const j0 = Math.min(Math.floor(c / STEP), across - 2), tj = (c - j0 * STEP) / STEP;
       const topLeft = i0 * across + j0, bottomLeft = topLeft + across;
       let alpha = 0;
@@ -167,15 +179,13 @@ export function drawPlane(
         // Near the edge of what the piece reaches, where interpolating would round it off.
         const [sheet, gi, gj] = where(r, c);
         if (!positionAt(patch, sheet, gi, gj, point)) {
-          out[o + 3] = 0;
+          words[r * width + c] = 0;
           continue;
         }
         alpha = coverageAt(patch, sheet, gi, gj);
       }
       if (alpha <= 0.02) {
-        out[o + 3] = 0;
-        for (let rr = r; rr < Math.min(r + step, height); rr++)
-          for (let cc = c; cc < Math.min(c + step, width); cc++) out[(rr * width + cc) * 4 + 3] = 0;
+        words[r * width + c] = 0;
         continue;
       }
       let value = -1, l = level;
@@ -190,27 +200,26 @@ export function drawPlane(
       }
       if (l > level) coarser++;
       if (value < 0) {
-        out[o + 3] = 0;
+        words[r * width + c] = 0;
         continue;
       }
-      out[o] = out[o + 1] = out[o + 2] = value;
-      out[o + 3] = Math.round(255 * Math.min(1, alpha));
+      const grey = value < 0 ? 0 : value > 255 ? 255 : value | 0;
+      const shade = Math.round(255 * (alpha > 1 ? 1 : alpha)) * 0x1000000 + grey * 0x10101;
+      words[r * width + c] = shade;
       drawn++;
-      // The rest of this pixel's square, while it is standing in for them.
-      for (let rr = r; rr < Math.min(r + step, height); rr++)
-        for (let cc = c; cc < Math.min(c + step, width); cc++) {
-          if (rr === r && cc === c) continue;
-          const q = (rr * width + cc) * 4;
-          out[q] = out[q + 1] = out[q + 2] = value;
-          out[q + 3] = out[o + 3];
-        }
     }
   }
   return { coarser, drawn };
 }
 
-// How many points across the image the chunks are worked out from; between them the piece is smooth.
+/*
+ * How many points across the image the chunks are worked out from.  At least as many as the piece has
+ * points across it: a coarser net than the piece's own can step over a run of sheet between two of
+ * its points, and a pixel drawn from a chunk nobody asked for is drawn from a coarser level for ever,
+ * which leaves the card saying it is still loading with nothing left to come.
+ */
 const LATTICE = 33;
+const latticeFor = (patch: Patch) => Math.min(129, Math.max(LATTICE, patch.nu, patch.nv));
 
 /**
  * The chunks of `level` that drawing this plane reads: the bounding box of every cell of a lattice
@@ -227,28 +236,29 @@ export function planeChunks(
 ): Chunk[] {
   const where = mapping(patch, plane, w, span, width, height);
   const point = new Float64Array(3);
-  const positions = new Float32Array(LATTICE * LATTICE * 3).fill(NaN);
-  for (let i = 0; i < LATTICE; i++)
-    for (let j = 0; j < LATTICE; j++) {
+  const lattice = latticeFor(patch);
+  const positions = new Float32Array(lattice * lattice * 3).fill(NaN);
+  for (let i = 0; i < lattice; i++)
+    for (let j = 0; j < lattice; j++) {
       const [sheet, gi, gj] = where(
-        (i / (LATTICE - 1)) * (height - 1),
-        (j / (LATTICE - 1)) * (width - 1),
+        (i / (lattice - 1)) * (height - 1),
+        (j / (lattice - 1)) * (width - 1),
       );
-      if (coverageAt(patch, sheet, gi, gj) > 0.02 && positionAt(patch, sheet, gi, gj, point)) {
-        positions.set(point, (i * LATTICE + j) * 3);
+      if (coverageAt(patch, sheet, gi, gj) > 0 && positionAt(patch, sheet, gi, gj, point)) {
+        positions.set(point, (i * lattice + j) * 3);
       }
     }
   const f = level.factor;
   const keys = new Map<string, Chunk>();
   const lo = [0, 0, 0], hi = [0, 0, 0];
-  for (let i = 0; i + 1 < LATTICE; i++)
-    for (let j = 0; j + 1 < LATTICE; j++) {
+  for (let i = 0; i + 1 < lattice; i++)
+    for (let j = 0; j + 1 < lattice; j++) {
       lo.fill(Infinity);
       hi.fill(-Infinity);
       // Whichever corners of the cell the piece reaches: a cell beside a hole has some, and the
       // pixels there are drawn like any other, so their chunks are needed like any other.
       let corners = 0;
-      for (const k of [i * LATTICE + j, i * LATTICE + j + 1, (i + 1) * LATTICE + j, (i + 1) * LATTICE + j + 1]) {
+      for (const k of [i * lattice + j, i * lattice + j + 1, (i + 1) * lattice + j, (i + 1) * lattice + j + 1]) {
         if (Number.isNaN(positions[k * 3])) continue;
         corners++;
         for (let c = 0; c < 3; c++) {
