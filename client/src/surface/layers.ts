@@ -19,6 +19,10 @@ export interface Sheet {
   nu: number;
   nv: number;
   grid: Float32Array;
+  // The way w grows (z, y, x), and how many voxels apart the sheets are: what turns a drag across
+  // the line into sheets.
+  normal: [number, number, number];
+  spacing: number;
 }
 
 const sheets = new Map<string, Sheet>();

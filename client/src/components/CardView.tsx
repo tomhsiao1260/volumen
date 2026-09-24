@@ -20,10 +20,22 @@ import { sourceLabel } from "../api/sources";
 import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
 import type { BoardAction, CardState } from "../board/state";
+import { surfaceEngine } from "../surface/engine";
 import { crossSection, sheetsOf, watchSheets } from "../surface/layers";
 import { SourcePicker } from "./SourcePicker";
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
+
+// How far (`x`, `y`) is from the segment (`ax`, `ay`)–(`bx`, `by`).
+function distanceToSegment(x: number, y: number, ax: number, ay: number, bx: number, by: number) {
+  const dx = bx - ax, dy = by - ay;
+  const length = dx * dx + dy * dy;
+  const t = length === 0 ? 0 : Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / length));
+  return Math.hypot(x - (ax + dx * t), y - (ay + dy * t));
+}
+
+// How near the pointer has to be to a sheet's line to take hold of it, in the card's pixels.
+const GRAB = 7;
 
 /**
  * Which way each plane is laid out, as indices into a point read as (z, y, x): across the view, down
@@ -36,8 +48,12 @@ const AXES: Record<ViewOrientation, [number, number, number]> = {
   yz: [0, 1, 2],
 };
 
-// The line where a surface card's sheet cuts this slice.
-const SHEET_LINE = "rgba(120, 220, 255, 0.85)";
+/*
+ * The line where a surface card's sheet cuts this slice: a dark stroke under a bright one, so that it
+ * reads over pale papyrus and dark gaps alike without hiding what is underneath.
+ */
+const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
+const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
 
 export function formatVoxel({ x, y, z }: Point) {
   return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
@@ -112,6 +128,19 @@ export function CardView({
   // Bumped when a surface card moves to another sheet, so that its line is drawn again.
   const [sheetsMoved, setSheetsMoved] = useState(0);
   const lines = useRef<HTMLCanvasElement>(null);
+  const body = useRef<HTMLDivElement>(null);
+  /*
+   * The lines as they were drawn, in the card's own pixels, so that the pointer can be tested against
+   * them without working the whole grid out again — and beside each, what a drag across it is worth:
+   * how much w one pixel of the card is, which is the sheet's normal seen in this plane, scaled by
+   * the zoom and by how far apart the sheets are.
+   */
+  const drawnLines = useRef<
+    { cardId: string; points: number[]; perPixel: { x: number; y: number } }[]
+  >([]);
+  const dragging = useRef<
+    { cardId: string; from: { x: number; y: number }; w: number; perPixel: { x: number; y: number } } | undefined
+  >(undefined);
   const [planeMenu, setPlaneMenu] = useState(false);
   const [menu, setMenu] = useState<CardMenu>();
   const { sourceId, orientation, groupId } = card;
@@ -202,26 +231,146 @@ export function CardView({
     if (looking === undefined || zoom === undefined || !Number.isFinite(zoom) || zoom <= 0) return;
     const at = [looking.z, looking.y, looking.x];
     const [across, down, sliced] = AXES[orientation];
-    context.strokeStyle = SHEET_LINE;
-    context.lineWidth = 1.5 * density;
     context.lineCap = "round";
+    context.lineJoin = "round";
+    drawnLines.current = [];
     for (const sheet of sheetsOf(sourceId)) {
       const segments = crossSection(sheet, sliced, at[sliced]);
       if (segments.length === 0) continue;
+      const points: number[] = [];
       context.beginPath();
       for (const segment of segments) {
-        context.moveTo(
-          width / 2 + ((segment[across] - at[across]) / zoom) * density,
-          height / 2 + ((segment[down] - at[down]) / zoom) * density,
-        );
-        context.lineTo(
-          width / 2 + ((segment[3 + across] - at[across]) / zoom) * density,
-          height / 2 + ((segment[3 + down] - at[down]) / zoom) * density,
-        );
+        const x1 = canvas.clientWidth / 2 + (segment[across] - at[across]) / zoom;
+        const y1 = canvas.clientHeight / 2 + (segment[down] - at[down]) / zoom;
+        const x2 = canvas.clientWidth / 2 + (segment[3 + across] - at[across]) / zoom;
+        const y2 = canvas.clientHeight / 2 + (segment[3 + down] - at[down]) / zoom;
+        points.push(x1, y1, x2, y2);
+        context.moveTo(x1 * density, y1 * density);
+        context.lineTo(x2 * density, y2 * density);
       }
+      drawnLines.current.push({
+        cardId: sheet.cardId,
+        points,
+        perPixel: {
+          x: (sheet.normal[across] * zoom) / sheet.spacing,
+          y: (sheet.normal[down] * zoom) / sheet.spacing,
+        },
+      });
+      context.strokeStyle = SHEET_LINE_EDGE;
+      context.lineWidth = 3.4 * density;
+      context.stroke();
+      context.strokeStyle = SHEET_LINE;
+      context.lineWidth = 1.4 * density;
       context.stroke();
     }
   }, [sheetsMoved, centre, orientation, sourceId, groupId, session, card.width, card.height]);
+
+  // The sheet's line under the pointer, in the card's own pixels.
+  const lineUnder = (x: number, y: number) => {
+    let found;
+    let nearest = GRAB;
+    for (const line of drawnLines.current) {
+      for (let i = 0; i + 3 < line.points.length; i += 4) {
+        const away = distanceToSegment(x, y, line.points[i], line.points[i + 1], line.points[i + 2], line.points[i + 3]);
+        if (away < nearest) {
+          nearest = away;
+          found = line;
+        }
+      }
+    }
+    return found;
+  };
+
+  /*
+   * Taking hold of a sheet's line and pulling it through the papyrus.  The surface card follows at
+   * once, and the board only hears about it when the hand lets go, the same as for its own wheel.
+   *
+   * The press is listened for on the card itself rather than through React, which hands its events
+   * out at the root of the page — by then the board has already seen the press and started to move
+   * the card.
+   */
+  useEffect(() => {
+    const element = body.current;
+    if (element === null) return;
+
+    const lineUnder = (x: number, y: number) => {
+      let found;
+      let nearest = GRAB;
+      for (const line of drawnLines.current) {
+        for (let i = 0; i + 3 < line.points.length; i += 4) {
+          const away = distanceToSegment(x, y, line.points[i], line.points[i + 1], line.points[i + 2], line.points[i + 3]);
+          if (away < nearest) {
+            nearest = away;
+            found = line;
+          }
+        }
+      }
+      return found;
+    };
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+      const box = element.getBoundingClientRect();
+      const line = lineUnder(event.clientX - box.left, event.clientY - box.top);
+      if (line === undefined) return;
+      const sheet = sheetsOf(sourceId).find((one) => one.cardId === line.cardId);
+      if (sheet === undefined) return;
+      event.stopPropagation();
+      dragging.current = {
+        cardId: line.cardId,
+        from: { x: event.clientX, y: event.clientY },
+        w: sheet.w,
+        perPixel: line.perPixel,
+      };
+      let asked = sheet.w;
+      let waiting = false;
+      const move = (moved: PointerEvent) => {
+        const grabbed = dragging.current;
+        if (grabbed === undefined) return;
+        moved.preventDefault();
+        asked =
+          Math.round(
+            (grabbed.w +
+              (moved.clientX - grabbed.from.x) * grabbed.perPixel.x +
+              (moved.clientY - grabbed.from.y) * grabbed.perPixel.y) *
+              1000,
+          ) / 1000;
+        // Once a frame is as often as the card can draw one.
+        if (waiting) return;
+        waiting = true;
+        requestAnimationFrame(() => {
+          waiting = false;
+          if (dragging.current !== undefined) surfaceEngine().showLayer(grabbed.cardId, asked);
+        });
+      };
+      const stop = () => {
+        window.removeEventListener("pointermove", move, true);
+        window.removeEventListener("pointerup", stop, true);
+        window.removeEventListener("pointercancel", stop, true);
+        const grabbed = dragging.current;
+        dragging.current = undefined;
+        if (grabbed !== undefined) dispatch({ type: "setSurfaceLayer", id: grabbed.cardId, w: asked });
+      };
+      window.addEventListener("pointermove", move, true);
+      window.addEventListener("pointerup", stop, true);
+      window.addEventListener("pointercancel", stop, true);
+    };
+
+    // The cursor says when a line can be taken hold of.
+    const onPointerMove = (event: PointerEvent) => {
+      if (dragging.current !== undefined) return;
+      const box = element.getBoundingClientRect();
+      const over = lineUnder(event.clientX - box.left, event.clientY - box.top) !== undefined;
+      element.style.cursor = over ? "ns-resize" : "";
+    };
+
+    element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("pointermove", onPointerMove);
+    return () => {
+      element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("pointermove", onPointerMove);
+    };
+  }, [sourceId, dispatch]);
 
   const name = source === undefined ? "" : shorten(sourceLabel(source));
   const voxel = pointer ?? centre;
@@ -299,6 +448,7 @@ export function CardView({
 
       <div
         className="card-body"
+        ref={body}
         onContextMenu={(event) => {
           event.preventDefault();
           if (sourceId === null || pointer === undefined) return;

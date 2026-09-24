@@ -104,6 +104,10 @@ export interface SheetEvent {
   nu: number;
   nv: number;
   grid: ArrayBuffer;
+  // The way w grows, and how many voxels a sheet is from the next: enough to turn a drag across the
+  // line on a slice card into sheets.
+  normal: [number, number, number];
+  spacing: number;
 }
 
 export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent;

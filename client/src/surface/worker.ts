@@ -140,6 +140,8 @@ class Card {
   private changed: (() => void) | undefined;
   // The sheet whose line the page has, so that it is sent once rather than with every frame.
   private sent: string | undefined;
+  // How many voxels apart the sheets are here, as the piece was built with.
+  private spacing = 40;
 
   constructor(private request: OpenRequest) {
     this.wanted = request.w;
@@ -188,6 +190,7 @@ class Card {
         return;
       }
       this.patch = built.patch;
+      this.spacing = built.spacing;
       this.scan = await scan;
       if (this.closed) return;
       this.post({
@@ -348,7 +351,16 @@ class Card {
           this.sent = line;
           const grid = layerGrid(patch, sheet);
           this.post(
-            { type: "sheet", id, w: reached, nu: patch.nu, nv: patch.nv, grid: grid.buffer },
+            {
+              type: "sheet",
+              id,
+              w: reached,
+              nu: patch.nu,
+              nv: patch.nv,
+              grid: grid.buffer,
+              normal: patch.normal,
+              spacing: this.spacing,
+            },
             [grid.buffer],
           );
         }

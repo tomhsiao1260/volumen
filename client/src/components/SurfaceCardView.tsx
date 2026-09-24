@@ -25,14 +25,28 @@ type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
 // screen allows; past two there is nothing more to see and every pixel costs.
 const MAX_DENSITY = 2;
 
-// Sheets per wheel notch, and per pixel of a trackpad's scroll.
+/*
+ * Sheets per wheel notch, and per pixel of a scroll.  A mouse's notch is 120 pixels where a browser
+ * counts in pixels, so the two agree: one notch is an eighth of a sheet either way.  Telling a mouse
+ * from a trackpad by how large the scroll is does not work — a trackpad flicked hard sends more than
+ * a hundred pixels at a time, and counting each of those as a notch ran the card a whole sheet past
+ * where the hand stopped.
+ */
 const NOTCH = 1 / 8;
-const PER_PIXEL = 1 / 1200;
-// A gap this long starts a new scroll; and once a scroll has fallen to this much of its strongest
-// push, what is left of it is the trackpad coasting after the fingers have gone, which the card
-// ignores so that it stops when the hand stops.
+const PER_PIXEL = 1 / 960;
+/*
+ * A gap this long starts a new scroll.  What tells the hand from the trackpad coasting after it:
+ * the coasting only ever fades, so a push that has grown smaller this many times in a row is not a
+ * hand any more — a hand's pushes wander up and down.  Falling well below the gesture's strongest
+ * push says the same thing more slowly, and catches a coast that begins gently.
+ */
 const GESTURE_GAP_MS = 120;
-const COASTING = 0.4;
+const FADING = 5;
+const COASTING = 0.5;
+// And however strong the flick, one of them moves at most this far.  A hand cannot tell a trackpad's
+// coasting from its own push, and neither can this, so what makes the card answerable is that no one
+// gesture can run away with it: to go further, push again.
+const PER_GESTURE = 3 / 8;
 
 // What the card found is for whoever is working on it, not for the board: it is written to the
 // console of a page opened with `?debug`, like the rest of the handles there.
@@ -92,9 +106,13 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   // The sheet and plane asked for last, which the wheel and the badge change before the state has
   // caught up, and which a frame is compared against to know whether it is the one being waited for.
   const wanted = useRef(w);
-  wanted.current = w;
   const wantedPlane = useRef(plane);
-  wantedPlane.current = plane;
+  // Taken from the board only when the board itself moves the card — a sheet asked for by the wheel
+  // is held here until the board hears about it, and a render in between must not undo it.
+  useEffect(() => {
+    wanted.current = w;
+    wantedPlane.current = plane;
+  }, [w, plane]);
   // The size the sheet was built for; it is not built again while the card is resized, since the
   // sheet it shows does not change.
   const size = useRef({ width: card.width, height: card.height });
@@ -212,6 +230,25 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   }, [id, w, plane]);
 
   /*
+   * Asks for another sheet at once, and tells the board a moment later.  A wheel turned across a
+   * trackpad sends its scroll dozens of times a second, and putting each of those through the board's
+   * state would lay out every card and schedule a save for each one; the worker only needs the last
+   * sheet asked for, and the board only needs to know where the card came to rest.
+   */
+  const settling = useRef<ReturnType<typeof setTimeout>>(undefined);
+  const askFor = (next: number) => {
+    wanted.current = next;
+    surfaceEngine().show(id, next, wantedPlane.current);
+    setLoading(true);
+    if (settling.current !== undefined) clearTimeout(settling.current);
+    settling.current = setTimeout(() => {
+      settling.current = undefined;
+      dispatch({ type: "setSurfaceLayer", id, w: wanted.current });
+    }, 200);
+  };
+  useEffect(() => () => clearTimeout(settling.current), []);
+
+  /*
    * Alt and the wheel moves through the sheets: a notch is an eighth of one and a trackpad moves
    * smoothly.  Without Alt the board takes the wheel, as it does over a slice card.
    *
@@ -222,37 +259,42 @@ export function SurfaceCardView({ card, source, selected, dispatch }: SurfaceCar
   useEffect(() => {
     const element = body.current;
     if (element === null) return;
-    const scroll = { at: 0, strongest: 0, coasting: false };
+    const scroll = { at: 0, strongest: 0, last: 0, fading: 0, spent: 0, coasting: false };
     const onWheel = (event: WheelEvent) => {
       if (!event.altKey || event.ctrlKey || event.metaKey) return;
       event.preventDefault();
       event.stopPropagation();
       const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX;
       if (delta === 0) return;
-      const pixels = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL && Math.abs(delta) < 40;
+      const pixels = event.deltaMode === WheelEvent.DOM_DELTA_PIXEL;
       const now = event.timeStamp;
       if (now - scroll.at > GESTURE_GAP_MS) {
         scroll.strongest = 0;
+        scroll.last = 0;
+        scroll.fading = 0;
+        scroll.spent = 0;
         scroll.coasting = false;
       }
       scroll.at = now;
       if (pixels) {
         const size = Math.abs(delta);
-        // Coasting only fades away, so a push stronger than what is left means a hand is back on.
-        if (size > scroll.strongest * 0.6) scroll.coasting = false;
+        // Coasting only ever fades, so a push larger than the one before it is a hand, back on.
+        if (size > scroll.last * 1.15) {
+          scroll.coasting = false;
+          scroll.fading = 0;
+        }
+        scroll.fading = size < scroll.last ? scroll.fading + 1 : 0;
+        scroll.last = size;
         scroll.strongest = Math.max(scroll.strongest, size);
-        if (size < scroll.strongest * COASTING) scroll.coasting = true;
+        if (scroll.fading >= FADING || size < scroll.strongest * COASTING) scroll.coasting = true;
         if (scroll.coasting) return;
       }
-      let next = wanted.current;
-      if (!pixels) {
-        next += Math.sign(delta) * NOTCH;
-      } else {
-        next += delta * PER_PIXEL;
-      }
-      next = Math.round(next * 1000) / 1000;
-      wanted.current = next;
-      dispatch({ type: "setSurfaceLayer", id, w: next });
+      let step = pixels ? delta * PER_PIXEL : Math.sign(delta) * NOTCH;
+      const left = PER_GESTURE - scroll.spent;
+      if (left <= 0) return;
+      step = Math.sign(step) * Math.min(Math.abs(step), left);
+      scroll.spent += Math.abs(step);
+      askFor(Math.round((wanted.current + step) * 1000) / 1000);
     };
     element.addEventListener("wheel", onWheel, { passive: false });
     return () => element.removeEventListener("wheel", onWheel);
