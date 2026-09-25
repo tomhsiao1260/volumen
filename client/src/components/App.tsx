@@ -26,7 +26,7 @@ import {
 } from "../board/state";
 import { cssTransform, toBoard } from "../board/transform";
 import { sheetsOf } from "../surface/layers";
-import { chain, chainsOf, loadChains, newChainId, setChain, watchChains } from "../surface/windings";
+import { chain, chainsOf, forgetChain, loadChains, newChainId, setChain, watchChains } from "../surface/windings";
 import type { Point } from "viewer";
 import { BoardMenu } from "./BoardMenu";
 import { Rail } from "./Rail";
@@ -242,6 +242,17 @@ export function App() {
   const [chainsMoved, setChainsMoved] = useState(0);
   useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
 
+  // Everything said about the scans the board is showing, for the list in the rail.
+  const onTheBoard = () => {
+    const scans = new Set(
+      state.cards
+        .map((card) => (card.sourceId === null ? undefined : state.sources[card.sourceId]))
+        .filter((source): source is Source => source !== undefined)
+        .map(scanOf),
+    );
+    return [...scans].flatMap((scan) => chainsOf(scan));
+  };
+
   // What has been said about the papyrus of each scan on the board, read once per scan.
   useEffect(() => {
     for (const source of Object.values(state.sources)) {
@@ -299,6 +310,37 @@ export function App() {
     if (open === undefined) dispatch({ type: "adding", chainId: saved.id });
   };
 
+  /*
+   * Removes the winding point being held, and the chain with it once its last point is gone.  It is
+   * the only way a chain is edited: a point is taken hold of and taken away, and another put down —
+   * which is what VC3D does for the same thing, and what makes a wrong point cost one press.
+   */
+  const removePicked = () => {
+    const picked = latest.current.picked;
+    if (picked === undefined) return;
+    const one = chain(picked.chain);
+    if (one !== undefined) {
+      const points = one.points.filter((point) => point.id !== picked.point);
+      if (points.length === 0) forgetChain(one.id);
+      else setChain({ ...one, points });
+    }
+    dispatch({ type: "pick", picked: undefined });
+  };
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (latest.current.picked === undefined) return;
+      if ((event.target as HTMLElement | null)?.closest?.("input, textarea") != null) return;
+      event.preventDefault();
+      removePicked();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // `removePicked` reads everything it needs from the refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const unlink = (card: CardState) => {
     const groupId = newGroupId();
     const place = sessionRef.current?.places().get(card.groupId);
@@ -314,7 +356,20 @@ export function App() {
 
   return (
     <>
-      <Rail tool={state.tool} onTool={(tool) => dispatch({ type: "setTool", tool })} />
+      <Rail
+        tool={state.tool}
+        onTool={(tool) => dispatch({ type: "setTool", tool })}
+        chains={onTheBoard()}
+        adding={state.adding}
+        onShow={(id, on) => {
+          const one = chain(id);
+          if (one !== undefined) setChain({ ...one, on });
+        }}
+        onRemove={(id) => {
+          forgetChain(id);
+          if (state.adding === id) dispatch({ type: "adding", chainId: undefined });
+        }}
+      />
       <div
       id="board"
       ref={setBoard}
@@ -372,7 +427,9 @@ export function App() {
                 tool={state.tool}
                 scan={source === undefined ? "" : scanOf(source)}
                 onMark={(at) => mark(card, at)}
+                picked={state.picked}
                 onPlace={(at) => place(card, at)}
+                onPick={(picked) => dispatch({ type: "pick", picked })}
                 onOpenSurface={(seed) =>
                   dispatch({
                     type: "addSurfaceCard",

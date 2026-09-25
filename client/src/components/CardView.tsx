@@ -19,7 +19,7 @@ import { getLasagna } from "../api/lasagna";
 import { sourceLabel } from "../api/sources";
 import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
-import type { BoardAction, CardState, Tool } from "../board/state";
+import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
 import { crossSection, sheetsOf, watchSheets } from "../surface/layers";
 import { chainsOf, watchChains } from "../surface/windings";
@@ -71,6 +71,9 @@ const MARK_EDGE = "rgba(20, 10, 0, 0.6)";
 const STEP_DOT = "rgba(255, 170, 50, 0.95)";
 const STEP_EDGE = "rgba(30, 14, 0, 0.7)";
 
+// A point taken hold of is drawn larger, by the same amount VC3D uses for the same thing.
+const HELD_LARGER = 1.4;
+
 function drawDot(
   context: CanvasRenderingContext2D,
   x: number,
@@ -78,11 +81,19 @@ function drawDot(
   density: number,
   here: boolean,
   turn: number | null,
+  held = false,
 ) {
   context.save();
   context.globalAlpha = here ? 1 : 0.45;
+  if (held) {
+    context.beginPath();
+    context.arc(x, y, 9 * density, 0, 2 * Math.PI);
+    context.strokeStyle = STEP_DOT;
+    context.lineWidth = 1.6 * density;
+    context.stroke();
+  }
   context.beginPath();
-  context.arc(x, y, 4.2 * density, 0, 2 * Math.PI);
+  context.arc(x, y, 4.2 * (held ? HELD_LARGER : 1) * density, 0, 2 * Math.PI);
   context.strokeStyle = STEP_EDGE;
   context.lineWidth = 3.2 * density;
   context.stroke();
@@ -159,6 +170,8 @@ export interface CardViewProps {
   // What a press on the data does, and the scan the annotations of this card are filed under.
   tool: Tool;
   scan: string;
+  // The winding point taken hold of, which is the one Delete would remove.
+  picked: PickedPoint | undefined;
   session: Session;
   // Bumped when the viewer is replaced, so that the view is added to the new one.
   generation: number;
@@ -170,6 +183,8 @@ export interface CardViewProps {
   onMark: (at: Point | null) => void;
   // Puts a winding point down at this voxel, joining the chain being drawn or starting one.
   onPlace: (at: Point) => void;
+  // Takes hold of a winding point already down, or lets go.
+  onPick: (picked: PickedPoint | undefined) => void;
   // Opens a surface card on the sheet at `seed`.
   onOpenSurface: (seed: Point) => void;
 }
@@ -194,6 +209,7 @@ export function CardView({
   mark,
   tool,
   scan,
+  picked,
   session,
   generation,
   dispatch,
@@ -201,6 +217,7 @@ export function CardView({
   onUnlink,
   onMark,
   onPlace,
+  onPick,
   onOpenSurface,
 }: CardViewProps) {
   const slice = useRef<HTMLDivElement>(null);
@@ -213,6 +230,9 @@ export function CardView({
   // Bumped when a surface card moves to another sheet, so that its line is drawn again.
   const [sheetsMoved, setSheetsMoved] = useState(0);
   const [chainsMoved, setChainsMoved] = useState(0);
+  // Where each winding point was drawn, in the card's own pixels: what a press looks through to find
+  // the point under it.
+  const drawnDots = useRef<{ chain: string; point: string; x: number; y: number }[]>([]);
   const lines = useRef<HTMLCanvasElement>(null);
   const body = useRef<HTMLDivElement>(null);
   /*
@@ -296,10 +316,12 @@ export function CardView({
   const toolRef = useRef(tool);
   const pointerRef = useRef<Point | undefined>(undefined);
   const onPlaceRef = useRef(onPlace);
+  const onPickRef = useRef(onPick);
   useEffect(() => {
     toolRef.current = tool;
     pointerRef.current = pointer;
     onPlaceRef.current = onPlace;
+    onPickRef.current = onPick;
   });
 
   /*
@@ -364,6 +386,7 @@ export function CardView({
      * its points joined in the order they were placed, each with the wrap it was counted as: it is
      * the only way to see what one says without reading it back out of a file.
      */
+    drawnDots.current = [];
     for (const one of chainsOf(scan)) {
       if (one.points.length === 0) continue;
       const places = one.points.map((point) => {
@@ -387,12 +410,15 @@ export function CardView({
       });
       context.stroke();
       context.restore();
-      for (const place of places) {
+      one.points.forEach((point, k) => {
+        const place = places[k];
+        const held = picked?.chain === one.id && picked.point === point.id;
+        drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y });
         context.save();
         if (!one.on) context.globalAlpha = 0.35;
-        drawDot(context, place.x * density, place.y * density, density, place.here, place.turn);
+        drawDot(context, place.x * density, place.y * density, density, place.here, place.turn, held);
         context.restore();
-      }
+      });
     }
     if (mark !== undefined) {
       const point = [mark.z, mark.y, mark.x];
@@ -404,7 +430,7 @@ export function CardView({
         Math.abs(point[sliced] - at[sliced]) <= 0.5,
       );
     }
-  }, [sheetsMoved, chainsMoved, centre, mark, scan, orientation, sourceId, groupId, session, card.width, card.height]);
+  }, [sheetsMoved, chainsMoved, centre, mark, picked, scan, orientation, sourceId, groupId, session, card.width, card.height]);
 
   // The sheet's line under the pointer, in the card's own pixels.
   const lineUnder = (x: number, y: number) => {
@@ -434,6 +460,20 @@ export function CardView({
     const element = body.current;
     if (element === null) return;
 
+    // The winding point under the pointer, in the card's own pixels.
+    const dotUnder = (x: number, y: number) => {
+      let found;
+      let nearest = GRAB + 3;
+      for (const dot of drawnDots.current) {
+        const away = Math.hypot(dot.x - x, dot.y - y);
+        if (away < nearest) {
+          nearest = away;
+          found = { chain: dot.chain, point: dot.point };
+        }
+      }
+      return found;
+    };
+
     const lineUnder = (x: number, y: number) => {
       let found;
       let nearest = GRAB;
@@ -459,8 +499,15 @@ export function CardView({
       if (toolRef.current !== "look") {
         event.stopPropagation();
         event.preventDefault();
-        const at = pointerRef.current;
-        if (at !== undefined) onPlaceRef.current(at);
+        const box = element.getBoundingClientRect();
+        const scale = box.width / element.clientWidth;
+        const held = dotUnder((event.clientX - box.left) / scale, (event.clientY - box.top) / scale);
+        // A press on a point already down takes hold of it; anywhere else puts another one down.
+        if (held !== undefined) onPickRef.current(held);
+        else {
+          const at = pointerRef.current;
+          if (at !== undefined) onPlaceRef.current(at);
+        }
         return;
       }
       const box = element.getBoundingClientRect();
@@ -514,7 +561,11 @@ export function CardView({
       if (dragging.current !== undefined) return;
       const box = element.getBoundingClientRect();
       if (toolRef.current !== "look") {
-        element.style.cursor = "crosshair";
+        const scale = box.width / element.clientWidth;
+        element.style.cursor =
+          dotUnder((event.clientX - box.left) / scale, (event.clientY - box.top) / scale) === undefined
+            ? "crosshair"
+            : "pointer";
         return;
       }
       const over = lineUnder(event.clientX - box.left, event.clientY - box.top) !== undefined;

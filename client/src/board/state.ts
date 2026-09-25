@@ -57,6 +57,13 @@ export interface CardState {
  */
 export type Tool = "look" | "step";
 
+// A winding point taken hold of: the next Delete removes it.  Picking one is how a point is edited,
+// as it is in VC3D — a press on a point takes it rather than putting another one down.
+export interface PickedPoint {
+  chain: string;
+  point: string;
+}
+
 export interface BoardState {
   cards: CardState[];
   // Which tool the rail has picked.  Not part of the saved board: a tool is a mode, not a document.
@@ -64,6 +71,8 @@ export interface BoardState {
   // The winding chain being added to, if any: the next point placed joins it rather than starting a
   // new one.  A chain is closed by Enter, by Escape, or by changing tool.
   adding: string | undefined;
+  // The winding point taken hold of, if any.
+  picked: PickedPoint | undefined;
   // The hue each group of linked cards is marked with.
   hues: Record<string, number>;
   /*
@@ -85,6 +94,7 @@ export const emptyBoard: BoardState = {
   cards: [],
   tool: "look",
   adding: undefined,
+  picked: undefined,
   hues: {},
   marks: {},
   view: { x: 0, y: 0, scale: 1 },
@@ -129,6 +139,7 @@ export type BoardAction =
   | { type: "fitToCards"; size: { width: number; height: number } }
   | { type: "setTool"; tool: Tool }
   | { type: "adding"; chainId: string | undefined }
+  | { type: "pick"; picked: PickedPoint | undefined }
   // Marks a voxel for the group, or takes the mark away.
   | { type: "mark"; groupId: string; at: Point | null }
   | { type: "restore"; board: StoredBoard; sources: Source[] };
@@ -214,13 +225,16 @@ export function boardReducer(
     }
 
     case "setTool":
-      // Changing tool closes whatever chain was being drawn.
+      // Changing tool closes whatever chain was being drawn, and lets go of any point.
       return state.tool === action.tool
         ? state
-        : { ...state, tool: action.tool, adding: undefined };
+        : { ...state, tool: action.tool, adding: undefined, picked: undefined };
 
     case "adding":
       return state.adding === action.chainId ? state : { ...state, adding: action.chainId };
+
+    case "pick":
+      return { ...state, picked: action.picked };
 
     case "mark": {
       const marks = { ...state.marks };

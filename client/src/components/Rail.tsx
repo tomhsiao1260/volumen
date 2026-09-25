@@ -9,8 +9,10 @@
  * before should not have to learn new ones here.
  */
 
+import { useState } from "react";
 import type { ReactNode } from "react";
 import type { Tool } from "../board/state";
+import type { WindChain } from "../surface/windings";
 
 interface Choice {
   tool: Tool;
@@ -47,27 +49,93 @@ const CHOICES: Choice[] = [
   },
 ];
 
+// What the picked tool is for, said where the hand is.  A tool nobody can guess the use of is a tool
+// nobody uses, and this one is a sentence long.
+const SAYS: Partial<Record<Tool, string>> = {
+  step: "Press across the sheets, one press a sheet · Enter finishes the chain · press a point, then Delete, to take it back",
+};
+
 export interface RailProps {
   tool: Tool;
   onTool: (tool: Tool) => void;
+  // Everything said about the scans on the board, newest last, and the one being drawn.
+  chains: WindChain[];
+  adding: string | undefined;
+  onShow: (id: string, on: boolean) => void;
+  onRemove: (id: string) => void;
 }
 
-export function Rail({ tool, onTool }: RailProps) {
+export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailProps) {
+  const [listing, setListing] = useState(false);
+  const says = SAYS[tool];
   return (
-    <div id="rail">
-      {CHOICES.map((choice) => (
+    <>
+      <div id="rail">
+        {CHOICES.map((choice) => (
+          <button
+            key={choice.tool}
+            type="button"
+            className={`rail-tool${tool === choice.tool ? " picked" : ""}`}
+            data-tool={choice.tool}
+            title={`${choice.title} (${choice.key}) — ${choice.said}`}
+            aria-pressed={tool === choice.tool}
+            onClick={() => onTool(choice.tool)}
+          >
+            {choice.icon}
+          </button>
+        ))}
+        <div className="rail-rule" />
         <button
-          key={choice.tool}
           type="button"
-          className={`rail-tool${tool === choice.tool ? " picked" : ""}`}
-          data-tool={choice.tool}
-          title={`${choice.title} (${choice.key}) — ${choice.said}`}
-          aria-pressed={tool === choice.tool}
-          onClick={() => onTool(choice.tool)}
+          className={`rail-tool${listing ? " picked" : ""}`}
+          data-panel="chains"
+          title={`What has been said about the sheets (${chains.length})`}
+          aria-pressed={listing}
+          onClick={() => setListing(!listing)}
         >
-          {choice.icon}
+          <svg viewBox="0 0 24 24" className="rail-icon" aria-hidden>
+            <path d="M5 4.2 H19 L15.6 9.2 L19 14.2 H5 Z M5 4.2 V20.4" className="rail-stroke" />
+          </svg>
         </button>
-      ))}
-    </div>
+      </div>
+
+      {listing && (
+        <div id="rail-list">
+          <div className="rail-list-top">What has been said</div>
+          {chains.length === 0 && (
+            <div className="rail-list-none">
+              Nothing yet. Pick the sheets tool and press across the sheets on a slice.
+            </div>
+          )}
+          {chains.map((one) => (
+            <div key={one.id} className={`rail-said${one.id === adding ? " drawing" : ""}`} data-chain={one.id}>
+              <button
+                type="button"
+                className={`rail-said-on${one.on ? " on" : ""}`}
+                title={one.on ? "Being used; press to set aside" : "Set aside; press to use"}
+                onClick={() => onShow(one.id, !one.on)}
+              />
+              <span className="rail-said-what">
+                {one.points.length} point{one.points.length === 1 ? "" : "s"}
+                {one.kind === "step" && one.points.length > 1
+                  ? ` · ${one.points.length - 1} wrap${one.points.length === 2 ? "" : "s"}`
+                  : ""}
+                {one.id === adding ? " · drawing" : ""}
+              </span>
+              <button
+                type="button"
+                className="rail-said-off"
+                title="Take it back"
+                onClick={() => onRemove(one.id)}
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {says !== undefined && <div id="rail-says">{says}</div>}
+    </>
   );
 }

@@ -790,3 +790,114 @@ button:focus-visible,
   stroke-width: 1.5;
   opacity: 0.75;
 }
+
+/* A rule between the tools and what they have made. */
+.rail-rule {
+  height: 1px;
+  margin: 4px 6px;
+  background: #ffffff1c;
+}
+
+/* What the picked tool is for, said near the hand rather than in a manual. */
+#rail-says {
+  position: absolute;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: 5;
+  max-width: 70%;
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: #1b1e24e8;
+  border: 1px solid #ffffff14;
+  box-shadow: 0 6px 22px #0009;
+  color: #c6ccd8;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+/* Everything said about the sheets of the scans on the board. */
+#rail-list {
+  position: absolute;
+  left: 76px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  width: 260px;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 8px;
+  border-radius: 14px;
+  background: #1b1e24f2;
+  border: 1px solid #ffffff14;
+  box-shadow: 0 6px 22px #0009;
+  color: #c6ccd8;
+  font-size: 12px;
+}
+
+.rail-list-top {
+  padding: 4px 6px 8px;
+  color: #8d95a3;
+}
+
+.rail-list-none {
+  padding: 4px 6px 8px;
+  color: #8d95a3;
+  line-height: 1.5;
+}
+
+.rail-said {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 8px;
+}
+
+.rail-said:hover {
+  background: #ffffff0e;
+}
+
+.rail-said.drawing {
+  background: #ffaa3220;
+}
+
+.rail-said-what {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Whether a chain is being used by the fit at all. */
+.rail-said-on {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  padding: 0;
+  border-radius: 50%;
+  border: 1.5px solid #ffaa32;
+  background: transparent;
+  cursor: pointer;
+}
+
+.rail-said-on.on {
+  background: #ffaa32;
+}
+
+.rail-said-off {
+  flex: none;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: #8d95a3;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.rail-said-off:hover {
+  color: #e8ecf2;
+}
