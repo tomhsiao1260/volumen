@@ -19,6 +19,7 @@ import boardRouter from "./routes/board";
 import scrollsRouter from "./routes/scrolls";
 import foldersRouter from "./routes/folders";
 import dataRouter from "./routes/data";
+import windingsRouter from "./routes/windings";
 import { createSettingsFileIfMissing } from "./utils/settings";
 
 dotenv.config();
@@ -43,6 +44,7 @@ app.use("/api/board", boardRouter);
 app.use("/api/scrolls", scrollsRouter);
 app.use("/api/folders", foldersRouter);
 app.use("/api/data", dataRouter);
+app.use("/api/windings", windingsRouter);
 
 // For the same reason, the server listens on this machine only.
 app.listen(Number(PORT), "127.0.0.1", async () => {

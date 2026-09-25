@@ -41,6 +41,17 @@ export function sourceLabel({ name, local, http }: Source) {
   return path.replace(/\/+$/, "").split(/[/\\]/).pop() || path;
 }
 
+/**
+ * The scan a source is of, as `sample/scanId` — `PHercParis4/20260411134726` — or "" for a source
+ * that is not a scan of the bucket.  It is what annotations about the papyrus are filed under: the
+ * source's own id is a hash of the paths this machine reads it through, so it names the same scan
+ * differently on another machine, or after a local copy is added.
+ */
+export function scanOf({ http }: Source) {
+  const found = http.match(/\/([^/]+)\/volumes\/(\d+)-/);
+  return found === null ? "" : `${found[1]}/${found[2]}`;
+}
+
 export async function listSources(): Promise<Source[]> {
   const response = await fetch(`${SERVER_API_ENDPOINT}/api/sources`);
   if (!response.ok) throw new Error(await response.text());

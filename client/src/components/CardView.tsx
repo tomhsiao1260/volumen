@@ -19,9 +19,10 @@ import { getLasagna } from "../api/lasagna";
 import { sourceLabel } from "../api/sources";
 import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
-import type { BoardAction, CardState } from "../board/state";
+import type { BoardAction, CardState, Tool } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
 import { crossSection, sheetsOf, watchSheets } from "../surface/layers";
+import { chainsOf, watchChains } from "../surface/windings";
 import { SourcePicker } from "./SourcePicker";
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
@@ -62,6 +63,43 @@ const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
  */
 const MARK = "rgba(255, 205, 100, 0.95)";
 const MARK_EDGE = "rgba(20, 10, 0, 0.6)";
+
+/*
+ * A winding annotation, in the colour VC3D gives the same thing (`SpiralPclRole.hpp`): orange for
+ * counting one wrap after the next.  Somebody who has annotated a scroll before should recognise it.
+ */
+const STEP_DOT = "rgba(255, 170, 50, 0.95)";
+const STEP_EDGE = "rgba(30, 14, 0, 0.7)";
+
+function drawDot(
+  context: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  density: number,
+  here: boolean,
+  turn: number | null,
+) {
+  context.save();
+  context.globalAlpha = here ? 1 : 0.45;
+  context.beginPath();
+  context.arc(x, y, 4.2 * density, 0, 2 * Math.PI);
+  context.strokeStyle = STEP_EDGE;
+  context.lineWidth = 3.2 * density;
+  context.stroke();
+  context.fillStyle = STEP_DOT;
+  context.fill();
+  if (turn !== null) {
+    context.font = `${10 * density}px ui-monospace, monospace`;
+    context.textAlign = "left";
+    context.textBaseline = "middle";
+    context.lineWidth = 3 * density;
+    context.strokeStyle = STEP_EDGE;
+    context.strokeText(`${turn}`, x + 7 * density, y - 6 * density);
+    context.fillStyle = STEP_DOT;
+    context.fillText(`${turn}`, x + 7 * density, y - 6 * density);
+  }
+  context.restore();
+}
 
 export function drawMark(context: CanvasRenderingContext2D, x: number, y: number, density: number, here: boolean) {
   const radius = 7 * density;
@@ -118,6 +156,9 @@ export interface CardViewProps {
   linked: number;
   // The voxel the group has marked, if it has one.
   mark: Point | undefined;
+  // What a press on the data does, and the scan the annotations of this card are filed under.
+  tool: Tool;
+  scan: string;
   session: Session;
   // Bumped when the viewer is replaced, so that the view is added to the new one.
   generation: number;
@@ -127,6 +168,8 @@ export interface CardViewProps {
   // Takes this card out of its group, keeping it where it is looking.
   onUnlink: () => void;
   onMark: (at: Point | null) => void;
+  // Puts a winding point down at this voxel, joining the chain being drawn or starting one.
+  onPlace: (at: Point) => void;
   // Opens a surface card on the sheet at `seed`.
   onOpenSurface: (seed: Point) => void;
 }
@@ -149,12 +192,15 @@ export function CardView({
   selected,
   linked,
   mark,
+  tool,
+  scan,
   session,
   generation,
   dispatch,
   onLooked,
   onUnlink,
   onMark,
+  onPlace,
   onOpenSurface,
 }: CardViewProps) {
   const slice = useRef<HTMLDivElement>(null);
@@ -166,6 +212,7 @@ export function CardView({
   const [typed, setTyped] = useState<string>();
   // Bumped when a surface card moves to another sheet, so that its line is drawn again.
   const [sheetsMoved, setSheetsMoved] = useState(0);
+  const [chainsMoved, setChainsMoved] = useState(0);
   const lines = useRef<HTMLCanvasElement>(null);
   const body = useRef<HTMLDivElement>(null);
   /*
@@ -244,6 +291,16 @@ export function CardView({
   }, [session, generation, sourceId, groupId, orientation]);
 
   useEffect(() => watchSheets(() => setSheetsMoved((moved) => moved + 1)), []);
+  useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
+  // Read by the press listener below, which is registered once and outlives every one of these.
+  const toolRef = useRef(tool);
+  const pointerRef = useRef<Point | undefined>(undefined);
+  const onPlaceRef = useRef(onPlace);
+  useEffect(() => {
+    toolRef.current = tool;
+    pointerRef.current = pointer;
+    onPlaceRef.current = onPlace;
+  });
 
   /*
    * The sheets of the surface cards on this scan, drawn where they cut this slice.  It is the
@@ -302,6 +359,41 @@ export function CardView({
       context.lineWidth = 1.4 * density;
       context.stroke();
     }
+    /*
+     * The winding annotations of this scan, wherever they fall on this slice.  A chain is drawn as
+     * its points joined in the order they were placed, each with the wrap it was counted as: it is
+     * the only way to see what one says without reading it back out of a file.
+     */
+    for (const one of chainsOf(scan)) {
+      if (one.points.length === 0) continue;
+      const places = one.points.map((point) => {
+        const q = [point.at.z, point.at.y, point.at.x];
+        return {
+          x: canvas.clientWidth / 2 + (q[across] - at[across]) / zoom,
+          y: canvas.clientHeight / 2 + (q[down] - at[down]) / zoom,
+          here: Math.abs(q[sliced] - at[sliced]) <= 0.5,
+          turn: point.turn,
+        };
+      });
+      context.save();
+      context.globalAlpha = one.on ? 0.75 : 0.3;
+      context.strokeStyle = STEP_DOT;
+      context.lineWidth = 1.4 * density;
+      context.setLineDash([4 * density, 4 * density]);
+      context.beginPath();
+      places.forEach((place, k) => {
+        if (k === 0) context.moveTo(place.x * density, place.y * density);
+        else context.lineTo(place.x * density, place.y * density);
+      });
+      context.stroke();
+      context.restore();
+      for (const place of places) {
+        context.save();
+        if (!one.on) context.globalAlpha = 0.35;
+        drawDot(context, place.x * density, place.y * density, density, place.here, place.turn);
+        context.restore();
+      }
+    }
     if (mark !== undefined) {
       const point = [mark.z, mark.y, mark.x];
       drawMark(
@@ -312,7 +404,7 @@ export function CardView({
         Math.abs(point[sliced] - at[sliced]) <= 0.5,
       );
     }
-  }, [sheetsMoved, centre, mark, orientation, sourceId, groupId, session, card.width, card.height]);
+  }, [sheetsMoved, chainsMoved, centre, mark, scan, orientation, sourceId, groupId, session, card.width, card.height]);
 
   // The sheet's line under the pointer, in the card's own pixels.
   const lineUnder = (x: number, y: number) => {
@@ -359,6 +451,18 @@ export function CardView({
 
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+      /*
+       * With a tool picked, a press on the data puts a winding point down and goes no further: the
+       * board would otherwise take hold of the card, and the sheet lines below would take the press
+       * as a drag.
+       */
+      if (toolRef.current !== "look") {
+        event.stopPropagation();
+        event.preventDefault();
+        const at = pointerRef.current;
+        if (at !== undefined) onPlaceRef.current(at);
+        return;
+      }
       const box = element.getBoundingClientRect();
       const line = lineUnder(event.clientX - box.left, event.clientY - box.top);
       if (line === undefined) return;
@@ -409,6 +513,10 @@ export function CardView({
     const onPointerMove = (event: PointerEvent) => {
       if (dragging.current !== undefined) return;
       const box = element.getBoundingClientRect();
+      if (toolRef.current !== "look") {
+        element.style.cursor = "crosshair";
+        return;
+      }
       const over = lineUnder(event.clientX - box.left, event.clientY - box.top) !== undefined;
       element.style.cursor = over ? "ns-resize" : "";
     };
@@ -501,7 +609,7 @@ export function CardView({
         // Double-clicking the data marks the voxel under the pointer for the whole group: the other
         // cards move to it and show it.  The board's own double-click, which adds a card, is only
         // for the space between cards.
-        onDoubleClick={() => pointer !== undefined && onMark(pointer)}
+        onDoubleClick={() => tool === "look" && pointer !== undefined && onMark(pointer)}
         onContextMenu={(event) => {
           event.preventDefault();
           if (sourceId === null || pointer === undefined) return;

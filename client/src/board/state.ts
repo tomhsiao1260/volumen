@@ -49,8 +49,21 @@ export interface CardState {
   surface?: SurfaceState;
 }
 
+/*
+ * What a press on the data does.  "look" is the board as it has always been — the cards are moved and
+ * the data is read; the others put a winding annotation down instead (`surface/windings.ts`), which is
+ * how a person tells the flattening what it got wrong.  The names are the community's, and so are the
+ * keys: Q for same-winding and E for relative, as VC3D has them.
+ */
+export type Tool = "look" | "step";
+
 export interface BoardState {
   cards: CardState[];
+  // Which tool the rail has picked.  Not part of the saved board: a tool is a mode, not a document.
+  tool: Tool;
+  // The winding chain being added to, if any: the next point placed joins it rather than starting a
+  // new one.  A chain is closed by Enter, by Escape, or by changing tool.
+  adding: string | undefined;
   // The hue each group of linked cards is marked with.
   hues: Record<string, number>;
   /*
@@ -70,6 +83,8 @@ export interface BoardState {
 
 export const emptyBoard: BoardState = {
   cards: [],
+  tool: "look",
+  adding: undefined,
   hues: {},
   marks: {},
   view: { x: 0, y: 0, scale: 1 },
@@ -112,6 +127,8 @@ export type BoardAction =
   | { type: "paste" }
   | { type: "setView"; view: BoardTransform }
   | { type: "fitToCards"; size: { width: number; height: number } }
+  | { type: "setTool"; tool: Tool }
+  | { type: "adding"; chainId: string | undefined }
   // Marks a voxel for the group, or takes the mark away.
   | { type: "mark"; groupId: string; at: Point | null }
   | { type: "restore"; board: StoredBoard; sources: Source[] };
@@ -195,6 +212,15 @@ export function boardReducer(
         ),
       };
     }
+
+    case "setTool":
+      // Changing tool closes whatever chain was being drawn.
+      return state.tool === action.tool
+        ? state
+        : { ...state, tool: action.tool, adding: undefined };
+
+    case "adding":
+      return state.adding === action.chainId ? state : { ...state, adding: action.chainId };
 
     case "mark": {
       const marks = { ...state.marks };

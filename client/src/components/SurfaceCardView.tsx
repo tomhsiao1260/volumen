@@ -17,7 +17,7 @@ import { sourceLabel } from "../api/sources";
 import type { BoardAction, CardState } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
-import type { FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
+import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { SPAN } from "../surface/types";
 import { drawMark, formatVoxel, shorten } from "./CardView";
 
@@ -108,12 +108,14 @@ export interface SurfaceCardViewProps {
   linked: number;
   // The voxel the group has marked, which this card shows on its own piece.
   mark: Point | undefined;
+  // What has been said about the sheets of this scan, and is settled enough to build on.
+  chains: ChainSaid[];
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
   onMark: (at: Point | null) => void;
 }
 
-export function SurfaceCardView({ card, source, selected, hue, linked, mark, dispatch, onUnlink, onMark }: SurfaceCardViewProps) {
+export function SurfaceCardView({ card, source, selected, hue, linked, mark, chains, dispatch, onUnlink, onMark }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   // The sheets drawn over a cut across them, and what is being pulled.
@@ -134,6 +136,13 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, dis
   const [drawn, setDrawn] = useState(false);
   const [loading, setLoading] = useState(true);
   const [planeMenu, setPlaneMenu] = useState(false);
+  /*
+   * The piece is built again when what was said about the sheets changes — the spacing decides how
+   * big a box of prediction is read and how finely, so there is nothing of the old piece to keep.
+   * A chain still being drawn is not in here: rebuilding under the hand after every point would take
+   * the card away from the person placing them.
+   */
+  const said = chains.map((chain) => `${chain.id}.${chain.rev}`).join(",");
   const surface = card.surface!;
   const { id, sourceId } = card;
   const { seed, zoom, w, plane } = surface;
@@ -261,6 +270,7 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, dis
           {
             id,
             scanSourceId: sourceId,
+            chains,
             lasagna,
             seed,
             w: wanted.current,
@@ -316,7 +326,7 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, dis
     };
     // `w` is sent on its own below; asking for another sheet must not build the piece again.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, sourceId, seed, zoom]);
+  }, [id, sourceId, seed, zoom, said]);
 
   useEffect(() => {
     surfaceEngine().show(id, w, plane);

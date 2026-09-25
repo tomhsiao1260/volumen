@@ -727,3 +727,66 @@ button:focus-visible,
   margin-left: 6px;
   text-decoration: underline;
 }
+
+/* The tool rail: what a press on the data does.  It floats over the board, a little in from the edge,
+   and it is a sibling of `#board` so that a press on it never reaches the board underneath. */
+#rail {
+  position: absolute;
+  left: 14px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px;
+  border-radius: 15px;
+  background: #1b1e24e8;
+  border: 1px solid #ffffff14;
+  box-shadow: 0 6px 22px #0009;
+  backdrop-filter: blur(6px);
+}
+
+.rail-tool {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 11px;
+  background: transparent;
+  color: #b9c0cc;
+  cursor: pointer;
+}
+
+.rail-tool:hover {
+  background: #ffffff12;
+  color: #e8ecf2;
+}
+
+.rail-tool.picked {
+  background: #2f6df633;
+  color: #74a6ff;
+}
+
+.rail-icon {
+  width: 21px;
+  height: 21px;
+  fill: currentColor;
+  stroke: none;
+}
+
+/* The parts of an icon that are drawn as lines rather than filled. */
+.rail-stroke {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rail-thin {
+  stroke-width: 1.5;
+  opacity: 0.75;
+}

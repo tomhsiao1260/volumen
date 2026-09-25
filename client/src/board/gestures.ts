@@ -234,7 +234,24 @@ export function useBoardGestures({
     };
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") dispatch({ type: "select", ids: [] });
+      if (event.key === "Escape") {
+        dispatch({ type: "select", ids: [] });
+        dispatch({ type: "setTool", tool: "look" });
+      }
+      // A chain is finished without leaving the tool, so that the next point starts another.
+      if (event.key === "Enter" && !typing(event.target)) {
+        dispatch({ type: "adding", chainId: undefined });
+      }
+      /*
+       * The tools, by the letters VC3D uses for the same things — V for the arrow, E for counting one
+       * sheet after the next.  Only when nothing is being typed into, and never with a modifier, which
+       * belongs to the browser.
+       */
+      if (!typing(event.target) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        const key = event.key.toLowerCase();
+        if (key === "v") dispatch({ type: "setTool", tool: "look" });
+        if (key === "e") dispatch({ type: "setTool", tool: "step" });
+      }
       if (event.code === "Space" && !typing(event.target)) {
         spaceHeld = true;
         element.classList.add("panning");

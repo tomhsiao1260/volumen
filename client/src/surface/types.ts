@@ -15,6 +15,19 @@ export type { SurfacePlane };
 export const SPAN = 2;
 
 /*
+ * A winding chain as the worker needs it: where its points are and which wrap each was counted as.
+ * The rest of what a chain is — who said it, when, whether it is switched on — stays in the page
+ * (`surface/windings.ts`); switched-off chains are simply not sent.
+ */
+export interface ChainSaid {
+  id: string;
+  rev: number;
+  kind: "same" | "step";
+  // (z, y, x) and the wrap, in the order they were placed.
+  points: { at: [number, number, number]; turn: number | null }[];
+}
+
+/*
  * A place on a piece: which sheet, and how far along u and across v it is, 0 to 1 — fractions of the
  * piece rather than grid points, so that a card can put it in its frame knowing only its own plane
  * and the sheet it is on.
@@ -33,6 +46,8 @@ export interface OpenRequest {
   // The scan's source, and its Lasagna prediction.
   scanSourceId: string;
   lasagna: Lasagna;
+  // What a person has said about the sheets of this scan, which the fit is told before it guesses.
+  chains: ChainSaid[];
   // The voxel the card was opened on, in voxels of the full-resolution scan.
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.

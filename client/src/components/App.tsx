@@ -8,7 +8,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { listSources } from "../api/sources";
+import type { Source } from "../api/sources";
+import { listSources, scanOf } from "../api/sources";
 import { createBoardStore, loadBoard } from "../api/storage";
 import { useBoardGestures } from "../board/gestures";
 import { newGroupId } from "../board/links";
@@ -24,8 +25,11 @@ import {
   serialize,
 } from "../board/state";
 import { cssTransform, toBoard } from "../board/transform";
+import { sheetsOf } from "../surface/layers";
+import { chain, chainsOf, loadChains, newChainId, setChain, watchChains } from "../surface/windings";
 import type { Point } from "viewer";
 import { BoardMenu } from "./BoardMenu";
+import { Rail } from "./Rail";
 import { CardView } from "./CardView";
 import { SurfaceCardView } from "./SurfaceCardView";
 
@@ -206,10 +210,45 @@ export function App() {
         get session() {
           return sessionRef.current;
         },
+        // What the surface cards have found, which a test can measure a piece against.
+        sheets: (sourceId: string) => sheetsOf(sourceId),
         dispatch,
       },
     });
   }, []);
+
+  /*
+   * What the surface cards are told: the chains of a scan that are switched on and finished with.
+   * The one being drawn is left out until it is closed, so that a card is not rebuilt under the hand
+   * of the person placing its points.  `chainsMoved` is what brings a change here: the store is not
+   * React state, so the count is what makes the page look again.
+   */
+  const said = (source: Source | undefined) => {
+    if (source === undefined) return [];
+    return chainsOf(scanOf(source))
+      .filter((one) => one.on && one.id !== state.adding && one.points.length > 1)
+      .map((one) => ({
+        id: one.id,
+        rev: one.rev,
+        kind: one.kind,
+        points: one.points.map((point) => ({
+          at: [point.at.z, point.at.y, point.at.x] as [number, number, number],
+          turn: point.turn,
+        })),
+      }));
+  };
+
+  // Bumped when a chain changes, so that the cards are given the new one.
+  const [chainsMoved, setChainsMoved] = useState(0);
+  useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
+
+  // What has been said about the papyrus of each scan on the board, read once per scan.
+  useEffect(() => {
+    for (const source of Object.values(state.sources)) {
+      const scan = scanOf(source);
+      if (scan !== "") void loadChains(scan);
+    }
+  }, [state.sources]);
 
   // A card leaving its group keeps the place it was looking at, rather than jumping to the middle of
   // the volume.
@@ -221,6 +260,43 @@ export function App() {
   const mark = (card: CardState, at: Point | null) => {
     dispatch({ type: "mark", groupId: card.groupId, at });
     if (at !== null) sessionRef.current?.group(card.groupId).navigation?.setPosition(at);
+  };
+
+  /**
+   * Puts a winding point down for the card's scan.  The first point of a chain starts it; the rest
+   * join it, counted outward one wrap at a time, until the chain is closed by Enter, Escape or a
+   * change of tool.  Which wrap each point is does not have to be told to us: along a chain it is
+   * the order they were placed in, and only the differences are a constraint anyway — that is how
+   * the community's relative-winding collections are defined.
+   */
+  const place = (card: CardState, at: Point) => {
+    const source = card.sourceId === null ? undefined : latest.current.sources[card.sourceId];
+    const scan = source === undefined ? "" : scanOf(source);
+    if (scan === "") return;
+    const open = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
+    const madeAt = Date.now();
+    const point = {
+      id: `${madeAt}`,
+      at: { x: at.x, y: at.y, z: at.z },
+      turn: open === undefined ? 0 : (open.points[open.points.length - 1]?.turn ?? 0) + 1,
+      madeAt,
+    };
+    const saved = setChain(
+      open === undefined
+        ? {
+            id: newChainId(),
+            scan,
+            kind: "step",
+            points: [point],
+            on: true,
+            note: "",
+            author: "",
+            rev: 0,
+            madeAt,
+          }
+        : { ...open, points: [...open.points, point] },
+    );
+    if (open === undefined) dispatch({ type: "adding", chainId: saved.id });
   };
 
   const unlink = (card: CardState) => {
@@ -237,7 +313,9 @@ export function App() {
   };
 
   return (
-    <div
+    <>
+      <Rail tool={state.tool} onTool={(tool) => dispatch({ type: "setTool", tool })} />
+      <div
       id="board"
       ref={setBoard}
       onPointerDown={(event) => {
@@ -272,6 +350,7 @@ export function App() {
                 selected={state.selection.includes(card.id)}
                 linked={groupSize(state, card)}
                 mark={state.marks[card.groupId]}
+                chains={said(source)}
                 dispatch={dispatch}
                 onUnlink={() => unlink(card)}
                 onMark={(at) => mark(card, at)}
@@ -290,7 +369,10 @@ export function App() {
                 onLooked={() => restoredRef.current && store.schedule()}
                 onUnlink={() => unlink(card)}
                 mark={state.marks[card.groupId]}
+                tool={state.tool}
+                scan={source === undefined ? "" : scanOf(source)}
                 onMark={(at) => mark(card, at)}
+                onPlace={(at) => place(card, at)}
                 onOpenSurface={(seed) =>
                   dispatch({
                     type: "addSurfaceCard",
@@ -340,6 +422,7 @@ export function App() {
           )}
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 }
