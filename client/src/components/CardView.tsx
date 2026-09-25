@@ -69,14 +69,14 @@ const MARK_EDGE = "rgba(20, 10, 0, 0.6)";
  * "these are one and the same sheet", orange for counting one wrap after the next.  Somebody who has
  * annotated a scroll before should recognise them.
  */
-const SAME_DOT = "rgba(50, 255, 215, 0.95)";
-const STEP_DOT = "rgba(255, 170, 50, 0.95)";
+export const SAME_DOT = "rgba(50, 255, 215, 0.95)";
+export const STEP_DOT = "rgba(255, 170, 50, 0.95)";
 const STEP_EDGE = "rgba(20, 14, 6, 0.7)";
 
 // A point taken hold of is drawn larger, by the same amount VC3D uses for the same thing.
 const HELD_LARGER = 1.4;
 
-function drawDot(
+export function drawDot(
   context: CanvasRenderingContext2D,
   x: number,
   y: number,

@@ -71,6 +71,12 @@ export interface PointRequest {
   type: "point";
   id: string;
   at: [number, number, number];
+  /*
+   * Said back with the answer.  A card asks about the voxel its group has marked and about every
+   * winding point of its scan, and the answers come back one at a time with nothing else to tell
+   * them apart — an answer taken for the wrong question moves the card, or the board.
+   */
+  token?: string;
 }
 
 export interface WhereRequest {
@@ -78,6 +84,13 @@ export interface WhereRequest {
   id: string;
   fx: number;
   fy: number;
+  token?: string;
+  /*
+   * Answer even where the piece has a hole.  Asking where a point of the card is, to put a winding
+   * annotation there, is most worth doing exactly where the fit has gone wrong — and where the fit
+   * has gone wrong is where it says it has no papyrus.
+   */
+  loose?: boolean;
 }
 
 // Shows another sheet, or another of the sheet's planes.
@@ -184,6 +197,7 @@ export interface PlaceEvent {
   id: string;
   spot: PieceSpot | null;
   voxel: [number, number, number] | null;
+  token?: string;
 }
 
 export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent | PlaceEvent;

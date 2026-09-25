@@ -14,12 +14,13 @@ import { useEffect, useRef, useState } from "react";
 import { getLasagna } from "../api/lasagna";
 import type { Source } from "../api/sources";
 import { sourceLabel } from "../api/sources";
-import type { BoardAction, CardState } from "../board/state";
+import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { SPAN } from "../surface/types";
-import { drawMark, formatVoxel, shorten } from "./CardView";
+import { chainsOf, watchChains } from "../surface/windings";
+import { drawDot, drawMark, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
 
@@ -110,12 +111,35 @@ export interface SurfaceCardViewProps {
   mark: Point | undefined;
   // What has been said about the sheets of this scan, and is settled enough to build on.
   chains: ChainSaid[];
+  // What a press on the papyrus does, the scan the annotations are filed under, and the point held.
+  tool: Tool;
+  scan: string;
+  picked: PickedPoint | undefined;
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
   onMark: (at: Point | null) => void;
+  // Puts a winding point down at this voxel, and takes hold of one already down.
+  onPlace: (at: Point) => void;
+  onPick: (picked: PickedPoint | undefined) => void;
 }
 
-export function SurfaceCardView({ card, source, selected, hue, linked, mark, chains, dispatch, onUnlink, onMark }: SurfaceCardViewProps) {
+export function SurfaceCardView({
+  card,
+  source,
+  selected,
+  hue,
+  linked,
+  mark,
+  chains,
+  tool,
+  scan,
+  picked,
+  dispatch,
+  onUnlink,
+  onMark,
+  onPlace,
+  onPick,
+}: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
   // The sheets drawn over a cut across them, and what is being pulled.
@@ -132,6 +156,17 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, cha
   // Where the group's mark falls on this piece, null when the piece does not reach it.
   const spot = useRef<PieceSpot | null>(null);
   const [spotted, setSpotted] = useState(0);
+  /*
+   * And where each winding point of this scan falls on it.  A card of a sheet laid flat is the one
+   * place where "these are the same sheet" needs no eye at all: every press on it is on that sheet
+   * because that is what the card is.  So the points are asked about one at a time and drawn here,
+   * and they fade as the card turns away from the sheet they are on.
+   */
+  const dots = useRef(new Map<string, PieceSpot>());
+  // Where each of them was drawn, in the card's own pixels: what a press looks through to find one.
+  const drawnDots = useRef<{ chain: string; point: string; x: number; y: number }[]>([]);
+  const [chainsMoved, setChainsMoved] = useState(0);
+  useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
   const [status, setStatus] = useState<Status>("loading");
   const [drawn, setDrawn] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -158,9 +193,15 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, cha
   }, [w, plane]);
   // The listener below is set up once, and what it should do with an answer may have changed since.
   const onMarkRef = useRef(onMark);
+  const onPlaceRef = useRef(onPlace);
+  const onPickRef = useRef(onPick);
+  const toolRef = useRef(tool);
   useEffect(() => {
     onMarkRef.current = onMark;
-  }, [onMark]);
+    onPlaceRef.current = onPlace;
+    onPickRef.current = onPick;
+    toolRef.current = tool;
+  });
   // The size the sheet was built for; it is not built again while the card is resized, since the
   // sheet it shows does not change.
   const size = useRef({ width: card.width, height: card.height });
@@ -291,6 +332,23 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, cha
             // Where the sheet is goes straight to the slice cards, not through this one.
             if (event.type === "sheet") return;
             if (event.type === "place") {
+              // Answers about the winding points, which are asked for one at a time and told apart
+              // by the token they carry.
+              if (event.token !== undefined) {
+                if (event.token === "put") {
+                  if (event.voxel !== null) {
+                    const [z, y, x] = event.voxel;
+                    onPlaceRef.current({ x, y, z });
+                  }
+                } else if (event.spot === null) {
+                  dots.current.delete(event.token);
+                  setSpotted((count) => count + 1);
+                } else {
+                  dots.current.set(event.token, event.spot);
+                  setSpotted((count) => count + 1);
+                }
+                return;
+              }
               // The answer to "where is this place on your piece", or to "which voxel is this".
               if (event.voxel !== null) {
                 const [z, y, x] = event.voxel;
@@ -457,6 +515,48 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, cha
         drawMark(context, at[0] * width, at[1] * height, density, Math.abs(here.w - sheet) <= 1 / 16);
       }
     }
+    /*
+     * The winding points, wherever they fall on this piece.  On a card of the sheet laid flat they
+     * fade as the card turns away from the sheet they were put on — which is the plainest answer
+     * there is to "are these really the same sheet": they are the ones that stay.
+     */
+    if (shown.current !== undefined) {
+      drawnDots.current = [];
+      for (const one of chainsOf(scan)) {
+        const colour = one.kind === "same" ? SAME_DOT : STEP_DOT;
+        for (const point of one.points) {
+          const found = dots.current.get(point.id);
+          if (found === undefined) continue;
+          const across = 0.5 + (found.w - sheet) / (2 * SPAN);
+          const at =
+            wantedPlane.current === "uv"
+              ? [found.fu, found.fv]
+              : wantedPlane.current === "uw"
+                ? [found.fu, across]
+                : [across, found.fv];
+          if (at[0] < 0 || at[0] > 1 || at[1] < 0 || at[1] > 1) continue;
+          // On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
+          const near =
+            wantedPlane.current === "uv" ? Math.max(0, 1 - Math.abs(found.w - sheet) / 0.5) : 1;
+          if (near === 0) continue;
+          const x = at[0] * width, y = at[1] * height;
+          drawnDots.current.push({ chain: one.id, point: point.id, x: x / density, y: y / density });
+          context.save();
+          if (!one.on) context.globalAlpha = 0.35;
+          drawDot(
+            context,
+            x,
+            y,
+            density,
+            near,
+            point.turn,
+            picked?.chain === one.id && picked.point === point.id,
+            colour,
+          );
+          context.restore();
+        }
+      }
+    }
     if (wantedPlane.current === "uv" || shown.current === undefined) return;
     /*
      * One line: where the card itself is in the stack, which is the middle of a cut.  Its neighbours
@@ -500,14 +600,71 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, cha
     surfaceEngine().point(id, [mark.z, mark.y, mark.x]);
   }, [id, mark, status]);
 
-  // Pulling a sheet on a cut: the one taken hold of follows the hand, and the card moves under it.
+  /*
+   * And where each winding point of this scan is on this piece.  Asked again whenever the points
+   * change or the piece is rebuilt, since only the worker knows where the piece is; the answers are
+   * kept by point, so one that has gone is forgotten and one the piece cannot reach is dropped.
+   */
+  useEffect(() => {
+    if (status !== "ready") return;
+    const engine = surfaceEngine();
+    const living = new Set<string>();
+    for (const one of chainsOf(scan))
+      for (const point of one.points) {
+        living.add(point.id);
+        engine.point(id, [point.at.z, point.at.y, point.at.x], point.id);
+      }
+    for (const was of [...dots.current.keys()]) if (!living.has(was)) dots.current.delete(was);
+    setSpotted((count) => count + 1);
+  }, [id, scan, status, chainsMoved]);
+
+  /*
+   * Putting a winding point down on the papyrus, and pulling a sheet on a cut.  Both are a press on
+   * the drawing, so they are listened for together and the tool decides which it is.
+   *
+   * A card of a sheet laid flat is the one place where saying "these are the same sheet" needs no
+   * eye: the card is that sheet, so every press on it is on it.
+   */
   useEffect(() => {
     const element = lines.current;
-    if (element === null || plane === "uv") return;
+    if (element === null) return;
     // A cut along u stacks the sheets downwards; a cut along v lays them out to the right.
     const down = plane === "uw";
+    // The winding point under the pointer, in the card's own pixels.
+    const dotUnder = (x: number, y: number) => {
+      let found;
+      let nearest = GRAB + 3;
+      for (const dot of drawnDots.current) {
+        const away = Math.hypot(dot.x - x, dot.y - y);
+        if (away < nearest) {
+          nearest = away;
+          found = { chain: dot.chain, point: dot.point };
+        }
+      }
+      return found;
+    };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (toolRef.current !== "look") {
+        event.stopPropagation();
+        event.preventDefault();
+        const box = element.getBoundingClientRect();
+        const held = dotUnder(event.clientX - box.left, event.clientY - box.top);
+        if (held !== undefined) onPickRef.current(held);
+        else {
+          // Asked loosely: the places most worth saying something about are the ones the fit itself
+          // has given up on.
+          surfaceEngine().where(
+            id,
+            (event.clientX - box.left) / box.width,
+            (event.clientY - box.top) / box.height,
+            "put",
+            true,
+          );
+        }
+        return;
+      }
+      if (plane === "uv") return;
       const box = element.getBoundingClientRect();
       const across = down ? element.clientHeight : element.clientWidth;
       const at = down ? event.clientY - box.top : event.clientX - box.left;
@@ -548,6 +705,15 @@ export function SurfaceCardView({ card, source, selected, hue, linked, mark, cha
     const onPointerMove = (event: PointerEvent) => {
       if (pulling.current !== undefined) return;
       const box = element.getBoundingClientRect();
+      if (toolRef.current !== "look") {
+        element.style.cursor =
+          dotUnder(event.clientX - box.left, event.clientY - box.top) === undefined ? "crosshair" : "pointer";
+        return;
+      }
+      if (plane === "uv") {
+        element.style.cursor = "";
+        return;
+      }
       const across = down ? element.clientHeight : element.clientWidth;
       const at = down ? event.clientY - box.top : event.clientX - box.left;
       element.style.cursor = Math.abs(at - across / 2) <= GRAB ? (down ? "ns-resize" : "ew-resize") : "";

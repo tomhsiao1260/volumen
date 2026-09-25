@@ -411,9 +411,14 @@ export function App() {
                 linked={groupSize(state, card)}
                 mark={state.marks[card.groupId]}
                 chains={said(source)}
+                tool={state.tool}
+                scan={source === undefined ? "" : scanOf(source)}
+                picked={state.picked}
                 dispatch={dispatch}
                 onUnlink={() => unlink(card)}
                 onMark={(at) => mark(card, at)}
+                onPlace={(at) => place(card, at)}
+                onPick={(picked) => dispatch({ type: "pick", picked })}
               />
             ) : (
               <CardView

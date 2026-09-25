@@ -229,7 +229,7 @@ class Card {
    * Where a voxel of the scan sits on this piece, so that a place pointed at on another card can be
    * shown here — and nothing, honestly, when the piece does not reach it or has a hole there.
    */
-  point(at: [number, number, number]) {
+  point(at: [number, number, number], token?: string) {
     const { patch } = this;
     const found = patch === undefined ? undefined : nearestOn(patch, at);
     const on =
@@ -240,6 +240,7 @@ class Card {
     this.post({
       type: "place",
       id: this.request.id,
+      token,
       spot: on
         ? { w: found!.w + this.baseW, fu: found!.gj / (patch!.nu - 1), fv: found!.gi / (patch!.nv - 1) }
         : null,
@@ -248,17 +249,18 @@ class Card {
   }
 
   // And the other way: the voxel under a point of the card, `fx` and `fy` across and down its frame.
-  where(fx: number, fy: number) {
+  where(fx: number, fy: number, token?: string, loose = false) {
     const { patch } = this;
     const out = new Float64Array(3);
     let voxel: [number, number, number] | null = null;
     if (patch !== undefined) {
       const spot = pieceAt(patch, this.plane, this.wanted - this.baseW, fx, fy);
-      if (positionAt(patch, spot.w, spot.gi, spot.gj, out) && coverageAt(patch, spot.w, spot.gi, spot.gj) >= 0.5) {
+      const there = positionAt(patch, spot.w, spot.gi, spot.gj, out);
+      if (there && (loose || coverageAt(patch, spot.w, spot.gi, spot.gj) >= 0.5)) {
         voxel = [out[0], out[1], out[2]];
       }
     }
-    this.post({ type: "place", id: this.request.id, spot: null, voxel });
+    this.post({ type: "place", id: this.request.id, token, spot: null, voxel });
   }
 
   private fail(error: unknown) {
@@ -604,10 +606,10 @@ worker.onmessage = ({ data: request }) => {
       cards.get(request.id)?.show(request.w, request.plane);
       break;
     case "point":
-      cards.get(request.id)?.point(request.at);
+      cards.get(request.id)?.point(request.at, request.token);
       break;
     case "where":
-      cards.get(request.id)?.where(request.fx, request.fy);
+      cards.get(request.id)?.where(request.fx, request.fy, request.token, request.loose);
       break;
     case "close":
       cards.get(request.id)?.close();
