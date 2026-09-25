@@ -18,7 +18,7 @@ interface Choice {
   tool: Tool;
   key: string;
   title: string;
-  said: string;
+  hint: string;
   // The colour this tool draws in, which the icon wears and the button takes when it is picked: the
   // rail says what is about to appear on the cards, in the colour it will appear in.
   tint?: string;
@@ -30,8 +30,8 @@ const CHOICES: Choice[] = [
   {
     tool: "look",
     key: "V",
-    title: "Look",
-    said: "Move the cards and read the data",
+    title: "Move",
+    hint: "Move cards and read the data",
     icon: (
       <svg viewBox="0 0 24 24" className="rail-icon" aria-hidden>
         <path d="M6 3.2 L18.2 12.6 L12.4 13.3 L15.3 19.4 L12.7 20.6 L9.8 14.4 L6 18.3 Z" />
@@ -46,8 +46,11 @@ const CHOICES: Choice[] = [
   {
     tool: "same",
     key: "Q",
-    title: "Same sheet",
-    said: "Point at places that are on one and the same sheet",
+    // The names are the community's — `same_windings.json`, `relative_windings.json` — so that what
+    // is made here can be talked about in the words it will be shared in.  A wrap is one turn of the
+    // scroll; the sheet is the papyrus it is made of, and a scroll is one sheet wrapped many times.
+    title: "Same winding",
+    hint: "Click points that all lie on the same wrap of the sheet",
     tint: "#32ffd7",
     icon: (
       <svg viewBox="0 0 24 24" className="rail-icon" aria-hidden>
@@ -61,8 +64,8 @@ const CHOICES: Choice[] = [
   {
     tool: "step",
     key: "E",
-    title: "Count outward",
-    said: "Point at one sheet after the next, across a cut",
+    title: "Relative winding",
+    hint: "Click one point on each wrap, counting outward — it sets how far apart the wraps are",
     tint: "#ffaa32",
     icon: (
       <svg viewBox="0 0 24 24" className="rail-icon" aria-hidden>
@@ -77,9 +80,9 @@ const CHOICES: Choice[] = [
 
 // What the picked tool is for, said where the hand is.  A tool nobody can guess the use of is a tool
 // nobody uses, and this one is a sentence long.
-const SAYS: Partial<Record<Tool, string>> = {
-  same: "Press along one sheet, wherever you are sure it is the same one · Enter finishes · press a point, then Delete, to take it back",
-  step: "Press across the sheets, one press a sheet · Enter finishes the chain · press a point, then Delete, to take it back",
+const HINTS: Partial<Record<Tool, string>> = {
+  same: "Click along one wrap · Enter finishes · click a point and press Delete to remove it",
+  step: "Click outward, one point on each wrap · Enter finishes · click a point and press Delete to remove it",
 };
 
 export interface RailProps {
@@ -88,13 +91,18 @@ export interface RailProps {
   // Everything said about the scans on the board, newest last, and the one being drawn.
   chains: WindChain[];
   adding: string | undefined;
+  // The chain the pointer is over, which the cards draw loudly while it is.
+  lit: string | undefined;
+  // What the pieces made of each chain, by chain id.
+  heard: Record<string, { sheet: number; sheets: number; worst: number }>;
+  onLit: (id: string | undefined) => void;
   onShow: (id: string, on: boolean) => void;
   onRemove: (id: string) => void;
 }
 
-export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailProps) {
+export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, onRemove }: RailProps) {
   const [listing, setListing] = useState(false);
-  const says = SAYS[tool];
+  const says = HINTS[tool];
   return (
     <>
       <div id="rail">
@@ -105,7 +113,7 @@ export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailPro
             className={`rail-tool${tool === choice.tool ? " picked" : ""}`}
             style={choice.tint === undefined ? undefined : ({ ["--tint" as string]: choice.tint })}
             data-tool={choice.tool}
-            title={`${choice.title} (${choice.key}) — ${choice.said}`}
+            title={`${choice.title} (${choice.key}) — ${choice.hint}`}
             aria-pressed={tool === choice.tool}
             onClick={() => onTool(choice.tool)}
           >
@@ -117,7 +125,7 @@ export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailPro
           type="button"
           className={`rail-tool${listing ? " picked" : ""}`}
           data-panel="chains"
-          title={`What has been said about the sheets (${chains.length})`}
+          title={`Winding annotations (${chains.length})`}
           aria-pressed={listing}
           onClick={() => setListing(!listing)}
         >
@@ -129,32 +137,57 @@ export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailPro
 
       {listing && (
         <div id="rail-list">
-          <div className="rail-list-top">What has been said</div>
+          <div className="rail-list-top">Winding annotations</div>
           {chains.length === 0 && (
             <div className="rail-list-none">
-              Nothing yet. Pick the sheets tool and press across the sheets on a slice.
+              Nothing yet. Pick Same winding (Q) or Relative winding (E), then click points on a card.
             </div>
           )}
           {chains.map((one) => (
-            <div key={one.id} className={`rail-said${one.id === adding ? " drawing" : ""}`} data-chain={one.id}>
+            <div
+              key={one.id}
+              className={`rail-anno${one.id === adding ? " drawing" : ""}${one.id === lit ? " lit" : ""}`}
+              data-chain={one.id}
+              onPointerEnter={() => onLit(one.id)}
+              onPointerLeave={() => onLit(undefined)}
+            >
               <button
                 type="button"
-                className={`rail-said-on${one.on ? " on" : ""} ${one.kind}`}
-                title={one.on ? "Being used; press to set aside" : "Set aside; press to use"}
+                className={`rail-anno-on${one.on ? " on" : ""} ${one.kind}`}
+                title={
+                  one.on
+                    ? "Used when the surface is built; click to ignore it"
+                    : "Ignored when the surface is built; click to use it"
+                }
                 onClick={() => onShow(one.id, !one.on)}
               />
-              <span className="rail-said-what">
-                {one.kind === "same" ? "same sheet · " : ""}
-                {one.points.length} point{one.points.length === 1 ? "" : "s"}
-                {one.kind === "step" && one.points.length > 1
-                  ? ` · ${one.points.length - 1} wrap${one.points.length === 2 ? "" : "s"}`
-                  : ""}
-                {one.id === adding ? " · drawing" : ""}
+              <span className="rail-anno-what">
+                <span className="rail-anno-kind">
+                  {one.kind === "same" ? "same winding" : "relative winding"} · {one.points.length} point
+                  {one.points.length === 1 ? "" : "s"}
+                  {one.id === adding ? " · adding" : ""}
+                  {/* One point on its own says nothing that two do not, so the fit is never given it. */}
+                  {one.points.length < 2 && one.id !== adding ? " · not used" : ""}
+                </span>
+                {/*
+                  * What the surface made of it, which is the only thing that answers "is this one
+                  * any good": found all on one wrap, or spread across several — in which case it is
+                  * either a jump being corrected or a chain drawn across the wraps by mistake.
+                  */}
+                {heard[one.id] !== undefined && one.id !== adding && (
+                  <span className={`rail-anno-heard${heard[one.id].sheets === 1 ? "" : " crossed"}`}>
+                    {heard[one.id].sheets === 0
+                      ? "not on this surface"
+                      : heard[one.id].sheets > 1
+                        ? `across ${heard[one.id].sheets} wraps — check this one`
+                        : `on one wrap, ${Math.round(heard[one.id].worst)} voxels off`}
+                  </span>
+                )}
               </span>
               <button
                 type="button"
-                className="rail-said-off"
-                title="Take it back"
+                className="rail-anno-off"
+                title="Remove"
                 onClick={() => onRemove(one.id)}
               >
                 ✕

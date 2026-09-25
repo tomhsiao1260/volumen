@@ -103,10 +103,10 @@ export interface Patch extends PatchGrid {
    * one number that answers "did the fit listen to me": everything else says how the piece looks to
    * itself, and this says whether what was said got through.
    */
-  said: number[];
-  // Per chain, how many different sheets of this piece its points were found on before it was
-  // listened to: one means the fit already agreed, more means it did not.
-  spread: number[];
+  said: { chain: string; away: number }[];
+  // Per chain, which sheet of this piece it was answered on and how many different sheets its points
+  // were found on: one means the fit already agreed, more means it did not.
+  spread: { chain: string; sheet: number; sheets: number }[];
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
 }
@@ -294,10 +294,24 @@ function fitSheet(
    * is the very thing being corrected.  The place itself is pulled straight to where it was said to
    * be; its neighbourhood is only let go, so that the springs can carry it and each node can then
    * settle on the band it finds there.
+   *
+   * Only as far as is asked for, though.  A place the sheet already passes through wants no move, and
+   * freeing the grid around it would let that part of the fit wander for nothing — a person saying
+   * something the fit already agrees with should see their piece stay exactly as it was.
    */
   const free = new Float64Array(count);
   if (holding.length > 0) {
-    spreadOf(grid, holding, new Float64Array(count), free, holding.map(() => 0));
+    const N = new Float64Array(count * 3);
+    resampleNormals(field, X, N, count, reference);
+    const asked = holding.map((one) => {
+      const o = one.node * 3;
+      return Math.abs(
+        (one.at[0] - X[o]) * N[o] + (one.at[1] - X[o + 1]) * N[o + 1] + (one.at[2] - X[o + 2]) * N[o + 2],
+      );
+    });
+    const want = new Float64Array(count);
+    spreadOf(grid, holding, want, free, asked);
+    for (let k = 0; k < count; k++) if (want[k] <= stray) free[k] = 0;
   }
   const most = Math.min(hu, hv);
   const diagonal = Math.hypot(hu, hv);
@@ -465,6 +479,8 @@ const HOLD_REACH = 9;
 const HOLD_ROUNDS = 6;
 
 interface Held {
+  // Which chain said it, so that the piece can answer each one separately.
+  chain: string;
   node: number;
   at: Vec3;
 }
@@ -564,67 +580,69 @@ function holdTo(
 /**
  * Which sheet of this piece each thing said belongs to, and where it holds that sheet.
  *
- * Asked only once the piece's own sheet has been fitted, and measured against that sheet rather than
- * against the plane it started from: how far along the normal a place is, in sheets, says which one
- * it is on.  A chain that says "these are the same sheet" is then answered by the point of it nearest
- * the seed — not by a vote, because half a chain lying in a part of the piece that has jumped would
- * carry the vote and drag the half that was right after it.
+ * Asked of a piece already built, and answered by looking: the nearest point of any of its fitted
+ * sheets to the place said.  The obvious cheaper answer — how far along the normal it is from the
+ * middle sheet, divided by the spacing — is wrong two sheets out and was measured to be wrong here:
+ * the sheets of one card are 42 to 65 voxels apart, so that estimate puts a place on the sheet next
+ * to the one it is plainly on, the fit then drags a sheet sixty voxels to meet it, and a person who
+ * has just said something true watches their piece get worse.  Drawing more of them made it worse
+ * faster, which is exactly what should not happen.
+ *
+ * A chain is answered by the point of it nearest the seed — not by a vote, because half a chain lying
+ * in a part of the piece that has jumped would carry the vote and drag the half that was right after
+ * it.  Every point of the chain then holds that one sheet, wherever each was found.
  */
 function holdsFor(
   chains: ChainSaid[],
-  X0: Float64Array,
-  N0: Float64Array,
+  sheets: Map<number, { X: Float64Array }>,
   count: number,
-  spacing: number,
+  step: number,
   seed: Vec3,
-  K: number,
 ) {
   const holds = new Map<number, Held[]>();
   // How many sheets of this piece each chain's points were found on before it was listened to.  One
   // is a chain the fit already agrees with; more than one is either the jump being corrected or a
   // chain drawn across the sheets by mistake, and the person is the only one who can tell which.
-  const spread: number[] = [];
-  const nearestNode = (at: Vec3) => {
-    let best = -1, away = Infinity;
-    for (let k = 0; k < count; k++) {
-      const o = k * 3;
-      if (Number.isNaN(X0[o])) continue;
-      const d = (X0[o] - at[0]) ** 2 + (X0[o + 1] - at[1]) ** 2 + (X0[o + 2] - at[2]) ** 2;
-      if (d < away) {
-        away = d;
-        best = k;
+  const spread: { chain: string; sheet: number; sheets: number }[] = [];
+  const nearest = (at: Vec3) => {
+    let sheet = 0, node = -1, away = Infinity;
+    for (const [which, one] of sheets)
+      for (let k = 0; k < count; k++) {
+        const o = k * 3;
+        if (Number.isNaN(one.X[o])) continue;
+        const d = (one.X[o] - at[0]) ** 2 + (one.X[o + 1] - at[1]) ** 2 + (one.X[o + 2] - at[2]) ** 2;
+        if (d < away) {
+          away = d;
+          sheet = which;
+          node = k;
+        }
       }
-    }
-    return { node: best, away: Math.sqrt(away) };
+    return { sheet, node, away: Math.sqrt(away) };
   };
   for (const chain of chains) {
     if (chain.kind !== "same" || chain.points.length < 2) continue;
     const places = chain.points
-      .map((point) => {
-        const at = point.at;
-        const { node, away } = nearestNode(at);
-        if (node < 0) return undefined;
-        const o = node * 3;
-        // How far along the normal it is from the sheet the piece was built on, in sheets.
-        const high =
-          (at[0] - X0[o]) * N0[o] + (at[1] - X0[o + 1]) * N0[o + 1] + (at[2] - X0[o + 2]) * N0[o + 2];
-        return {
-          at,
-          node,
-          away,
-          sheet: Math.round(high / spacing),
-          seedAway: Math.hypot(at[0] - seed[0], at[1] - seed[1], at[2] - seed[2]),
-        };
-      })
-      .filter((one): one is NonNullable<typeof one> => one !== undefined)
-      // A place the grid does not reach across is not on this piece at all.
-      .filter((one) => one.away <= 3 * spacing);
-    if (places.length < 2) continue;
+      .map((point) => ({ at: point.at, ...nearest(point.at) }))
+      // A place no sheet of this piece comes near is not on this piece at all.
+      .filter((one) => one.node >= 0 && one.away <= 3 * step)
+      .map((one) => ({
+        ...one,
+        seedAway: Math.hypot(one.at[0] - seed[0], one.at[1] - seed[1], one.at[2] - seed[2]),
+      }));
+    if (places.length < 2) {
+      // Nothing of it is near this piece.  Saying so is the difference between an annotation that
+      // does nothing and an annotation that looks exactly like one that does.
+      spread.push({ chain: chain.id, sheet: 0, sheets: 0 });
+      continue;
+    }
     const anchor = places.reduce((best, one) => (one.seedAway < best.seedAway ? one : best));
-    if (Math.abs(anchor.sheet) > K) continue;
-    spread.push(new Set(places.map((place) => place.sheet)).size);
+    spread.push({
+      chain: chain.id,
+      sheet: anchor.sheet,
+      sheets: new Set(places.map((place) => place.sheet)).size,
+    });
     const said = holds.get(anchor.sheet) ?? [];
-    for (const place of places) said.push({ node: place.node, at: place.at });
+    for (const place of places) said.push({ chain: chain.id, node: place.node, at: place.at });
     holds.set(anchor.sheet, said);
   }
   return { holds, spread };
@@ -651,58 +669,64 @@ export function buildPatch(
   const { nu, nv } = grid;
   const count = nu * nv;
   const { X, right, down } = baseSurface(field, p0, n0, grid);
-  const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
-  const offs: number[] = [];
-  const first = fitSheet(field, X, grid, spacing, n0);
-  fillHoles(first.held, nu, nv);
-  sheets.set(0, { X, held: first.held });
-  offs.push(first.off);
-
   /*
-   * What a person has said about these sheets, answered against the sheet just fitted.  Each sheet is
-   * held to its places as it is built and then fitted once more: the places move the grid onto the
-   * right sheet, and the second fit settles it back onto the prediction's bands there — which is what
-   * makes one thing said carry the papyrus around it rather than dent the grid at one node.
+   * The sheets, grown from the base outward, holding each to whatever has been said about it.
+   *
+   * It is done twice when anything has been said: once told nothing, to have a piece to measure the
+   * things said against, and once holding them.  Which sheet a place belongs to cannot be worked out
+   * before there are sheets to compare it with, and working it out from the spacing instead is wrong
+   * by a whole sheet two sheets out (`holdsFor`).
    */
-  const N0 = new Float64Array(count * 3);
-  resampleNormals(field, X, N0, count, n0);
-  const { holds, spread } = holdsFor(chains, X, N0, count, spacing, seed, K);
-  const settle = (at: number, sheet: Float64Array) => {
-    const held = holds.get(at);
-    if (held === undefined || held.length === 0) return undefined;
-    // First the places are met and the grid around them carried along, then the whole sheet is
-    // fitted again still holding them, so that the papyrus either side comes with it.
-    holdTo(field, sheet, grid, n0, held);
-    return fitSheet(field, sheet, grid, spacing, n0, STEP_STRAY, held);
-  };
-  const said: number[] = [];
-  const answered = (at: number, sheet: Float64Array) => {
-    for (const one of holds.get(at) ?? []) {
-      const o = one.node * 3;
-      said.push(Math.hypot(sheet[o] - one.at[0], sheet[o + 1] - one.at[1], sheet[o + 2] - one.at[2]));
-    }
-  };
-  const again = settle(0, X);
-  if (again !== undefined) {
-    fillHoles(again.held, nu, nv);
-    sheets.set(0, { X, held: again.held });
-    offs[0] = again.off;
-  }
-  answered(0, X);
+  const grow = (holds: Map<number, Held[]>) => {
+    const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
+    const offs: number[] = [];
+    const said: { chain: string; away: number }[] = [];
+    const settle = (at: number, sheet: Float64Array) => {
+      const held = holds.get(at);
+      if (held === undefined || held.length === 0) return undefined;
+      // First the places are met and the grid around them carried along, then the whole sheet is
+      // fitted again still holding them, so that the papyrus either side comes with it.
+      holdTo(field, sheet, grid, n0, held);
+      const fitted = fitSheet(field, sheet, grid, spacing, n0, STEP_STRAY, held);
+      for (const one of held) {
+        const o = one.node * 3;
+        said.push({
+          chain: one.chain,
+          away: Math.hypot(sheet[o] - one.at[0], sheet[o + 1] - one.at[1], sheet[o + 2] - one.at[2]),
+        });
+      }
+      return fitted;
+    };
 
-  for (const dir of [1, -1] as const) {
-    let from = X;
-    for (let k = 1; k <= K; k++) {
-      const next = nextSheet(field, from, grid, dir, spacing, n0);
-      let fitted = fitSheet(field, next, grid, spacing, n0, STEP_STRAY);
-      fitted = settle(k * dir, next) ?? fitted;
-      answered(k * dir, next);
-      fillHoles(fitted.held, nu, nv);
-      sheets.set(k * dir, { X: next, held: fitted.held });
-      offs.push(fitted.off);
-      from = next;
+    const middle = X.slice();
+    const first = settle(0, middle) ?? fitSheet(field, middle, grid, spacing, n0);
+    fillHoles(first.held, nu, nv);
+    sheets.set(0, { X: middle, held: first.held });
+    offs.push(first.off);
+
+    for (const dir of [1, -1] as const) {
+      let from = middle;
+      for (let k = 1; k <= K; k++) {
+        const next = nextSheet(field, from, grid, dir, spacing, n0);
+        let fitted = fitSheet(field, next, grid, spacing, n0, STEP_STRAY);
+        fitted = settle(k * dir, next) ?? fitted;
+        fillHoles(fitted.held, nu, nv);
+        sheets.set(k * dir, { X: next, held: fitted.held });
+        offs.push(fitted.off);
+        from = next;
+      }
     }
+    return { sheets, offs, said };
+  };
+
+  let grown = grow(new Map());
+  let spread: { chain: string; sheet: number; sheets: number }[] = [];
+  if (chains.length > 0) {
+    const found = holdsFor(chains, grown.sheets, count, Math.max(grid.hu, grid.hv), seed);
+    spread = found.spread;
+    if (found.holds.size > 0) grown = grow(found.holds);
   }
+  const { sheets, offs, said } = grown;
 
   // The table: each sheet, and the layers within half a sheet either side of it.  Between two sheets
   // the layers follow the way from one to the other; where the next sheet is missing they follow the
@@ -795,9 +819,28 @@ export function patchFacts(patch: Patch) {
      * piece or a bad chain, and saying so is the difference between a tool and a guess.
      */
     said:
-      patch.said.length === 0
+      patch.spread.length === 0
         ? "–"
-        : `${patch.said.length} on ${patch.spread.map((one) => `${one} sheet${one === 1 ? "" : "s"}`).join(", ")} · worst ${Math.max(...patch.said).toFixed(0)}`,
+        : `${patch.said.length} points, chains on ${patch.spread.map((one) => `${one.sheets} wrap${one.sheets === 1 ? "" : "s"}`).join(", ")}` +
+          (patch.said.length === 0
+            ? ""
+            : ` · furthest ${Math.max(...patch.said.map((one) => one.away)).toFixed(0)} voxels`),
+    /*
+     * And the same, chain by chain, for the person who wrote them: which sheet of this piece each was
+     * answered on, how many sheets its points were found spread over, and how far the fitted sheet
+     * ended from the furthest of them.  A chain found on one sheet is one the piece agrees with; a
+     * chain found on three is either a jump being corrected or a chain drawn across the sheets, and
+     * only the person can say which — but they cannot say it at all unless they are told.
+     */
+    heard: patch.spread.map((one) => ({
+      chain: one.chain,
+      sheet: one.sheet,
+      sheets: one.sheets,
+      worst: Math.max(
+        0,
+        ...patch.said.filter((each) => each.chain === one.chain).map((each) => each.away),
+      ),
+    })),
     // How far the fit ended from the prediction it was following, at worst and on average: small
     // says the piece sits on the predicted sheets, and whatever is wrong is wrong with those.
     off: off.length ? `${(off.reduce((s, v) => s + v, 0) / off.length).toFixed(1)}–${Math.max(...off).toFixed(1)}` : "–",

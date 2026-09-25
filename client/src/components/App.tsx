@@ -28,6 +28,7 @@ import { cssTransform, toBoard } from "../board/transform";
 import { sheetsOf } from "../surface/layers";
 import { chain, chainsOf, forgetChain, loadChains, newChainId, setChain, watchChains } from "../surface/windings";
 import type { Point } from "viewer";
+import type { SurfaceFacts } from "../surface/types";
 import { BoardMenu } from "./BoardMenu";
 import { Rail } from "./Rail";
 import { CardView } from "./CardView";
@@ -240,6 +241,14 @@ export function App() {
 
   // Bumped when a chain changes, so that the cards are given the new one.
   const [chainsMoved, setChainsMoved] = useState(0);
+  // The chain the pointer is over in the list, which the cards draw loudly while it is.
+  const [lit, setLit] = useState<string | undefined>(undefined);
+  /*
+   * What the pieces made of each chain: which sheet it was answered on, how many sheets its points
+   * were found spread over, and how far the fit ended from the furthest of them.  Kept by chain, the
+   * last piece to be built winning, so that the list can say whether a chain was any use.
+   */
+  const [heard, setHeard] = useState<Record<string, SurfaceFacts["heard"][0]>>({});
   useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
 
   // Everything said about the scans the board is showing, for the list in the rail.
@@ -366,6 +375,9 @@ export function App() {
         onTool={(tool) => dispatch({ type: "setTool", tool })}
         chains={onTheBoard()}
         adding={state.adding}
+        lit={lit}
+        heard={heard}
+        onLit={setLit}
         onShow={(id, on) => {
           const one = chain(id);
           if (one !== undefined) setChain({ ...one, on });
@@ -411,6 +423,7 @@ export function App() {
                 linked={groupSize(state, card)}
                 mark={state.marks[card.groupId]}
                 chains={said(source)}
+                lit={lit}
                 tool={state.tool}
                 scan={source === undefined ? "" : scanOf(source)}
                 picked={state.picked}
@@ -419,6 +432,13 @@ export function App() {
                 onMark={(at) => mark(card, at)}
                 onPlace={(at) => place(card, at)}
                 onPick={(picked) => dispatch({ type: "pick", picked })}
+                onHeard={(said) =>
+                  setHeard((was) => {
+                    const now = { ...was };
+                    for (const one of said) now[one.chain] = one;
+                    return now;
+                  })
+                }
               />
             ) : (
               <CardView
@@ -438,6 +458,7 @@ export function App() {
                 scan={source === undefined ? "" : scanOf(source)}
                 onMark={(at) => mark(card, at)}
                 picked={state.picked}
+                lit={lit}
                 onPlace={(at) => place(card, at)}
                 onPick={(picked) => dispatch({ type: "pick", picked })}
                 onOpenSurface={(seed) =>

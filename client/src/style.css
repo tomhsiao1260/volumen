@@ -867,7 +867,7 @@ button:focus-visible,
   line-height: 1.5;
 }
 
-.rail-said {
+.rail-anno {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -875,23 +875,25 @@ button:focus-visible,
   border-radius: 8px;
 }
 
-.rail-said:hover {
+.rail-anno:hover {
   background: #ffffff0e;
 }
 
-.rail-said.drawing {
+.rail-anno.drawing {
   background: #ffaa3220;
 }
 
-.rail-said-what {
+/* The two lines of a row: what it says, and what the surface made of it. */
+.rail-anno-what {
   flex: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 /* Whether a chain is being used by the fit at all. */
-.rail-said-on {
+.rail-anno-on {
   width: 12px;
   height: 12px;
   flex: none;
@@ -902,11 +904,11 @@ button:focus-visible,
   cursor: pointer;
 }
 
-.rail-said-on.on {
+.rail-anno-on.on {
   background: #ffaa32;
 }
 
-.rail-said-off {
+.rail-anno-off {
   flex: none;
   padding: 0 4px;
   border: 0;
@@ -916,15 +918,38 @@ button:focus-visible,
   font-size: 13px;
 }
 
-.rail-said-off:hover {
+.rail-anno-off:hover {
   color: #e8ecf2;
 }
 
 /* A chain that says "the same sheet" wears the colour VC3D gives it. */
-.rail-said-on.same {
+.rail-anno-on.same {
   border-color: #32ffd7;
 }
 
-.rail-said-on.same.on {
+.rail-anno-on.same.on {
   background: #32ffd7;
+}
+
+/* The row the pointer is over; its chain is drawn loudly on the cards at the same time. */
+.rail-anno.lit {
+  background: #ffffff16;
+}
+
+/* What a piece made of a chain: on one sheet, or spread across several — which is either the jump
+   being corrected or a chain drawn across the sheets by mistake. */
+.rail-anno-kind,
+.rail-anno-heard {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rail-anno-heard {
+  font-size: 11px;
+  color: #7f8896;
+}
+
+.rail-anno-heard.crossed {
+  color: #e0a34a;
 }

@@ -92,10 +92,11 @@ const MESSAGES: Partial<Record<Status, string>> = {
 
 function describe(facts: SurfaceFacts) {
   return (
-    `sheets ${facts.spacing.toFixed(0)} voxels apart, ` +
-    `${facts.across} × ${facts.down} points ${facts.step} voxels apart, ` +
-    `prediction read in ${(facts.read / 1000).toFixed(1)} s, sheet built in ${facts.built} ms\n` +
-    `   sheets ${facts.apart} voxels apart · said ${facts.said} · off ${facts.off} · holes ${facts.holes} · torn ${facts.torn} · edges ×${facts.stretch}`
+    `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
+    `grid ${facts.across} × ${facts.down}, ${facts.step} voxels apart · ` +
+    `prediction read in ${facts.read} ms · piece built in ${facts.built} ms\n` +
+    `   wraps ${facts.apart} voxels apart · annotations ${facts.said}` +
+    ` · off the prediction ${facts.off} voxels · holes ${facts.holes} · torn ${facts.torn} · stretch ×${facts.stretch}`
   );
 }
 
@@ -115,12 +116,16 @@ export interface SurfaceCardViewProps {
   tool: Tool;
   scan: string;
   picked: PickedPoint | undefined;
+  // The chain being pointed at in the list, which is drawn loud like the one being worked on.
+  lit: string | undefined;
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
   onMark: (at: Point | null) => void;
   // Puts a winding point down at this voxel, and takes hold of one already down.
   onPlace: (at: Point) => void;
   onPick: (picked: PickedPoint | undefined) => void;
+  // What this piece made of each chain it was told, once it is built.
+  onHeard: (heard: SurfaceFacts["heard"]) => void;
 }
 
 export function SurfaceCardView({
@@ -134,11 +139,13 @@ export function SurfaceCardView({
   tool,
   scan,
   picked,
+  lit,
   dispatch,
   onUnlink,
   onMark,
   onPlace,
   onPick,
+  onHeard,
 }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -195,11 +202,13 @@ export function SurfaceCardView({
   const onMarkRef = useRef(onMark);
   const onPlaceRef = useRef(onPlace);
   const onPickRef = useRef(onPick);
+  const onHeardRef = useRef(onHeard);
   const toolRef = useRef(tool);
   useEffect(() => {
     onMarkRef.current = onMark;
     onPlaceRef.current = onPlace;
     onPickRef.current = onPick;
+    onHeardRef.current = onHeard;
     toolRef.current = tool;
   });
   // The size the sheet was built for; it is not built again while the card is resized, since the
@@ -367,6 +376,7 @@ export function SurfaceCardView({
               return;
             }
             setStatus(event.status);
+            if (event.facts !== undefined) onHeardRef.current(event.facts.heard);
             if (event.facts !== undefined && DEBUG) console.info(`${id}: ${describe(event.facts)}`);
             if (event.message !== undefined) console.error(event.message);
           },
@@ -524,6 +534,7 @@ export function SurfaceCardView({
       drawnDots.current = [];
       for (const one of chainsOf(scan)) {
         const colour = one.kind === "same" ? SAME_DOT : STEP_DOT;
+        const loud = one.id === lit || one.id === picked?.chain;
         for (const point of one.points) {
           const found = dots.current.get(point.id);
           if (found === undefined) continue;
@@ -552,6 +563,7 @@ export function SurfaceCardView({
             point.turn,
             picked?.chain === one.id && picked.point === point.id,
             colour,
+            loud,
           );
           context.restore();
         }
@@ -584,7 +596,7 @@ export function SurfaceCardView({
     context.stroke();
   };
 
-  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted]);
+  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked]);
 
   /*
    * Where the group's mark is on this piece.  Asked again whenever the mark moves or the piece is

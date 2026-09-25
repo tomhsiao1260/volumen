@@ -86,9 +86,16 @@ export function drawDot(
   turn: number | null,
   held = false,
   colour = STEP_DOT,
+  /*
+   * A chain nobody is working on is drawn small and quiet.  A card may carry dozens of them, and
+   * drawn all alike they cover the papyrus they are about — which is the one thing the person is
+   * trying to look at.  The chain being drawn, the one a point is held on, and the one under the
+   * pointer in the list are the loud ones.
+   */
+  loud = true,
 ) {
   context.save();
-  context.globalAlpha = near;
+  context.globalAlpha = near * (loud ? 1 : 0.5);
   if (held) {
     context.beginPath();
     context.arc(x, y, 9 * density, 0, 2 * Math.PI);
@@ -97,13 +104,13 @@ export function drawDot(
     context.stroke();
   }
   context.beginPath();
-  context.arc(x, y, 4.2 * (held ? HELD_LARGER : 1) * density, 0, 2 * Math.PI);
+  context.arc(x, y, (loud ? 4.2 : 3) * (held ? HELD_LARGER : 1) * density, 0, 2 * Math.PI);
   context.strokeStyle = STEP_EDGE;
-  context.lineWidth = 3.2 * density;
+  context.lineWidth = (loud ? 3.2 : 2.2) * density;
   context.stroke();
   context.fillStyle = colour;
   context.fill();
-  if (turn !== null && near > 0.6) {
+  if (turn !== null && near > 0.6 && loud) {
     context.font = `${10 * density}px ui-monospace, monospace`;
     context.textAlign = "left";
     context.textBaseline = "middle";
@@ -171,6 +178,8 @@ export interface CardViewProps {
   linked: number;
   // The voxel the group has marked, if it has one.
   mark: Point | undefined;
+  // The chain the person is pointing at in the list, drawn loud like the one they are working on.
+  lit: string | undefined;
   // What a press on the data does, and the scan the annotations of this card are filed under.
   tool: Tool;
   scan: string;
@@ -211,6 +220,7 @@ export function CardView({
   selected,
   linked,
   mark,
+  lit,
   tool,
   scan,
   picked,
@@ -413,8 +423,11 @@ export function CardView({
       });
       if (places.every((place) => place.near === 0)) continue;
       const colour = one.kind === "same" ? SAME_DOT : STEP_DOT;
+      const loud = one.id === lit || one.id === picked?.chain;
+      // The thread belongs to the chain being worked on; on the others it is what makes a card of
+      // papyrus look like a cat's cradle.
       context.save();
-      context.globalAlpha = one.on ? 0.75 : 0.3;
+      context.globalAlpha = loud ? (one.on ? 0.75 : 0.3) : 0;
       context.strokeStyle = colour;
       context.lineWidth = 1.4 * density;
       context.setLineDash([4 * density, 4 * density]);
@@ -439,7 +452,7 @@ export function CardView({
         drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y });
         context.save();
         if (!one.on) context.globalAlpha = 0.35;
-        drawDot(context, place.x * density, place.y * density, density, place.near, place.turn, held, colour);
+        drawDot(context, place.x * density, place.y * density, density, place.near, place.turn, held, colour, loud);
         context.restore();
       });
     }
@@ -453,7 +466,7 @@ export function CardView({
         Math.abs(point[sliced] - at[sliced]) <= 0.5,
       );
     }
-  }, [sheetsMoved, chainsMoved, centre, mark, picked, scan, orientation, sourceId, groupId, session, card.width, card.height]);
+  }, [sheetsMoved, chainsMoved, centre, mark, picked, lit, scan, orientation, sourceId, groupId, session, card.width, card.height]);
 
   // The sheet's line under the pointer, in the card's own pixels.
   const lineUnder = (x: number, y: number) => {
