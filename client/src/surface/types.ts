@@ -101,6 +101,8 @@ export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "failed";
 export interface SurfaceFacts {
   // How far the fit ended from the prediction's bands, in voxels: mean and worst over the sheets.
   off: string;
+  // How many places a person held the sheets to, and how far the worst of them ended up.
+  said: string;
   // Sheets are this many voxels apart at the seed, as the prediction has it.
   spacing: number;
   // Points across and down the piece of sheet, and their spacing in voxels.

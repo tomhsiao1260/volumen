@@ -19,10 +19,13 @@ interface Choice {
   key: string;
   title: string;
   said: string;
+  // The colour this tool draws in, which the icon wears and the button takes when it is picked: the
+  // rail says what is about to appear on the cards, in the colour it will appear in.
+  tint?: string;
   icon: ReactNode;
 }
 
-// The arrow every board has, and a chain of sheets counted outward.
+// The arrow every board has, and the two things a person can say about the sheets.
 const CHOICES: Choice[] = [
   {
     tool: "look",
@@ -35,15 +38,38 @@ const CHOICES: Choice[] = [
       </svg>
     ),
   },
+  /*
+   * The two icons are a pair, and the pair is the explanation: dots lying along one sheet, against
+   * dots stepping across several.  The sheets are drawn faintly and the dots in the colour that tool
+   * puts on the cards, so the rail says which is which without a word.
+   */
+  {
+    tool: "same",
+    key: "Q",
+    title: "Same sheet",
+    said: "Point at places that are on one and the same sheet",
+    tint: "#32ffd7",
+    icon: (
+      <svg viewBox="0 0 24 24" className="rail-icon" aria-hidden>
+        <path d="M2.8 14.4 C 7 9.6, 17 9.6, 21.2 6.2" className="rail-sheet" />
+        <circle cx="5.4" cy="12.3" r="2.1" className="rail-spot" />
+        <circle cx="12" cy="10.5" r="2.1" className="rail-spot" />
+        <circle cx="18.6" cy="8.2" r="2.1" className="rail-spot" />
+      </svg>
+    ),
+  },
   {
     tool: "step",
     key: "E",
     title: "Count outward",
     said: "Point at one sheet after the next, across a cut",
+    tint: "#ffaa32",
     icon: (
       <svg viewBox="0 0 24 24" className="rail-icon" aria-hidden>
-        <path d="M4 6.5 H20 M4 12 H20 M4 17.5 H20" className="rail-stroke" />
-        <path d="M12 3.5 V20.5 M9 17.5 L12 20.8 L15 17.5" className="rail-stroke rail-thin" />
+        <path d="M3 6 H21 M3 12 H21 M3 18 H21" className="rail-sheet" />
+        <circle cx="9.2" cy="6" r="2.1" className="rail-spot" />
+        <circle cx="12" cy="12" r="2.1" className="rail-spot" />
+        <circle cx="14.8" cy="18" r="2.1" className="rail-spot" />
       </svg>
     ),
   },
@@ -52,6 +78,7 @@ const CHOICES: Choice[] = [
 // What the picked tool is for, said where the hand is.  A tool nobody can guess the use of is a tool
 // nobody uses, and this one is a sentence long.
 const SAYS: Partial<Record<Tool, string>> = {
+  same: "Press along one sheet, wherever you are sure it is the same one · Enter finishes · press a point, then Delete, to take it back",
   step: "Press across the sheets, one press a sheet · Enter finishes the chain · press a point, then Delete, to take it back",
 };
 
@@ -76,6 +103,7 @@ export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailPro
             key={choice.tool}
             type="button"
             className={`rail-tool${tool === choice.tool ? " picked" : ""}`}
+            style={choice.tint === undefined ? undefined : ({ ["--tint" as string]: choice.tint })}
             data-tool={choice.tool}
             title={`${choice.title} (${choice.key}) — ${choice.said}`}
             aria-pressed={tool === choice.tool}
@@ -111,11 +139,12 @@ export function Rail({ tool, onTool, chains, adding, onShow, onRemove }: RailPro
             <div key={one.id} className={`rail-said${one.id === adding ? " drawing" : ""}`} data-chain={one.id}>
               <button
                 type="button"
-                className={`rail-said-on${one.on ? " on" : ""}`}
+                className={`rail-said-on${one.on ? " on" : ""} ${one.kind}`}
                 title={one.on ? "Being used; press to set aside" : "Set aside; press to use"}
                 onClick={() => onShow(one.id, !one.on)}
               />
               <span className="rail-said-what">
+                {one.kind === "same" ? "same sheet · " : ""}
                 {one.points.length} point{one.points.length === 1 ? "" : "s"}
                 {one.kind === "step" && one.points.length > 1
                   ? ` · ${one.points.length - 1} wrap${one.points.length === 2 ? "" : "s"}`

@@ -411,7 +411,7 @@ class Card {
         : await maskLevel(lasagna.mask, 2 * Math.max(...half) * lasagna.micron),
     );
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, spacing);
+    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains);
     const fitted = performance.now() - started - read;
     return patch === undefined ? undefined : { patch, spacing, read, fitted };
   }

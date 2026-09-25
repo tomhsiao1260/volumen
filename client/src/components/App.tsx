@@ -281,15 +281,20 @@ export function App() {
    * the community's relative-winding collections are defined.
    */
   const place = (card: CardState, at: Point) => {
+    const kind = latest.current.tool === "same" ? "same" : "step";
     const source = card.sourceId === null ? undefined : latest.current.sources[card.sourceId];
     const scan = source === undefined ? "" : scanOf(source);
     if (scan === "") return;
-    const open = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
+    const drawing = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
+    // A chain says one thing: a point of another kind starts a chain of its own.
+    const open = drawing?.kind === kind ? drawing : undefined;
     const madeAt = Date.now();
     const point = {
       id: `${madeAt}`,
       at: { x: at.x, y: at.y, z: at.z },
-      turn: open === undefined ? 0 : (open.points[open.points.length - 1]?.turn ?? 0) + 1,
+      // A chain that says "the same sheet" carries no wrap at all — that is what tells the fitter,
+      // ours and the community's, which of the two things is being said.
+      turn: kind === "same" ? null : open === undefined ? 0 : (open.points[open.points.length - 1]?.turn ?? 0) + 1,
       madeAt,
     };
     const saved = setChain(
@@ -297,7 +302,7 @@ export function App() {
         ? {
             id: newChainId(),
             scan,
-            kind: "step",
+            kind,
             points: [point],
             on: true,
             note: "",

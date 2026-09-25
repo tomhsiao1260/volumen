@@ -65,11 +65,13 @@ const MARK = "rgba(255, 205, 100, 0.95)";
 const MARK_EDGE = "rgba(20, 10, 0, 0.6)";
 
 /*
- * A winding annotation, in the colour VC3D gives the same thing (`SpiralPclRole.hpp`): orange for
- * counting one wrap after the next.  Somebody who has annotated a scroll before should recognise it.
+ * A winding annotation, in the colours VC3D gives the same two things (`SpiralPclRole.hpp`): cyan for
+ * "these are one and the same sheet", orange for counting one wrap after the next.  Somebody who has
+ * annotated a scroll before should recognise them.
  */
+const SAME_DOT = "rgba(50, 255, 215, 0.95)";
 const STEP_DOT = "rgba(255, 170, 50, 0.95)";
-const STEP_EDGE = "rgba(30, 14, 0, 0.7)";
+const STEP_EDGE = "rgba(20, 14, 6, 0.7)";
 
 // A point taken hold of is drawn larger, by the same amount VC3D uses for the same thing.
 const HELD_LARGER = 1.4;
@@ -79,16 +81,18 @@ function drawDot(
   x: number,
   y: number,
   density: number,
-  here: boolean,
+  // How near this slice the point is, 1 on it and fading to 0 as it goes behind or in front.
+  near: number,
   turn: number | null,
   held = false,
+  colour = STEP_DOT,
 ) {
   context.save();
-  context.globalAlpha = here ? 1 : 0.45;
+  context.globalAlpha = near;
   if (held) {
     context.beginPath();
     context.arc(x, y, 9 * density, 0, 2 * Math.PI);
-    context.strokeStyle = STEP_DOT;
+    context.strokeStyle = colour;
     context.lineWidth = 1.6 * density;
     context.stroke();
   }
@@ -97,16 +101,16 @@ function drawDot(
   context.strokeStyle = STEP_EDGE;
   context.lineWidth = 3.2 * density;
   context.stroke();
-  context.fillStyle = STEP_DOT;
+  context.fillStyle = colour;
   context.fill();
-  if (turn !== null) {
+  if (turn !== null && near > 0.6) {
     context.font = `${10 * density}px ui-monospace, monospace`;
     context.textAlign = "left";
     context.textBaseline = "middle";
     context.lineWidth = 3 * density;
     context.strokeStyle = STEP_EDGE;
     context.strokeText(`${turn}`, x + 7 * density, y - 6 * density);
-    context.fillStyle = STEP_DOT;
+    context.fillStyle = colour;
     context.fillText(`${turn}`, x + 7 * density, y - 6 * density);
   }
   context.restore();
@@ -385,38 +389,57 @@ export function CardView({
      * The winding annotations of this scan, wherever they fall on this slice.  A chain is drawn as
      * its points joined in the order they were placed, each with the wrap it was counted as: it is
      * the only way to see what one says without reading it back out of a file.
+     *
+     * A point away from this slice fades with how far away it is, and is not drawn at all once it is
+     * further than a quarter of what the card can see.  Drawn all alike, a point three hundred
+     * voxels behind the slice looks exactly like one on it — and a chain laid along a sheet on one
+     * card then reads, on a card cut the other way, as a chain climbing straight across the sheets,
+     * when all that has happened is that the axis it was drawn along has been flattened away.
      */
+    const seen = Math.max(canvas.clientWidth, canvas.clientHeight) * zoom;
+    const fade = Math.max(8, seen * 0.25);
     drawnDots.current = [];
     for (const one of chainsOf(scan)) {
       if (one.points.length === 0) continue;
       const places = one.points.map((point) => {
         const q = [point.at.z, point.at.y, point.at.x];
+        const off = Math.abs(q[sliced] - at[sliced]);
         return {
           x: canvas.clientWidth / 2 + (q[across] - at[across]) / zoom,
           y: canvas.clientHeight / 2 + (q[down] - at[down]) / zoom,
-          here: Math.abs(q[sliced] - at[sliced]) <= 0.5,
+          near: off <= 0.5 ? 1 : Math.max(0, 1 - off / fade),
           turn: point.turn,
         };
       });
+      if (places.every((place) => place.near === 0)) continue;
+      const colour = one.kind === "same" ? SAME_DOT : STEP_DOT;
       context.save();
       context.globalAlpha = one.on ? 0.75 : 0.3;
-      context.strokeStyle = STEP_DOT;
+      context.strokeStyle = colour;
       context.lineWidth = 1.4 * density;
       context.setLineDash([4 * density, 4 * density]);
       context.beginPath();
-      places.forEach((place, k) => {
-        if (k === 0) context.moveTo(place.x * density, place.y * density);
-        else context.lineTo(place.x * density, place.y * density);
-      });
+      let drawing = false;
+      for (const place of places) {
+        // The thread is drawn only between points that are both near enough to be shown.
+        if (place.near === 0) {
+          drawing = false;
+          continue;
+        }
+        if (drawing) context.lineTo(place.x * density, place.y * density);
+        else context.moveTo(place.x * density, place.y * density);
+        drawing = true;
+      }
       context.stroke();
       context.restore();
       one.points.forEach((point, k) => {
         const place = places[k];
+        if (place.near === 0) return;
         const held = picked?.chain === one.id && picked.point === point.id;
         drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y });
         context.save();
         if (!one.on) context.globalAlpha = 0.35;
-        drawDot(context, place.x * density, place.y * density, density, place.here, place.turn, held);
+        drawDot(context, place.x * density, place.y * density, density, place.near, place.turn, held, colour);
         context.restore();
       });
     }

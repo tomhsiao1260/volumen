@@ -55,7 +55,7 @@ export interface CardState {
  * how a person tells the flattening what it got wrong.  The names are the community's, and so are the
  * keys: Q for same-winding and E for relative, as VC3D has them.
  */
-export type Tool = "look" | "step";
+export type Tool = "look" | "same" | "step";
 
 // A winding point taken hold of: the next Delete removes it.  Picking one is how a point is edited,
 // as it is in VC3D — a press on a point takes it rather than putting another one down.

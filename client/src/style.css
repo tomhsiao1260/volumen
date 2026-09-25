@@ -765,9 +765,27 @@ button:focus-visible,
   color: #e8ecf2;
 }
 
+/* A picked tool wears its own colour, so that the rail says what is about to be drawn. */
 .rail-tool.picked {
-  background: #2f6df633;
-  color: #74a6ff;
+  background: color-mix(in srgb, var(--tint, #74a6ff) 20%, transparent);
+  color: var(--tint, #74a6ff);
+}
+
+/* Inside an icon: the papyrus, faint, and the points this tool puts down, in its colour. */
+.rail-sheet {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  opacity: 0.4;
+}
+
+.rail-spot {
+  fill: var(--tint, currentColor);
+}
+
+.rail-tool:not(.picked) .rail-spot {
+  opacity: 0.75;
 }
 
 .rail-icon {
@@ -900,4 +918,13 @@ button:focus-visible,
 
 .rail-said-off:hover {
   color: #e8ecf2;
+}
+
+/* A chain that says "the same sheet" wears the colour VC3D gives it. */
+.rail-said-on.same {
+  border-color: #32ffd7;
+}
+
+.rail-said-on.same.on {
+  background: #32ffd7;
 }

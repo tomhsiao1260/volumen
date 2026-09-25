@@ -250,6 +250,7 @@ export function useBoardGestures({
       if (!typing(event.target) && !event.metaKey && !event.ctrlKey && !event.altKey) {
         const key = event.key.toLowerCase();
         if (key === "v") dispatch({ type: "setTool", tool: "look" });
+        if (key === "q") dispatch({ type: "setTool", tool: "same" });
         if (key === "e") dispatch({ type: "setTool", tool: "step" });
       }
       if (event.code === "Space" && !typing(event.target)) {
