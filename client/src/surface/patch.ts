@@ -106,9 +106,10 @@ export interface Patch extends PatchGrid {
   said: { chain: string; away: number }[];
   /*
    * Per chain: which wrap of this piece it was answered on, how many different wraps its points were
-   * found on before it was listened to, and how many of its points this piece could use at all.
+   * found on before it was listened to, how many of its points this piece could use at all, and how
+   * many wraps it had to be moved to keep off another chain's wrap.
    */
-  spread: { chain: string; sheet: number; sheets: number; used: number; of: number }[];
+  spread: { chain: string; sheet: number; sheets: number; used: number; of: number; moved: number }[];
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
 }
@@ -248,6 +249,13 @@ const STEP_STRAY = 0.22;
 const TOLD_STRAY = 0.1;
 // How much of a node has to have come from a person before it counts as papyrus on their word alone.
 const SAID_IS_PAPYRUS = 0.5;
+/*
+ * Two chains are one layer only if they pass within this much of a wrap of each other sideways and
+ * meet within this much of a wrap through the papyrus.  Anything else is two layers, which is what
+ * drawing a second annotation means.
+ */
+const SAME_NEAR = 0.6;
+const SAME_DEPTH = 0.25;
 const PIN_ROUNDS = 8;
 // Near enough that a place counts as met: well under one step of the grid, which is about six voxels.
 const PIN_CLOSE = 1;
@@ -726,7 +734,8 @@ function placeValues(held: Held[], X: Float64Array, nu: number, nv: number, N: F
 function holdsFor(
   chains: ChainSaid[],
   sheets: Map<number, { X: Float64Array }>,
-  count: number,
+  nu: number,
+  nv: number,
   // How far from any fitted wrap a place may be and still be about this piece.  It has to be more
   // than a wrap: a person says something exactly where the fit has gone wrong, and where the fit has
   // gone wrong there is no fitted wrap near the papyrus they are pointing at — the piece has dived
@@ -734,12 +743,27 @@ function holdsFor(
   // steps threw away ten of their forty-three places, and they were the ten in the pit.
   reach: number,
   seed: Vec3,
+  // How far apart the wraps are here, which is the ruler for "these two chains are the same wrap",
+  // and the way w grows, which is what "the wrap further out" means.
+  spacing: number,
+  outward: Vec3,
 ) {
+  const count = nu * nv;
   const holds = new Map<number, Held[]>();
   // How many sheets of this piece each chain's points were found on before it was listened to.  One
   // is a chain the fit already agrees with; more than one is either the jump being corrected or a
   // chain drawn across the sheets by mistake, and the person is the only one who can tell which.
-  const spread: { chain: string; sheet: number; sheets: number; used: number; of: number }[] = [];
+  const spread: { chain: string; sheet: number; sheets: number; used: number; of: number; moved: number }[] = [];
+  /*
+   * Each wrap's own normal, so that "which side of this wrap is the chain on, and how far" can be
+   * answered.  It is what decides, when two chains land on one wrap, which of them is the wrap out.
+   */
+  const facing = new Map<number, Float64Array>();
+  for (const [which, one] of sheets) {
+    const N = new Float64Array(count * 3);
+    surfaceNormals(one.X, nu, nv, N, outward);
+    facing.set(which, N);
+  }
   const nearest = (at: Vec3) => {
     let sheet = 0, node = -1, away = Infinity;
     for (const [which, one] of sheets)
@@ -755,6 +779,19 @@ function holdsFor(
       }
     return { sheet, node, away: Math.sqrt(away) };
   };
+  // Every chain's answer, before any of them is given a wrap: they have to be seen together for
+  // "two chains are two wraps" to mean anything.
+  const asked: {
+    chain: string;
+    // The layer the person put this chain on, by name, if they named one.
+    said: string | null;
+    sheet: number;
+    off: number;
+    sheets: number;
+    places: { at: Vec3; node: number }[];
+    of: number;
+    at?: number;
+  }[] = [];
   for (const chain of chains) {
     if (chain.kind !== "same" || chain.points.length < 2) continue;
     const places = chain.points
@@ -768,20 +805,141 @@ function holdsFor(
     if (places.length < 2) {
       // Nothing of it is near this piece.  Saying so is the difference between an annotation that
       // does nothing and an annotation that looks exactly like one that does.
-      spread.push({ chain: chain.id, sheet: 0, sheets: 0, used: places.length, of: chain.points.length });
+      spread.push({ chain: chain.id, sheet: 0, sheets: 0, used: places.length, of: chain.points.length, moved: 0 });
       continue;
     }
     const anchor = places.reduce((best, one) => (one.seedAway < best.seedAway ? one : best));
-    spread.push({
+    // Which side of that wrap the chain sits on, and how far: the anchor's distance from the wrap
+    // itself, signed along the wrap's own normal, which is what puts two chains in the right order
+    // through the papyrus.  Asked of the surface rather than of the nearest node, the same way every
+    // other distance here is asked, so that a hole or a tilt cannot turn it into nothing.
+    const N = facing.get(anchor.sheet)!;
+    const under = onWrap(sheets.get(anchor.sheet)!.X, nu, nv, N, anchor.at);
+    const off = under === undefined || !Number.isFinite(under.gap) ? 0 : under.gap;
+    asked.push({
       chain: chain.id,
+      said: chain.layer ?? null,
       sheet: anchor.sheet,
+      off,
       sheets: new Set(places.map((place) => place.sheet)).size,
-      used: places.length,
+      places,
       of: chain.points.length,
     });
-    const said = holds.get(anchor.sheet) ?? [];
-    for (const place of places) said.push({ chain: chain.id, node: place.node, at: place.at });
-    holds.set(anchor.sheet, said);
+  }
+
+  /*
+   * And now the one rule that was missing: two chains are two wraps.
+   *
+   * A person who draws a second same winding has said "this is another layer" — that is the whole
+   * meaning of drawing it separately.  Holding both on one wrap asks a single surface to pass through
+   * two layers of papyrus, and since every place said is now met exactly, it does: it weaves from one
+   * layer to the other and back between the places, which is what the user saw and reported.  So
+   * chains that land on the same wrap are spread over neighbouring wraps, in the order they sit along
+   * the normal, and only chains that are genuinely at the same depth — within a quarter of a wrap —
+   * are left together, because two chains on one layer is a thing a person may reasonably mean.
+   */
+  /*
+   * Whether two chains are the same layer is asked where they come NEAREST each other, and nowhere
+   * else.  How far each of them is from the wrap it was attributed to says nothing: when the fit has
+   * collapsed two layers onto one wrap, that wrap sits near both, and both look like it.  Where the
+   * two chains pass close by, though, the papyrus is either one sheet — they meet — or two, and then
+   * the distance between them along the normal is the thickness of what lies between.
+   */
+  const between = (a: (typeof asked)[0], b: (typeof asked)[0], N: Float64Array) => {
+    let best = Infinity, from = a.places[0], to = b.places[0];
+    for (const p of a.places)
+      for (const q of b.places) {
+        const d = (p.at[0] - q.at[0]) ** 2 + (p.at[1] - q.at[1]) ** 2 + (p.at[2] - q.at[2]) ** 2;
+        if (d < best) {
+          best = d;
+          from = p;
+          to = q;
+        }
+      }
+    const o = from.node * 3;
+    const along =
+      (to.at[0] - from.at[0]) * N[o] + (to.at[1] - from.at[1]) * N[o + 1] + (to.at[2] - from.at[2]) * N[o + 2];
+    const away = Math.sqrt(best);
+    return { along, sideways: Math.sqrt(Math.max(0, away * away - along * along)) };
+  };
+  /*
+   * The chains, in the order they lie through the papyrus, each given a wrap of its own.
+   *
+   * Sorting them by depth and handing out consecutive wraps is the only way to keep the order right:
+   * resolving clashes one wrap at a time moves a chain onto the wrap of a chain not looked at yet.
+   * Chains that meet — near each other sideways and touching through the papyrus — are one layer and
+   * keep one wrap between them, because two annotations about one layer is a thing a person may mean.
+   */
+  const depth = (one: (typeof asked)[0]) => {
+    const d = one.sheet + one.off / spacing;
+    return Number.isFinite(d) ? d : one.sheet;
+  };
+  const order = [...asked].sort((a, b) => depth(a) - depth(b));
+  /*
+   * Which chains are the same layer.
+   *
+   * The fit's own answer is kept: two chains it put on one wrap stay on one wrap, because two
+   * annotations drawn separately are often about the same winding and it is not for the tool to
+   * decide otherwise.  Only one thing overrides it, and it is not a guess about what was meant but a
+   * fact about the papyrus: where two chains pass close by each other and are further apart through
+   * the sheet than a quarter of a wrap, no single surface can hold both, and forcing one to — which
+   * is what happened while every place said was met exactly — makes it weave from one layer to the
+   * other and back.  Those are split.
+   *
+   * And a chain the person has named is on the layer of that name and no other: same name, same wrap;
+   * different names, different wraps; whatever the fit thought.  That is the whole of what a person
+   * can usually see, and having to say instead how many wraps apart two places are — which they often
+   * cannot know — is what would make the tool unusable.
+   */
+  const layers: { chains: typeof asked; said: string | null }[] = [];
+  const cannot = (a: (typeof asked)[0], b: (typeof asked)[0]) => {
+    const { along, sideways } = between(a, b, facing.get(a.sheet)!);
+    return sideways <= spacing * SAME_NEAR && Math.abs(along) > spacing * SAME_DEPTH;
+  };
+  for (const one of order) {
+    if (one.said !== null) {
+      const already = layers.find((layer) => layer.said === one.said);
+      if (already !== undefined) already.chains.push(one);
+      else layers.push({ chains: [one], said: one.said });
+      continue;
+    }
+    const with_ = layers.find(
+      (layer) =>
+        layer.said === null &&
+        layer.chains[0].sheet === one.sheet &&
+        !layer.chains.some((each) => cannot(each, one)),
+    );
+    if (with_ !== undefined) with_.chains.push(one);
+    else layers.push({ chains: [one], said: null });
+  }
+  /*
+   * And where each layer goes: as near as it can to where its chains were found, and never onto the
+   * wrap of the layer before it.
+   */
+  const wraps = [...sheets.keys()].sort((a, b) => a - b);
+  const lowest = wraps[0] ?? 0, highest = wraps[wraps.length - 1] ?? 0;
+  let above = -Infinity;
+  for (const layer of layers.sort((a, b) => depth(a.chains[0]) - depth(b.chains[0]))) {
+    const guess = Math.round(depth(layer.chains[0]));
+    const w = Math.max(Number.isFinite(guess) ? guess : layer.chains[0].sheet, above + 1, lowest);
+    above = w;
+    for (const one of layer.chains) one.at = w <= highest ? w : undefined;
+  }
+  for (const one of asked) {
+    spread.push({
+      chain: one.chain,
+      sheet: one.at ?? one.sheet,
+      sheets: one.sheets,
+      // A chain with nowhere to go — the wrap it would need is off the end of the piece — is not fed
+      // to the fit at all, and says so rather than quietly bending the wrap of another chain.
+      used: one.at === undefined ? 0 : one.places.length,
+      of: one.of,
+      moved: one.at === undefined ? 0 : one.at - one.sheet,
+    });
+    if (one.at === undefined) continue;
+    const said = holds.get(one.at) ?? [];
+    for (const place of one.places) said.push({ chain: one.chain, node: place.node, at: place.at });
+    holds.set(one.at, said);
   }
   return { holds, spread };
 }
@@ -981,9 +1139,9 @@ export function buildPatch(
   };
 
   let grown = grow(new Map());
-  let spread: { chain: string; sheet: number; sheets: number; used: number; of: number }[] = [];
+  let spread: { chain: string; sheet: number; sheets: number; used: number; of: number; moved: number }[] = [];
   if (chains.length > 0) {
-    const found = holdsFor(chains, grown.sheets, count, spacing * SAID_OF_PIECE, seed);
+    const found = holdsFor(chains, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0);
     spread = found.spread;
     if (found.holds.size > 0) {
       grown = grow(found.holds, grown.sheets);
@@ -993,7 +1151,7 @@ export function buildPatch(
        * can go and look at — not how many wraps they were scattered over before anything was done
        * about it.
        */
-      spread = holdsFor(chains, grown.sheets, count, spacing * SAID_OF_PIECE, seed).spread;
+      spread = holdsFor(chains, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0).spread;
     }
   }
   const { sheets, offs, said } = grown;
@@ -1108,6 +1266,7 @@ export function patchFacts(patch: Patch) {
       sheets: one.sheets,
       used: one.used,
       of: one.of,
+      moved: one.moved,
       worst: Math.max(
         0,
         ...patch.said.filter((each) => each.chain === one.chain).map((each) => each.away),

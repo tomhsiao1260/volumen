@@ -22,7 +22,7 @@ import type { Session } from "../board/session";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
 import { crossSection, sheetsOf, watchSheets } from "../surface/layers";
-import { chainsOf, watchChains } from "../surface/windings";
+import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { SourcePicker } from "./SourcePicker";
 
 const ORIENTATIONS: ViewOrientation[] = ["xy", "xz", "yz"];
@@ -434,12 +434,14 @@ export function CardView({
         };
       });
       if (places.every((place) => place.near === 0)) continue;
-      const colour = one.kind === "same" ? SAME_DOT : STEP_DOT;
+      const colour = chainColour(one);
       const loud = one.id === lit || one.id === picked?.chain;
       // The thread belongs to the chain being worked on; on the others it is what makes a card of
       // papyrus look like a cat's cradle.
       context.save();
-      context.globalAlpha = loud ? (one.on ? 0.75 : 0.3) : 0;
+      // Quiet, but not gone: with a colour of its own per chain the thread is what makes a scatter of
+      // dots read as one winding rather than as a field of them.
+      context.globalAlpha = loud ? (one.on ? 0.75 : 0.3) : one.on ? 0.2 : 0.09;
       context.strokeStyle = colour;
       context.lineWidth = 1.4 * density;
       context.setLineDash([4 * density, 4 * density]);

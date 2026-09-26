@@ -35,6 +35,19 @@ export interface WindChain {
   kind: "same" | "step";
   points: WindPoint[];
   on: boolean;
+  /*
+   * Which layer this chain is on, as a name rather than a number: two chains wearing the same name
+   * are the same wrap, two wearing different names are different wraps, and null leaves it to the
+   * fit.  A name and not a number on purpose — saying "these two are not the same layer" is a thing
+   * a person can see, while "these two are exactly one wrap apart" often is not, and demanding the
+   * second to be allowed to say the first is what makes an annotation tool unusable.  How far apart
+   * two named layers end up is then the fit's business, from the order they lie in.
+   *
+   * It is the community's `same_windings.json` exactly: one collection per layer, saying nothing
+   * about the distance between collections.  Saying how many wraps apart two places are is what the
+   * relative winding tool is for.
+   */
+  layer: string | null;
   note: string;
   author: string;
   rev: number;
@@ -63,6 +76,31 @@ export function chainsOf(scan: string | undefined) {
   return [...chains.values()]
     .filter((chain) => chain.scan === scan && chain.deletedAt === undefined)
     .sort((a, b) => a.madeAt - b.madeAt);
+}
+
+/*
+ * A colour of its own for each chain.
+ *
+ * VC3D gives the two kinds of winding annotation two colours — cyan for "these are one and the same
+ * wrap", amber for counting one wrap after the next — and that is the family kept here.  But within a
+ * family every chain gets its own hue, because a second same winding means a second LAYER, and two
+ * layers drawn in one colour cannot be told apart on a card: which was the whole of what went wrong
+ * before.  The first chain of each kind keeps exactly the colour the kind always had.
+ *
+ * The blues around 200 are left out: that is the colour of the fitted wrap's line on a slice card,
+ * and an annotation must never be mistaken for the surface it is correcting.
+ */
+const SAME_HUES = [168, 132, 276, 316, 246, 104];
+const STEP_HUES = [32, 48, 16];
+
+export function chainColour(one: WindChain, alpha = 0.95) {
+  const kin = chainsOf(one.scan).filter((each) => each.kind === one.kind);
+  const at = Math.max(
+    0,
+    kin.findIndex((each) => each.id === one.id),
+  );
+  const hues = one.kind === "same" ? SAME_HUES : STEP_HUES;
+  return `hsla(${hues[at % hues.length]}, 100%, 60%, ${alpha})`;
 }
 
 export function chain(id: string) {

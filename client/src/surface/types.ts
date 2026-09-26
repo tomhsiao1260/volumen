@@ -23,6 +23,9 @@ export interface ChainSaid {
   id: string;
   rev: number;
   kind: "same" | "step";
+  // Which layer the person said this chain is on, or null to let the fit work it out.  Two chains
+  // with the same name are one wrap; two with different names are different wraps.
+  layer: string | null;
   // (z, y, x) and the wrap, in the order they were placed.
   points: { at: [number, number, number]; turn: number | null }[];
 }
@@ -117,7 +120,18 @@ export interface SurfaceFacts {
   // How many places a person held the sheets to, and how far the worst of them ended up.
   said: string;
   // The same chain by chain, for the list the person reads.
-  heard: { chain: string; sheet: number; sheets: number; used: number; of: number; worst: number }[];
+  heard: {
+    chain: string;
+    // Which wrap of the piece it was answered on, counted from the wrap the piece was built on.  Two
+    // chains never share one: see `holdsFor`.
+    sheet: number;
+    sheets: number;
+    used: number;
+    of: number;
+    worst: number;
+    // How many wraps it had to be moved to keep off another chain's wrap; 0 for almost every chain.
+    moved: number;
+  }[];
   // Sheets are this many voxels apart at the seed, as the prediction has it.
   spacing: number;
   // Points across and down the piece of sheet, and their spacing in voxels.

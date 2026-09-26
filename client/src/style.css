@@ -911,6 +911,35 @@ button:focus-visible,
   background: #ffaa32;
 }
 
+/*
+ * Which layer a chain is on, by name: a dot while the surface is left to decide, a letter once the
+ * person has said, and boxed then so that a thing they said never looks like a thing that was found.
+ */
+.rail-anno-layer {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #8d95a3;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+.rail-anno-layer:hover {
+  color: #e8ecf2;
+}
+
+.rail-anno-layer.said {
+  color: #e8ecf2;
+  box-shadow: inset 0 0 0 1px #5a6472;
+}
+
 .rail-anno-off {
   flex: none;
   padding: 0 4px;
@@ -925,13 +954,17 @@ button:focus-visible,
   color: #e8ecf2;
 }
 
-/* A chain that says "the same sheet" wears the colour VC3D gives it. */
-.rail-anno-on.same {
-  border-color: #32ffd7;
+/*
+ * The dot before a chain's row wears that chain's own colour, which is the colour its points are
+ * drawn in on every card — so the row and the papyrus can be read against each other.  The colour
+ * comes from the component, since it is worked out per chain.
+ */
+.rail-anno-on {
+  border-color: var(--chain);
 }
 
-.rail-anno-on.same.on {
-  background: #32ffd7;
+.rail-anno-on.on {
+  background: var(--chain);
 }
 
 /* The row the pointer is over; its chain is drawn loudly on the cards at the same time. */

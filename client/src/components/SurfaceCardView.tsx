@@ -20,7 +20,7 @@ import { surfaceEngine } from "../surface/engine";
 import { setDrawnDots, setSpots } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { SPAN } from "../surface/types";
-import { chainsOf, watchChains } from "../surface/windings";
+import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { drawDot, drawMark, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
@@ -536,7 +536,7 @@ export function SurfaceCardView({
     if (shown.current !== undefined) {
       drawnDots.current = [];
       for (const one of chainsOf(scan)) {
-        const colour = one.kind === "same" ? SAME_DOT : STEP_DOT;
+        const colour = chainColour(one);
         const loud = one.id === lit || one.id === picked?.chain;
         for (const point of one.points) {
           const found = dots.current.get(point.id);

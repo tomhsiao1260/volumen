@@ -61,6 +61,8 @@ export function App() {
 
   // A drag reads the state between renders, and the store serializes it when a save is due.
   const latest = useRef<BoardState>(state);
+  // How many winding points this session has placed, to keep their ids apart within a millisecond.
+  const placed = useRef(0);
   latest.current = state;
   const current = useCallback(() => latest.current, []);
   const sessionRef = useRef<Session | null>(null);
@@ -239,6 +241,7 @@ export function App() {
         id: one.id,
         rev: one.rev,
         kind: one.kind,
+        layer: one.layer ?? null,
         points: one.points.map((point) => ({
           at: [point.at.z, point.at.y, point.at.x] as [number, number, number],
           turn: point.turn,
@@ -306,11 +309,14 @@ export function App() {
     const scan = source === undefined ? "" : scanOf(source);
     if (scan === "") return;
     const drawing = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
-    // A chain says one thing: a point of another kind starts a chain of its own.
-    const open = drawing?.kind === kind ? drawing : undefined;
+    // A chain says one thing about one scan: a point of another kind, or on another scan, starts a
+    // chain of its own rather than being appended to whatever was open.
+    const open = drawing?.kind === kind && drawing.scan === scan ? drawing : undefined;
     const madeAt = Date.now();
+    // Two points placed in the same millisecond would otherwise share an id, and the surface cards
+    // keep their answers about points in one map keyed by it, across every chain.
     const point = {
-      id: `${madeAt}`,
+      id: `${madeAt}-${(placed.current += 1)}`,
       at: { x: at.x, y: at.y, z: at.z },
       // A chain that says "the same sheet" carries no wrap at all — that is what tells the fitter,
       // ours and the community's, which of the two things is being said.
@@ -325,6 +331,8 @@ export function App() {
             kind,
             points: [point],
             on: true,
+            // Left to the fit until the person says which layer it is on.
+            layer: null,
             note: "",
             author: "",
             rev: 0,
@@ -414,6 +422,10 @@ export function App() {
               .sort((a, b) => a - b);
             if (ws.length > 0) dispatch({ type: "setSurfaceLayer", id: card.id, w: Math.round(ws[ws.length >> 1]) });
           }
+        }}
+        onLayer={(id: string, layer: string | null) => {
+          const one = chain(id);
+          if (one !== undefined) setChain({ ...one, layer });
         }}
         onRemove={(id) => {
           forgetChain(id);

@@ -39,6 +39,9 @@ export interface WindChain {
   points: WindPoint[];
   // Turned off, to see what it was doing.  Off is not deleted: the chain is still a record.
   on: boolean;
+  // Which layer the person said this chain is on, as a name: same name, same wrap; different names,
+  // different wraps; null leaves it to the fit.
+  layer: string | null;
   note: string;
   author: string;
   // Raised on every change; the higher revision wins a merge.
@@ -89,6 +92,7 @@ export function parseChain(value: any, scan: string): WindChain | undefined {
     kind: value.kind === "same" ? "same" : "step",
     points,
     on: value.on !== false,
+    layer: text(value.layer) === "" ? null : text(value.layer).slice(0, 8),
     note: text(value.note),
     author: text(value.author),
     rev: Math.max(0, Math.round(number(value.rev, 0))),

@@ -225,8 +225,14 @@ export function boardReducer(
     }
 
     case "setTool":
-      // Changing tool closes whatever chain was being drawn, and lets go of any point.
-      return state.tool === action.tool
+      /*
+       * Picking a tool closes whatever chain was being drawn, and lets go of any point — including
+       * when it is the tool already picked.  Pressing Q a second time is how a person says "that
+       * winding is finished, the next one is another one", and while it did nothing the points of the
+       * second winding were quietly appended to the first, which the fit then had to pass a single
+       * wrap through twice over.
+       */
+      return state.tool === action.tool && state.adding === undefined && state.picked === undefined
         ? state
         : { ...state, tool: action.tool, adding: undefined, picked: undefined };
 
