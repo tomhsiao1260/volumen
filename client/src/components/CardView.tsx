@@ -76,6 +76,13 @@ const STEP_EDGE = "rgba(20, 14, 6, 0.7)";
 // A point taken hold of is drawn larger, by the same amount VC3D uses for the same thing.
 const HELD_LARGER = 1.4;
 
+/*
+ * How far apart the wraps are, in voxels, until a surface card of this scan has measured it.  On the
+ * scans this reads — 2.4 to 8 µm a voxel — a wrap is of this order, and it is only used to decide how
+ * far from a slice an annotation is still about the papyrus in front of you.
+ */
+const WRAP_GUESS = 50;
+
 export function drawDot(
   context: CanvasRenderingContext2D,
   x: number,
@@ -95,7 +102,7 @@ export function drawDot(
   loud = true,
 ) {
   context.save();
-  context.globalAlpha = near * (loud ? 1 : 0.5);
+  context.globalAlpha = near * (loud ? 1 : 0.42);
   if (held) {
     context.beginPath();
     context.arc(x, y, 9 * density, 0, 2 * Math.PI);
@@ -104,7 +111,7 @@ export function drawDot(
     context.stroke();
   }
   context.beginPath();
-  context.arc(x, y, (loud ? 4.2 : 3) * (held ? HELD_LARGER : 1) * density, 0, 2 * Math.PI);
+  context.arc(x, y, (loud ? 4.2 : 2.6) * (held ? HELD_LARGER : 1) * density, 0, 2 * Math.PI);
   context.strokeStyle = STEP_EDGE;
   context.lineWidth = (loud ? 3.2 : 2.2) * density;
   context.stroke();
@@ -401,13 +408,18 @@ export function CardView({
      * the only way to see what one says without reading it back out of a file.
      *
      * A point away from this slice fades with how far away it is, and is not drawn at all once it is
-     * further than a quarter of what the card can see.  Drawn all alike, a point three hundred
-     * voxels behind the slice looks exactly like one on it — and a chain laid along a sheet on one
-     * card then reads, on a card cut the other way, as a chain climbing straight across the sheets,
-     * when all that has happened is that the axis it was drawn along has been flattened away.
+     * half a wrap away.  Drawn all alike, a point three hundred voxels behind the slice looks exactly
+     * like one on it — and a chain laid along a wrap on one card then reads, on a card cut the other
+     * way, as a chain climbing straight across the wraps, when all that has happened is that the axis
+     * it was drawn along has been flattened away.
+     *
+     * Half a wrap, rather than some fraction of the card, because that is the distance at which a
+     * place stops being about the papyrus in front of you: beyond it there is another wrap in the
+     * way.  Annotations drawn on three different slices of the same place would otherwise all land on
+     * every card at once, which is what a hundred of them look like.
      */
-    const seen = Math.max(canvas.clientWidth, canvas.clientHeight) * zoom;
-    const fade = Math.max(8, seen * 0.25);
+    const apart = sheetsOf(sourceId)[0]?.spacing ?? WRAP_GUESS;
+    const fade = apart / 2;
     drawnDots.current = [];
     for (const one of chainsOf(scan)) {
       if (one.points.length === 0) continue;

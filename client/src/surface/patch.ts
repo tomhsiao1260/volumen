@@ -289,30 +289,19 @@ function fitSheet(
   // fit from wandering onto a neighbouring sheet, and being on the neighbouring sheet is the very
   // thing being corrected.
   /*
-   * The nodes a held place speaks for may go where they are told, however far that is: the clamp is
-   * what keeps the fit from wandering onto a neighbouring sheet, and being on the neighbouring sheet
-   * is the very thing being corrected.  The place itself is pulled straight to where it was said to
-   * be; its neighbourhood is only let go, so that the springs can carry it and each node can then
-   * settle on the band it finds there.
+   * A node that was told where to be may go there, however far that is: the clamp is what keeps the
+   * fit from wandering onto a neighbouring wrap, and being on the neighbouring wrap is the very thing
+   * being corrected.
    *
-   * Only as far as is asked for, though.  A place the sheet already passes through wants no move, and
-   * freeing the grid around it would let that part of the fit wander for nothing — a person saying
-   * something the fit already agrees with should see their piece stay exactly as it was.
+   * Only the told nodes themselves, though — never the grid around them.  The clamp is measured from
+   * where this fit started, and it starts after `holdTo` has already carried the neighbourhood across;
+   * so the neighbourhood is clamped around its corrected place, which is what we want, and freeing it
+   * as well only buys it room to wander.  With a hundred and more places said on one card, freeing a
+   * neighbourhood around each of them released the clamp over the whole piece — and then the more a
+   * person said, the further the fit was free to drift from all of it.
    */
-  const free = new Float64Array(count);
-  if (holding.length > 0) {
-    const N = new Float64Array(count * 3);
-    resampleNormals(field, X, N, count, reference);
-    const asked = holding.map((one) => {
-      const o = one.node * 3;
-      return Math.abs(
-        (one.at[0] - X[o]) * N[o] + (one.at[1] - X[o + 1]) * N[o + 1] + (one.at[2] - X[o + 2]) * N[o + 2],
-      );
-    });
-    const want = new Float64Array(count);
-    spreadOf(grid, holding, want, free, asked);
-    for (let k = 0; k < count; k++) if (want[k] <= stray) free[k] = 0;
-  }
+  const free = new Uint8Array(count);
+  for (const one of holding) free[one.node] = 1;
   const most = Math.min(hu, hv);
   const diagonal = Math.hypot(hu, hv);
 
@@ -344,13 +333,13 @@ function fitSheet(
         const t = smooth[k];
         if (Number.isNaN(t)) continue;
         const o = k * 3;
-        const reach = free[k] > 0.05 ? most * 4 : most;
+        const reach = free[k] === 1 ? most * 4 : most;
         let move = Math.max(-reach, Math.min(reach, t * pull * 0.7));
         const drift =
           (X[o] + N[o] * move - start[o]) * N[o] +
           (X[o + 1] + N[o + 1] * move - start[o + 1]) * N[o + 1] +
           (X[o + 2] + N[o + 2] * move - start[o + 2]) * N[o + 2];
-        if (free[k] < 0.05 && Math.abs(drift) > stray) move += Math.sign(drift) * stray - drift;
+        if (free[k] === 0 && Math.abs(drift) > stray) move += Math.sign(drift) * stray - drift;
         X[o] += N[o] * move;
         X[o + 1] += N[o + 1] * move;
         X[o + 2] += N[o + 2] * move;
