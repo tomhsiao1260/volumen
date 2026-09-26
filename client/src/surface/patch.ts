@@ -190,6 +190,42 @@ const LOOK = 0.45;
 const NEXT_NEAREST = 0.6;
 const NEXT_FURTHEST = 1.5;
 /*
+ * How far either way the wrap spacing is measured at each node, of the estimate taken at the seed:
+ * far enough to see a wrap on each side, not so far that a crushed neighbourhood decides for a
+ * whole one.  And how far from that estimate a node's own answer is allowed to be, since a single
+ * reading in a damaged place should not scale that node's whole fit.
+ */
+const SPACING_REACH = 1.6;
+const SPACING_LEAST = 0.35;
+const SPACING_MOST = 2.2;
+
+/**
+ * How far apart the wraps are at each node of a sheet, measured along that node's own normal.
+ *
+ * The one number taken at the seed is not enough.  Measured over six places on Scroll 1, the wraps
+ * within a single card are 9 to 65 voxels apart while the seed said 38 or 43 — and every window and
+ * clamp in the fit is scaled by it.  Where it is too big, the search reaches past the halfway line
+ * between two wraps and the fit settles on the wrong one; where it is too small, the step to the
+ * next wrap falls short.  Each node knowing its own spacing is what keeps both inside the wrap they
+ * belong to.
+ */
+function spacingAt(
+  field: LasagnaField,
+  X: Float64Array,
+  N: Float64Array,
+  count: number,
+  spacing: number,
+  out: Float64Array,
+) {
+  const reach = spacing * SPACING_REACH;
+  const least = spacing * SPACING_LEAST, most = spacing * SPACING_MOST;
+  for (let k = 0; k < count; k++) {
+    const o = k * 3;
+    const here = field.spacingAt(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], reach);
+    out[k] = Number.isNaN(here) ? spacing : Math.min(most, Math.max(least, here));
+  }
+}
+/*
  * How far a sheet may drift, of its spacing, while it is fitted: from the base surface, which is a
  * guess made from the normals and has to be free to find the papyrus, and from a step, which has
  * already landed on the next sheet and only wants tidying.  Left as free as the base, a stepped
@@ -271,10 +307,15 @@ function fitSheet(
   field: LasagnaField,
   X: Float64Array,
   grid: PatchGrid,
-  spacing: number,
+  // How far apart the wraps are AT EACH NODE.  One number for the whole card is not enough: measured
+  // on Scroll 1 the wraps of a single card are 9 to 65 voxels apart, while the estimate taken in one
+  // small box at the seed said 38 or 43.  Everything here is scaled by it, and where the estimate is
+  // too big the search window and the drift clamp reach past the halfway line between two wraps —
+  // so the fit finds the wrap next door, calls it the nearest one, and the clamp holds it there.
+  // The springs then carry the whole neighbourhood across, so nothing is torn and nothing shows.
+  sp: Float64Array,
   reference: Vec3,
   wander = BASE_STRAY,
-  holding: Held[] = [],
 ) {
   const { nu, nv, hu, hv } = grid;
   const count = nu * nv;
@@ -283,25 +324,11 @@ function fitSheet(
   const moves = new Float64Array(count);
   const smooth = new Float64Array(count);
   const held = new Uint8Array(count);
-  const span = spacing * LOOK;
-  const stray = spacing * wander;
+  const span = (k: number) => sp[k] * LOOK;
+  const stray = (k: number) => sp[k] * wander;
   // A node that was told where to be may go there, however far that is: the clamp is what keeps the
   // fit from wandering onto a neighbouring sheet, and being on the neighbouring sheet is the very
   // thing being corrected.
-  /*
-   * A node that was told where to be may go there, however far that is: the clamp is what keeps the
-   * fit from wandering onto a neighbouring wrap, and being on the neighbouring wrap is the very thing
-   * being corrected.
-   *
-   * Only the told nodes themselves, though — never the grid around them.  The clamp is measured from
-   * where this fit started, and it starts after `holdTo` has already carried the neighbourhood across;
-   * so the neighbourhood is clamped around its corrected place, which is what we want, and freeing it
-   * as well only buys it room to wander.  With a hundred and more places said on one card, freeing a
-   * neighbourhood around each of them released the clamp over the whole piece — and then the more a
-   * person said, the further the fit was free to drift from all of it.
-   */
-  const free = new Uint8Array(count);
-  for (const one of holding) free[one.node] = 1;
   const most = Math.min(hu, hv);
   const diagonal = Math.hypot(hu, hv);
 
@@ -314,32 +341,22 @@ function fitSheet(
     if (sweep % 2 === 0 || sweep >= SWEEPS - 2) {
       for (let k = 0; k < count; k++) {
         const o = k * 3;
-        moves[k] = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span);
+        moves[k] = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span(k));
       }
       median3(moves, smooth, nu, nv);
-      /*
-       * And where a person has said the sheet passes, that is where it goes — after the median,
-       * which is there to vote down a single node that disagrees with its neighbours, and which
-       * would otherwise vote down exactly the node that has been told something.
-       */
-      for (const one of holding) {
-        const o = one.node * 3;
-        smooth[one.node] =
-          (one.at[0] - X[o]) * N[o] + (one.at[1] - X[o + 1]) * N[o + 1] + (one.at[2] - X[o + 2]) * N[o + 2];
-      }
     }
     if (pull > 0) {
       for (let k = 0; k < count; k++) {
         const t = smooth[k];
         if (Number.isNaN(t)) continue;
         const o = k * 3;
-        const reach = free[k] === 1 ? most * 4 : most;
-        let move = Math.max(-reach, Math.min(reach, t * pull * 0.7));
+        let move = Math.max(-most, Math.min(most, t * pull * 0.7));
         const drift =
           (X[o] + N[o] * move - start[o]) * N[o] +
           (X[o + 1] + N[o + 1] * move - start[o + 1]) * N[o + 1] +
           (X[o + 2] + N[o + 2] * move - start[o + 2]) * N[o + 2];
-        if (free[k] === 0 && Math.abs(drift) > stray) move += Math.sign(drift) * stray - drift;
+        const loose = stray(k);
+        if (Math.abs(drift) > loose) move += Math.sign(drift) * loose - drift;
         X[o] += N[o] * move;
         X[o + 1] += N[o + 1] * move;
         X[o + 2] += N[o + 2] * move;
@@ -416,7 +433,7 @@ function nextSheet(
   X: Float64Array,
   grid: PatchGrid,
   dir: 1 | -1,
-  spacing: number,
+  sp: Float64Array,
   reference: Vec3,
 ) {
   const { nu, nv } = grid;
@@ -440,13 +457,13 @@ function nextSheet(
       N[o] * dir,
       N[o + 1] * dir,
       N[o + 2] * dir,
-      spacing * NEXT_NEAREST,
-      spacing * NEXT_FURTHEST,
+      sp[k] * NEXT_NEAREST,
+      sp[k] * NEXT_FURTHEST,
     );
   }
   median3(moves, smooth, nu, nv);
   for (let k = 0; k < count; k++) {
-    const move = Number.isNaN(smooth[k]) ? spacing : smooth[k];
+    const move = Number.isNaN(smooth[k]) ? sp[k] : smooth[k];
     const o = k * 3;
     for (let c = 0; c < 3; c++) out[o + c] = X[o + c] + N[o + c] * dir * move;
   }
@@ -460,13 +477,8 @@ function nextSheet(
  * is how many voxels apart the sheets are here, which sets the whole patch's scale.
  */
 /*
- * A place a person has said one of the sheets passes through, and the grid node nearest it.  How far
- * the correction reaches across the grid, and how many rounds of pulling and letting the grid answer
- * back: a person points at one place and means the papyrus around it, but not the whole card.
+ * A place a person has said one of the wraps passes through, and the grid node nearest it.
  */
-const HOLD_REACH = 9;
-const HOLD_ROUNDS = 6;
-
 interface Held {
   // Which chain said it, so that the piece can answer each one separately.
   chain: string;
@@ -475,95 +487,73 @@ interface Held {
 }
 
 /*
- * How much of the grid each held place speaks for: 1 at the place itself, nothing at `HOLD_REACH`
- * grid steps away.  A person pointing at the papyrus means the papyrus, not the node — and a piece
- * that has jumped has jumped over a region, so a correction that moved one node and left its
- * neighbours a sheet away would only tear the grid.  Spread, never averaged: where two places reach
- * the same node the nearer one has it, since halfway between two sheets is the one certainly wrong
- * answer.
+ * How far a thing said reaches across the grid, in wraps, and how long the field is relaxed for.  A
+ * person pointing at the papyrus means the papyrus around it — about a wrap of it — and not the
+ * whole card.
  */
-function spreadOf(grid: PatchGrid, held: Held[], want: Float64Array, firm: Float64Array, offsets: number[]) {
-  const { nu, nv } = grid;
-  want.fill(0);
-  firm.fill(0);
-  const reach = Math.ceil(HOLD_REACH);
-  held.forEach((one, k) => {
-    const gi = Math.floor(one.node / nu), gj = one.node % nu;
-    for (let i = Math.max(0, gi - reach); i <= Math.min(nv - 1, gi + reach); i++)
-      for (let j = Math.max(0, gj - reach); j <= Math.min(nu - 1, gj + reach); j++) {
-        const away = Math.hypot(i - gi, j - gj) / HOLD_REACH;
-        if (away > 1) continue;
-        const weight = (1 - away * away) ** 2;
-        const node = i * nu + j;
-        if (weight > firm[node]) {
-          firm[node] = weight;
-          want[node] = offsets[k];
-        }
-      }
-  });
-}
+const SAID_REACH = 1;
+const SAID_PASSES = 80;
+/*
+ * And how many times the correction and the grid answer each other before the fit starts.  Once is
+ * not enough in either direction: a wrap moved onto a place and handed straight over is pulled back
+ * off it by the springs, which have no opposition until the fit's own pull has grown; and a wrap
+ * relaxed without the correction being put back simply returns to where it was.  Alternating them
+ * converges on the shape that meets what was said and is still a grid.
+ */
+const SAID_ROUNDS = 6;
 
 /**
- * Moves a fitted sheet onto the places a person said it passes through.  Each held node is moved
- * along the normal to meet its place, the move is carried to the grid around it — falling off to
- * nothing at `HOLD_REACH` — and then the grid is pulled back into shape, a few times over.
+ * The correction a wrap needs to meet what was said, as a field over the whole grid: how far each
+ * node should move along its normal.
  *
- * The moves are spread, never averaged.  Two sheets' worth of disagreement averaged is the gap
- * between them, which is the one answer that is certainly wrong; so where two places reach the same
- * node, the nearer one has it.
+ * The nodes that were told take the distance to their place exactly.  Every other node solves
+ * ∇²u = u/λ², with λ one wrap — so the correction is smooth everywhere, has no seam anywhere, and
+ * dies away over about a wrap.  That is the whole of what an annotation does now.
+ *
+ * It used to do five things: it was spread by nearest-wins over a radius in grid steps, pushed in by
+ * six rounds of springs and smoothing, written over the median that the fit uses to vote down a lone
+ * disagreeing node, and it released the drift clamp around itself.  With a hundred places said on one
+ * card those five fought each other — nearest-wins cut the card into a hundred cells with a step at
+ * every boundary, and the released clamps between them left the fit free to drift from all of it.
+ * Measured on the user's own card, the first two things said made the piece flatter and the rest made
+ * it worse than saying nothing at all (`pup/flatter.cjs`).
+ *
+ * Now it is a starting point and nothing else.  The fit that follows is the fit that runs when
+ * nobody has said anything, with all three of its safeguards — a step no longer than the grid, a
+ * drift clamp, and the median — doing exactly what they do the rest of the time.
  */
-function holdTo(
-  field: LasagnaField,
-  X: Float64Array,
+function saidField(
   grid: PatchGrid,
-  reference: Vec3,
+  sp: Float64Array,
   held: Held[],
+  X: Float64Array,
+  N: Float64Array,
+  u: Float64Array,
 ) {
   const { nu, nv, hu, hv } = grid;
   const count = nu * nv;
-  const N = new Float64Array(count * 3);
-  const want = new Float64Array(count);
-  const firm = new Float64Array(count);
-  const diagonal = Math.hypot(hu, hv);
-  for (let round = 0; round < HOLD_ROUNDS; round++) {
-    resampleNormals(field, X, N, count, reference);
-    spreadOf(
-      grid,
-      held,
-      want,
-      firm,
-      held.map((one) => {
-        const o = one.node * 3;
-        return (
-          (one.at[0] - X[o]) * N[o] + (one.at[1] - X[o + 1]) * N[o + 1] + (one.at[2] - X[o + 2]) * N[o + 2]
-        );
-      }),
-    );
-    for (let k = 0; k < count; k++) {
-      if (firm[k] === 0) continue;
-      const o = k * 3;
-      const move = want[k] * firm[k] * 0.8;
-      X[o] += N[o] * move;
-      X[o + 1] += N[o + 1] * move;
-      X[o + 2] += N[o + 2] * move;
-    }
-    for (let pass = 0; pass < 2; pass++)
-      for (let i = 0; i < nv; i++)
-        for (let j = 0; j < nu; j++) {
-          const k = i * nu + j;
-          if (j + 1 < nu) holdEdge(X, k, k + 1, hu, 0.6);
-          if (i + 1 < nv) holdEdge(X, k, k + nu, hv, 0.6);
-          if (i + 1 < nv && j + 1 < nu) holdEdge(X, k, k + nu + 1, diagonal, 0.3);
-          if (i + 1 < nv && j > 0) holdEdge(X, k, k + nu - 1, diagonal, 0.3);
-        }
-    // Carried outward, so that a place held is a piece of papyrus moved and not a spike in the grid.
-    for (const [di, dj] of [[0, 1], [1, 0]] as const)
-      for (let i = di; i < nv - di; i++)
-        for (let j = dj; j < nu - dj; j++) {
-          const k = (i * nu + j) * 3, a = k - (di * nu + dj) * 3, b = k + (di * nu + dj) * 3;
-          for (let c = 0; c < 3; c++) X[k + c] += ((X[a + c] + X[b + c]) / 2 - X[k + c]) * 0.12;
-        }
+  const fixed = new Uint8Array(count);
+  u.fill(0);
+  for (const one of held) {
+    const o = one.node * 3;
+    u[one.node] =
+      (one.at[0] - X[o]) * N[o] + (one.at[1] - X[o + 1]) * N[o + 1] + (one.at[2] - X[o + 2]) * N[o + 2];
+    fixed[one.node] = 1;
   }
+  const step = (hu + hv) / 2;
+  for (let pass = 0; pass < SAID_PASSES; pass++)
+    for (let i = 0; i < nv; i++)
+      for (let j = 0; j < nu; j++) {
+        const k = i * nu + j;
+        if (fixed[k] === 1) continue;
+        // The grid's edge mirrors, so a correction reaching it is not pulled back to nothing.
+        const left = j > 0 ? u[k - 1] : u[k + 1];
+        const right = j + 1 < nu ? u[k + 1] : u[k - 1];
+        const above = i > 0 ? u[k - nu] : u[k + nu];
+        const below = i + 1 < nv ? u[k + nu] : u[k - nu];
+        const away = step / (sp[k] * SAID_REACH);
+        u[k] = (left + right + above + below) / (4 + away * away);
+      }
 }
 
 /**
@@ -666,29 +656,68 @@ export function buildPatch(
    * before there are sheets to compare it with, and working it out from the spacing instead is wrong
    * by a whole sheet two sheets out (`holdsFor`).
    */
+  // Each sheet's own spacing, measured again for every sheet just before it is fitted.
+  const sp = new Float64Array(count);
+  const spN = new Float64Array(count * 3);
+  // The correction what was said asks for, node by node, along the normal.
+  const u = new Float64Array(count);
+  const measure = (sheet: Float64Array) => {
+    resampleNormals(field, sheet, spN, count, n0);
+    spacingAt(field, sheet, spN, count, spacing, sp);
+  };
+
   const grow = (holds: Map<number, Held[]>) => {
     const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
     const offs: number[] = [];
     const said: { chain: string; away: number }[] = [];
-    const settle = (at: number, sheet: Float64Array) => {
+    /*
+     * What was said about this wrap, put in before it is fitted: the wrap is moved onto the places
+     * and then fitted from there, the same way it would be fitted from anywhere else.  Nothing about
+     * the fit changes; it is only started somewhere better.
+     */
+    const told = (at: number, sheet: Float64Array) => {
       const held = holds.get(at);
-      if (held === undefined || held.length === 0) return undefined;
-      // First the places are met and the grid around them carried along, then the whole sheet is
-      // fitted again still holding them, so that the papyrus either side comes with it.
-      holdTo(field, sheet, grid, n0, held);
-      const fitted = fitSheet(field, sheet, grid, spacing, n0, STEP_STRAY, held);
-      for (const one of held) {
+      if (held === undefined || held.length === 0) return;
+      measure(sheet);
+      const diagonal = Math.hypot(grid.hu, grid.hv);
+      for (let round = 0; round < SAID_ROUNDS; round++) {
+        resampleNormals(field, sheet, spN, count, n0);
+        // What is still wanted, from where the wrap is now: it shrinks as the places are met.
+        saidField(grid, sp, held, sheet, spN, u);
+        for (let k = 0; k < count; k++) {
+          const o = k * 3;
+          sheet[o] += spN[o] * u[k];
+          sheet[o + 1] += spN[o + 1] * u[k];
+          sheet[o + 2] += spN[o + 2] * u[k];
+        }
+        for (let pass = 0; pass < 2; pass++)
+          for (let i = 0; i < nv; i++)
+            for (let j = 0; j < nu; j++) {
+              const k = i * nu + j;
+              if (j + 1 < nu) holdEdge(sheet, k, k + 1, grid.hu, 0.6);
+              if (i + 1 < nv) holdEdge(sheet, k, k + nu, grid.hv, 0.6);
+              if (i + 1 < nv && j + 1 < nu) holdEdge(sheet, k, k + nu + 1, diagonal, 0.3);
+              if (i + 1 < nv && j > 0) holdEdge(sheet, k, k + nu - 1, diagonal, 0.3);
+            }
+      }
+    };
+    const answered = (at: number, sheet: Float64Array) => {
+      for (const one of holds.get(at) ?? []) {
         const o = one.node * 3;
         said.push({
           chain: one.chain,
           away: Math.hypot(sheet[o] - one.at[0], sheet[o + 1] - one.at[1], sheet[o + 2] - one.at[2]),
         });
       }
-      return fitted;
     };
 
     const middle = X.slice();
-    const first = settle(0, middle) ?? fitSheet(field, middle, grid, spacing, n0);
+    told(0, middle);
+    measure(middle);
+    // The base wrap keeps its own freedom whether or not anything was said about it: `baseSurface` is
+    // a guess made from the normals and needs the room to find the papyrus either way.
+    const first = fitSheet(field, middle, grid, sp, n0);
+    answered(0, middle);
     fillHoles(first.held, nu, nv);
     sheets.set(0, { X: middle, held: first.held });
     offs.push(first.off);
@@ -696,9 +725,12 @@ export function buildPatch(
     for (const dir of [1, -1] as const) {
       let from = middle;
       for (let k = 1; k <= K; k++) {
-        const next = nextSheet(field, from, grid, dir, spacing, n0);
-        let fitted = fitSheet(field, next, grid, spacing, n0, STEP_STRAY);
-        fitted = settle(k * dir, next) ?? fitted;
+        measure(from);
+        const next = nextSheet(field, from, grid, dir, sp, n0);
+        told(k * dir, next);
+        measure(next);
+        const fitted = fitSheet(field, next, grid, sp, n0, STEP_STRAY);
+        answered(k * dir, next);
         fillHoles(fitted.held, nu, nv);
         sheets.set(k * dir, { X: next, held: fitted.held });
         offs.push(fitted.off);
