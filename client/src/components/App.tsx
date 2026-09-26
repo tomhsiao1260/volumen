@@ -25,7 +25,7 @@ import {
   serialize,
 } from "../board/state";
 import { cssTransform, toBoard } from "../board/transform";
-import { sheetsOf } from "../surface/layers";
+import { drawnDotsOf, sheetsOf, spotsOf } from "../surface/layers";
 import { chain, chainsOf, forgetChain, loadChains, newChainId, setChain, watchChains } from "../surface/windings";
 import type { Point } from "viewer";
 import type { SurfaceFacts } from "../surface/types";
@@ -213,6 +213,13 @@ export function App() {
         },
         // What the surface cards have found, which a test can measure a piece against.
         sheets: (sourceId: string) => sheetsOf(sourceId),
+        // Where each winding point falls on a card's piece, as the card itself has it.
+        spots: (cardId: string) => Object.fromEntries(spotsOf(cardId)),
+        // And which of them it drew, the last time it drew.
+        drawnDots: (cardId: string) => drawnDotsOf(cardId),
+        get heard() {
+          return heardRef.current;
+        },
         dispatch,
       },
     });
@@ -249,6 +256,10 @@ export function App() {
    * last piece to be built winning, so that the list can say whether a chain was any use.
    */
   const [heard, setHeard] = useState<Record<string, SurfaceFacts["heard"][0]>>({});
+  const heardRef = useRef(heard);
+  useEffect(() => {
+    heardRef.current = heard;
+  }, [heard]);
   useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
 
   // Everything said about the scans the board is showing, for the list in the rail.
@@ -381,6 +392,28 @@ export function App() {
         onShow={(id, on) => {
           const one = chain(id);
           if (one !== undefined) setChain({ ...one, on });
+        }}
+        onGo={(id) => {
+          /*
+           * To the wrap this chain is on, taken from each card's own answers about its points — the
+           * very numbers that decide where the points are drawn, so what the card turns to and what
+           * it then shows cannot disagree.  The fit's `sheet` cannot be used for this: it counts from
+           * the wrap the piece was BUILT on, and turning the wheel within a built piece does not
+           * rebuild it, so moments later it is a wrap or two out.
+           */
+          const one = chain(id);
+          if (one === undefined) return;
+          for (const card of state.cards) {
+            if (card.kind !== "surface") continue;
+            const source = card.sourceId === null ? undefined : state.sources[card.sourceId];
+            if (source === undefined || scanOf(source) !== one.scan) continue;
+            const spots = spotsOf(card.id);
+            const ws = one.points
+              .map((point) => spots.get(point.id)?.w)
+              .filter((w): w is number => w !== undefined)
+              .sort((a, b) => a - b);
+            if (ws.length > 0) dispatch({ type: "setSurfaceLayer", id: card.id, w: Math.round(ws[ws.length >> 1]) });
+          }
         }}
         onRemove={(id) => {
           forgetChain(id);

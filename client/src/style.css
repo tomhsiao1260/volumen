@@ -171,8 +171,9 @@ button {
   left: 0;
   right: 0;
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 7px;
+  overflow: hidden;
   height: 22px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #aeb3c0;
@@ -884,12 +885,14 @@ button:focus-visible,
 }
 
 /* The two lines of a row: what it says, and what the surface made of it. */
+/* Clicking it turns the flattened cards to the wrap this chain is on. */
 .rail-anno-what {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 1px;
+  cursor: pointer;
 }
 
 /* Whether a chain is being used by the fit at all. */
@@ -952,4 +955,19 @@ button:focus-visible,
 
 .rail-anno-heard.crossed {
   color: #e0a34a;
+}
+
+/* Said when a surface card is resting between two wraps rather than on one, where the papyrus is
+   thin and the picture looks like a wrap full of pits. */
+.card-between {
+  flex: none;
+  color: #e0a34a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* The wrap and where the card is looking each keep their own line rather than being squeezed. */
+.card-layer,
+.card-between {
+  white-space: nowrap;
 }

@@ -117,7 +117,7 @@ export interface SurfaceFacts {
   // How many places a person held the sheets to, and how far the worst of them ended up.
   said: string;
   // The same chain by chain, for the list the person reads.
-  heard: { chain: string; sheet: number; sheets: number; worst: number }[];
+  heard: { chain: string; sheet: number; sheets: number; used: number; of: number; worst: number }[];
   // Sheets are this many voxels apart at the seed, as the prediction has it.
   spacing: number;
   // Points across and down the piece of sheet, and their spacing in voxels.

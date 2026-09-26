@@ -249,6 +249,19 @@ export function useBoardGestures({
        */
       if (!typing(event.target) && !event.metaKey && !event.ctrlKey && !event.altKey) {
         const key = event.key.toLowerCase();
+        /*
+         * Back onto the papyrus.  The wheel runs through the wraps without stopping, so a card is as
+         * often resting in the gap between two as on one — and a card resting in a gap looks like a
+         * wrap full of pits.
+         */
+        if (key === ".") {
+          for (const card of state().cards) {
+            const at = card.surface?.w;
+            if (at !== undefined && at !== Math.round(at)) {
+              dispatch({ type: "setSurfaceLayer", id: card.id, w: Math.round(at) });
+            }
+          }
+        }
         if (key === "v") dispatch({ type: "setTool", tool: "look" });
         if (key === "q") dispatch({ type: "setTool", tool: "same" });
         if (key === "e") dispatch({ type: "setTool", tool: "step" });

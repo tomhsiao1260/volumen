@@ -94,13 +94,17 @@ export interface RailProps {
   // The chain the pointer is over, which the cards draw loudly while it is.
   lit: string | undefined;
   // What the pieces made of each chain, by chain id.
-  heard: Record<string, { sheet: number; sheets: number; worst: number }>;
+  heard: Record<string, { sheet: number; sheets: number; used: number; of: number; worst: number }>;
   onLit: (id: string | undefined) => void;
   onShow: (id: string, on: boolean) => void;
+  // Turns the flattened cards to the wrap this chain was answered on, which is how a person sees for
+  // themselves that the whole chain is one wrap: on that card the points are there, and on the next
+  // one along they are gone.
+  onGo: (id: string) => void;
   onRemove: (id: string) => void;
 }
 
-export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, onRemove }: RailProps) {
+export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, onGo, onRemove }: RailProps) {
   const [listing, setListing] = useState(false);
   const says = HINTS[tool];
   return (
@@ -161,7 +165,11 @@ export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, 
                 }
                 onClick={() => onShow(one.id, !one.on)}
               />
-              <span className="rail-anno-what">
+              <span
+                className="rail-anno-what"
+                title={heard[one.id]?.used ? "Show the wrap this is on" : undefined}
+                onClick={() => onGo(one.id)}
+              >
                 <span className="rail-anno-kind">
                   {one.kind === "same" ? "same winding" : "relative winding"} · {one.points.length} point
                   {one.points.length === 1 ? "" : "s"}
@@ -170,17 +178,31 @@ export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, 
                   {one.points.length < 2 && one.id !== adding ? " · not used" : ""}
                 </span>
                 {/*
-                  * What the surface made of it, which is the only thing that answers "is this one
-                  * any good": found all on one wrap, or spread across several — in which case it is
-                  * either a jump being corrected or a chain drawn across the wraps by mistake.
+                  * What became of it, read off the finished surface rather than the first guess.  A
+                  * same winding says "all of these are one wrap", so "on one wrap" is the surface
+                  * agreeing, and anything else — points still spread over two wraps, points it could
+                  * not reach at all — is the thing worth showing, because it is the annotation not
+                  * being obeyed.
                   */}
                 {heard[one.id] !== undefined && one.id !== adding && (
-                  <span className={`rail-anno-heard${heard[one.id].sheets === 1 ? "" : " crossed"}`}>
-                    {heard[one.id].sheets === 0
-                      ? "not on this surface"
-                      : heard[one.id].sheets > 1
-                        ? `across ${heard[one.id].sheets} wraps — check this one`
-                        : `on one wrap, ${Math.round(heard[one.id].worst)} voxels off`}
+                  <span
+                    className={`rail-anno-heard${
+                      heard[one.id].used < heard[one.id].of || heard[one.id].sheets > 1 ? " crossed" : ""
+                    }`}
+                  >
+                    {heard[one.id].used === 0
+                      ? "none of it is on this surface"
+                      : [
+                          heard[one.id].sheets > 1
+                            ? `still across ${heard[one.id].sheets} wraps`
+                            : "on one wrap",
+                          heard[one.id].used < heard[one.id].of
+                            ? `${heard[one.id].used} of ${heard[one.id].of} points`
+                            : undefined,
+                          `${Math.round(heard[one.id].worst)} voxels off`,
+                        ]
+                          .filter((part) => part !== undefined)
+                          .join(" · ")}
                   </span>
                 )}
               </span>

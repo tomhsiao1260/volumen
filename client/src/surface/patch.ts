@@ -104,9 +104,11 @@ export interface Patch extends PatchGrid {
    * itself, and this says whether what was said got through.
    */
   said: { chain: string; away: number }[];
-  // Per chain, which sheet of this piece it was answered on and how many different sheets its points
-  // were found on: one means the fit already agreed, more means it did not.
-  spread: { chain: string; sheet: number; sheets: number }[];
+  /*
+   * Per chain: which wrap of this piece it was answered on, how many different wraps its points were
+   * found on before it was listened to, and how many of its points this piece could use at all.
+   */
+  spread: { chain: string; sheet: number; sheets: number; used: number; of: number }[];
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
 }
@@ -235,6 +237,20 @@ function spacingAt(
  */
 const BASE_STRAY = 0.45;
 const STEP_STRAY = 0.22;
+/*
+ * And how far it may drift where a person has said where it passes.  The clamp is loose on the base
+ * wrap because `baseSurface` is only a guess made from the normals and the fit has to be free to go
+ * and find the papyrus.  Where somebody has said where the papyrus is, that reasoning is spent: the
+ * starting point is no longer a guess, and a loose clamp there is only room for the fit to undo what
+ * it was told.  Measured: with the base wrap left at 0.45 the fit walked back 23 voxels from places
+ * it had been given, which is most of the way to the next wrap.
+ */
+const TOLD_STRAY = 0.1;
+// How much of a node has to have come from a person before it counts as papyrus on their word alone.
+const SAID_IS_PAPYRUS = 0.5;
+const PIN_ROUNDS = 8;
+// Near enough that a place counts as met: well under one step of the grid, which is about six voxels.
+const PIN_CLOSE = 1;
 
 function resampleNormals(field: LasagnaField, X: Float64Array, N: Float64Array, count: number, reference: Vec3) {
   for (let k = 0; k < count; k++) {
@@ -315,7 +331,9 @@ function fitSheet(
   // The springs then carry the whole neighbourhood across, so nothing is torn and nothing shows.
   sp: Float64Array,
   reference: Vec3,
-  wander = BASE_STRAY,
+  // How far each node may drift from where this fit started, as a part of its own wrap spacing.  One
+  // number for the whole sheet, until a person has said something about part of it.
+  wander: number | Float64Array = BASE_STRAY,
 ) {
   const { nu, nv, hu, hv } = grid;
   const count = nu * nv;
@@ -325,7 +343,7 @@ function fitSheet(
   const smooth = new Float64Array(count);
   const held = new Uint8Array(count);
   const span = (k: number) => sp[k] * LOOK;
-  const stray = (k: number) => sp[k] * wander;
+  const stray = (k: number) => sp[k] * (typeof wander === "number" ? wander : wander[k]);
   // A node that was told where to be may go there, however far that is: the clamp is what keeps the
   // fit from wandering onto a neighbouring sheet, and being on the neighbouring sheet is the very
   // thing being corrected.
@@ -484,6 +502,8 @@ interface Held {
   chain: string;
   node: number;
   at: Vec3;
+  // The square of the grid it was last found over, so the next look can start there.
+  cell?: { i: number; j: number };
 }
 
 /*
@@ -493,6 +513,16 @@ interface Held {
  */
 const SAID_REACH = 1;
 const SAID_PASSES = 80;
+/*
+ * And how much further it reaches over papyrus the prediction had nothing to say about.  A hole is
+ * where the fit found no band at all — the wrap has dived into the gap, or the prediction is simply
+ * missing — and it is exactly where a person has something to add and nothing is arguing back.  So a
+ * correction carries across a hole rather than dying in the middle of it, which is what makes saying
+ * something at the edge of a pit close the pit.
+ */
+const SAID_OVER_HOLES = 3;
+// Of a wrap: how far from the piece a place may be and still be about it.
+const SAID_OF_PIECE = 1.5;
 /*
  * And how many times the correction and the grid answer each other before the fit starts.  Once is
  * not enough in either direction: a wrap moved onto a place and handed straight over is pulled back
@@ -525,19 +555,20 @@ const SAID_ROUNDS = 6;
 function saidField(
   grid: PatchGrid,
   sp: Float64Array,
-  held: Held[],
-  X: Float64Array,
-  N: Float64Array,
+  // The nodes that are to take a value exactly, and what each is to take.  Worked out by the caller
+  // from where the place falls on the wrap, not from the node, because a node is never quite under
+  // the place: see `placeValues`.
+  held: { node: number; value: number }[],
   u: Float64Array,
+  // Where the wrap was found to be on papyrus at all, from the piece built before anything was said.
+  papyrus: Uint8Array | undefined,
 ) {
   const { nu, nv, hu, hv } = grid;
   const count = nu * nv;
   const fixed = new Uint8Array(count);
   u.fill(0);
   for (const one of held) {
-    const o = one.node * 3;
-    u[one.node] =
-      (one.at[0] - X[o]) * N[o] + (one.at[1] - X[o + 1]) * N[o + 1] + (one.at[2] - X[o + 2]) * N[o + 2];
+    u[one.node] = one.value;
     fixed[one.node] = 1;
   }
   const step = (hu + hv) / 2;
@@ -551,9 +582,130 @@ function saidField(
         const right = j + 1 < nu ? u[k + 1] : u[k - 1];
         const above = i > 0 ? u[k - nu] : u[k + nu];
         const below = i + 1 < nv ? u[k + nu] : u[k - nu];
-        const away = step / (sp[k] * SAID_REACH);
+        const over = papyrus === undefined || papyrus[k] === 1 ? 1 : SAID_OVER_HOLES;
+        const away = step / (sp[k] * SAID_REACH * over);
         u[k] = (left + right + above + below) / (4 + away * away);
       }
+}
+
+/*
+ * The wrap's own normal at each node, from the grid rather than from the prediction.
+ *
+ * The predicted normal is what the wrap is built along, but it is not what the wrap IS: where the
+ * prediction is wrong — which is exactly where a person annotates — the two point different ways.
+ * Measuring a place against the predicted normal there reads as no distance at all while the papyrus
+ * is ten voxels away, so what a place is measured against, and the way the wrap is moved to meet it,
+ * are both taken from the surface the person is looking at.
+ */
+function surfaceNormals(X: Float64Array, nu: number, nv: number, out: Float64Array, towards: Vec3) {
+  const at = (k: number, c: number) => X[k * 3 + c];
+  for (let i = 0; i < nv; i++)
+    for (let j = 0; j < nu; j++) {
+      const k = i * nu + j;
+      const right = j + 1 < nu ? k + 1 : k, left = j > 0 ? k - 1 : k;
+      const below = i + 1 < nv ? k + nu : k, above = i > 0 ? k - nu : k;
+      const du = [0, 1, 2].map((c) => at(right, c) - at(left, c));
+      const dv = [0, 1, 2].map((c) => at(below, c) - at(above, c));
+      let n = [
+        du[1] * dv[2] - du[2] * dv[1],
+        du[2] * dv[0] - du[0] * dv[2],
+        du[0] * dv[1] - du[1] * dv[0],
+      ];
+      let length = Math.hypot(n[0], n[1], n[2]);
+      // A torn or missing corner leaves no triangle to take a normal from; the way the piece grows
+      // is the honest fallback there.
+      if (!(length > 1e-9)) {
+        n = [towards[0], towards[1], towards[2]];
+        length = Math.hypot(n[0], n[1], n[2]) || 1;
+      }
+      const sign = n[0] * towards[0] + n[1] * towards[1] + n[2] * towards[2] < 0 ? -1 : 1;
+      for (let c = 0; c < 3; c++) out[k * 3 + c] = (sign * n[c]) / length;
+    }
+}
+
+/*
+ * Where a place falls on a wrap: the square of the grid it is over, the nearest point of that square
+ * to it, and how far off the wrap it is along the wrap's own normal.
+ *
+ * This is the whole of the fix to what an annotation does.  Before, a place was tied to the nearest
+ * NODE and the wrap was moved until that node lay in the place's normal plane — which reads as a
+ * perfect answer while the surface between the nodes passes ten voxels away, because a node is on
+ * average half a grid step to the side of the place and the wrap is tilted there.  Measured on the
+ * user's own fifteen-point chain, every place was reported met exactly and four of them were seven
+ * to fourteen voxels off the surface being drawn (`pup/onewrap.cjs`).  A place is over a square, not
+ * at a node, so the square is what has to be moved.
+ */
+function onWrap(X: Float64Array, nu: number, nv: number, N: Float64Array, at: Vec3, hint?: { i: number; j: number }) {
+  let best:
+    | { corners: [number, number, number, number]; gap: number; away: number; over: boolean; i: number; j: number }
+    | undefined;
+  const look = (i: number, j: number) => {
+    const k0 = i * nu + j, k1 = k0 + 1, k2 = k0 + nu, k3 = k2 + 1;
+    for (const k of [k0, k1, k2, k3]) if (Number.isNaN(X[k * 3])) return;
+    const du = [0, 1, 2].map((c) => X[k1 * 3 + c] - X[k0 * 3 + c]);
+    const dv = [0, 1, 2].map((c) => X[k2 * 3 + c] - X[k0 * 3 + c]);
+    const d = [0, 1, 2].map((c) => at[c] - X[k0 * 3 + c]);
+    const a = du[0] * du[0] + du[1] * du[1] + du[2] * du[2];
+    const b = du[0] * dv[0] + du[1] * dv[1] + du[2] * dv[2];
+    const c2 = dv[0] * dv[0] + dv[1] * dv[1] + dv[2] * dv[2];
+    const det = a * c2 - b * b;
+    if (!(det > 1e-9)) return;
+    const p = d[0] * du[0] + d[1] * du[1] + d[2] * du[2];
+    const q = d[0] * dv[0] + d[1] * dv[1] + d[2] * dv[2];
+    // Where in the square the place sits, kept inside it: outside, the edge is the nearest the wrap
+    // comes, and that is the honest place to measure from.
+    const rawS = (c2 * p - b * q) / det, rawT = (a * q - b * p) / det;
+    const s = Math.min(1, Math.max(0, rawS));
+    const t = Math.min(1, Math.max(0, rawT));
+    const foot = [0, 1, 2].map((c) => X[k0 * 3 + c] + du[c] * s + dv[c] * t);
+    const away = Math.hypot(at[0] - foot[0], at[1] - foot[1], at[2] - foot[2]);
+    if (best !== undefined && away >= best.away) return;
+    // The normal of the square, taken from its corners so that it is the surface's and not the
+    // prediction's, and pointing the way the piece grows.
+    const n = [0, 1, 2].map(
+      (c) => (N[k0 * 3 + c] + N[k1 * 3 + c] + N[k2 * 3 + c] + N[k3 * 3 + c]) / 4,
+    );
+    const length = Math.hypot(n[0], n[1], n[2]) || 1;
+    best = {
+      corners: [k0, k1, k2, k3],
+      gap: ((at[0] - foot[0]) * n[0] + (at[1] - foot[1]) * n[1] + (at[2] - foot[2]) * n[2]) / length,
+      away,
+      // Whether the place is over the wrap at all, and not off the side of it.  Only the edge squares
+      // can fail this: everywhere else there is a square underneath.  A place off the side can never
+      // be met however hard the edge is pulled towards it, so it is neither used nor counted against
+      // the fit — it is simply not on this piece, which is what the list already says of it.
+      over: Math.abs(rawS - s) <= 1 && Math.abs(rawT - t) <= 1,
+      i,
+      j,
+    };
+  };
+  // Near where it was last time first, since a place does not move and the wrap only ever shifts a
+  // little; the whole grid only when that finds nothing it is over.
+  if (hint !== undefined) {
+    for (let i = Math.max(0, hint.i - 3); i <= Math.min(nv - 2, hint.i + 3); i++)
+      for (let j = Math.max(0, hint.j - 3); j <= Math.min(nu - 2, hint.j + 3); j++) look(i, j);
+    if (best !== undefined && best.away < Math.abs(best.gap) * 1.05 + 1e-6) return best;
+  }
+  best = undefined;
+  for (let i = 0; i + 1 < nv; i++) for (let j = 0; j + 1 < nu; j++) look(i, j);
+  return best;
+}
+
+/*
+ * What each told node should take, for the places held on one wrap: the square each place is over,
+ * and its four corners all taking the same distance.  Four corners taking one value moves the whole
+ * square by it, which moves the surface under the place by it — which is the thing that was wanted,
+ * and the thing that tying it to a node did not do.
+ */
+function placeValues(held: Held[], X: Float64Array, nu: number, nv: number, N: Float64Array) {
+  const out: { node: number; value: number }[] = [];
+  for (const one of held) {
+    const found = onWrap(X, nu, nv, N, one.at, one.cell);
+    if (found === undefined || !found.over) continue;
+    one.cell = { i: found.i, j: found.j };
+    for (const node of found.corners) out.push({ node, value: found.gap });
+  }
+  return out;
 }
 
 /**
@@ -575,14 +727,19 @@ function holdsFor(
   chains: ChainSaid[],
   sheets: Map<number, { X: Float64Array }>,
   count: number,
-  step: number,
+  // How far from any fitted wrap a place may be and still be about this piece.  It has to be more
+  // than a wrap: a person says something exactly where the fit has gone wrong, and where the fit has
+  // gone wrong there is no fitted wrap near the papyrus they are pointing at — the piece has dived
+  // into the gap or has nothing there at all.  Measured on the user's own card, a reach of three grid
+  // steps threw away ten of their forty-three places, and they were the ten in the pit.
+  reach: number,
   seed: Vec3,
 ) {
   const holds = new Map<number, Held[]>();
   // How many sheets of this piece each chain's points were found on before it was listened to.  One
   // is a chain the fit already agrees with; more than one is either the jump being corrected or a
   // chain drawn across the sheets by mistake, and the person is the only one who can tell which.
-  const spread: { chain: string; sheet: number; sheets: number }[] = [];
+  const spread: { chain: string; sheet: number; sheets: number; used: number; of: number }[] = [];
   const nearest = (at: Vec3) => {
     let sheet = 0, node = -1, away = Infinity;
     for (const [which, one] of sheets)
@@ -603,7 +760,7 @@ function holdsFor(
     const places = chain.points
       .map((point) => ({ at: point.at, ...nearest(point.at) }))
       // A place no sheet of this piece comes near is not on this piece at all.
-      .filter((one) => one.node >= 0 && one.away <= 3 * step)
+      .filter((one) => one.node >= 0 && one.away <= reach)
       .map((one) => ({
         ...one,
         seedAway: Math.hypot(one.at[0] - seed[0], one.at[1] - seed[1], one.at[2] - seed[2]),
@@ -611,7 +768,7 @@ function holdsFor(
     if (places.length < 2) {
       // Nothing of it is near this piece.  Saying so is the difference between an annotation that
       // does nothing and an annotation that looks exactly like one that does.
-      spread.push({ chain: chain.id, sheet: 0, sheets: 0 });
+      spread.push({ chain: chain.id, sheet: 0, sheets: 0, used: places.length, of: chain.points.length });
       continue;
     }
     const anchor = places.reduce((best, one) => (one.seedAway < best.seedAway ? one : best));
@@ -619,6 +776,8 @@ function holdsFor(
       chain: chain.id,
       sheet: anchor.sheet,
       sheets: new Set(places.map((place) => place.sheet)).size,
+      used: places.length,
+      of: chain.points.length,
     });
     const said = holds.get(anchor.sheet) ?? [];
     for (const place of places) said.push({ chain: chain.id, node: place.node, at: place.at });
@@ -659,6 +818,8 @@ export function buildPatch(
   // Each sheet's own spacing, measured again for every sheet just before it is fitted.
   const sp = new Float64Array(count);
   const spN = new Float64Array(count * 3);
+  // And the wrap's own, which is what places are measured against and moved along.
+  const surfN = new Float64Array(count * 3);
   // The correction what was said asks for, node by node, along the normal.
   const u = new Float64Array(count);
   const measure = (sheet: Float64Array) => {
@@ -666,7 +827,7 @@ export function buildPatch(
     spacingAt(field, sheet, spN, count, spacing, sp);
   };
 
-  const grow = (holds: Map<number, Held[]>) => {
+  const grow = (holds: Map<number, Held[]>, before?: Map<number, { held: Uint8Array }>) => {
     const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
     const offs: number[] = [];
     const said: { chain: string; away: number }[] = [];
@@ -675,20 +836,26 @@ export function buildPatch(
      * and then fitted from there, the same way it would be fitted from anywhere else.  Nothing about
      * the fit changes; it is only started somewhere better.
      */
-    const told = (at: number, sheet: Float64Array) => {
+    /*
+     * Moves a wrap onto what was said, and answers how tightly each node should then be held.  The
+     * second is the same field as the first, solved once more with every told place worth one: it is
+     * how much of this node's position came from a person rather than from the guess it started as.
+     */
+    const told = (at: number, sheet: Float64Array, wander: Float64Array, firm: Float64Array) => {
       const held = holds.get(at);
       if (held === undefined || held.length === 0) return;
+      const papyrus = before?.get(at)?.held;
       measure(sheet);
       const diagonal = Math.hypot(grid.hu, grid.hv);
       for (let round = 0; round < SAID_ROUNDS; round++) {
-        resampleNormals(field, sheet, spN, count, n0);
+        surfaceNormals(sheet, nu, nv, surfN, n0);
         // What is still wanted, from where the wrap is now: it shrinks as the places are met.
-        saidField(grid, sp, held, sheet, spN, u);
+        saidField(grid, sp, placeValues(held, sheet, nu, nv, surfN), u, papyrus);
         for (let k = 0; k < count; k++) {
           const o = k * 3;
-          sheet[o] += spN[o] * u[k];
-          sheet[o + 1] += spN[o + 1] * u[k];
-          sheet[o + 2] += spN[o + 2] * u[k];
+          sheet[o] += surfN[o] * u[k];
+          sheet[o + 1] += surfN[o + 1] * u[k];
+          sheet[o + 2] += surfN[o + 2] * u[k];
         }
         for (let pass = 0; pass < 2; pass++)
           for (let i = 0; i < nv; i++)
@@ -700,24 +867,93 @@ export function buildPatch(
               if (i + 1 < nv && j > 0) holdEdge(sheet, k, k + nu - 1, diagonal, 0.3);
             }
       }
+      surfaceNormals(sheet, nu, nv, surfN, n0);
+      // One at every told node asks for the shape of the field rather than the correction, which
+      // comes out as how much of each node's position came from a person rather than from the guess.
+      saidField(
+        grid,
+        sp,
+        placeValues(held, sheet, nu, nv, surfN).map((one) => ({ ...one, value: 1 })),
+        u,
+        papyrus,
+      );
+      for (let k = 0; k < count; k++) {
+        firm[k] = Math.max(0, Math.min(1, u[k]));
+        wander[k] = wander[k] - (wander[k] - TOLD_STRAY) * firm[k];
+      }
     };
+
+    /*
+     * And where a person has said the wrap passes, there is papyrus — whatever the prediction has to
+     * say about it.  A pit on the card is exactly a place the prediction has nothing to say; if the
+     * only way to fill one were for the prediction to change its mind, saying so by hand could never
+     * close a pit, which is the one thing a person most wants to do about one.
+     */
+    const covers = (firm: Float64Array, held: Uint8Array) => {
+      for (let k = 0; k < count; k++) if (firm[k] > SAID_IS_PAPYRUS) held[k] = 1;
+    };
+    /*
+     * And last of all, the places are met exactly.
+     *
+     * An annotation is not a suggestion to the fit.  A person looking at the papyrus and saying "the
+     * wrap goes through here" knows something the prediction does not, and a tool that treats that as
+     * one more term to be balanced against the others gives them the one experience that makes a tool
+     * useless: they say the same thing over and over and the line will not move.  So the fit runs,
+     * with what was said as its starting point so that it settles somewhere sensible, and then every
+     * told node is put exactly where it was told and the leftover is carried away smoothly by the
+     * same field that carried the correction in — harmonic, so the papyrus around it bends once and
+     * gently rather than kinking at the node.
+     *
+     * Nothing moves the wrap after this.  Whatever the fit would have preferred, the places said are
+     * where it passes.
+     */
+    const pin = (at: number, sheet: Float64Array) => {
+      const told = holds.get(at);
+      if (told === undefined || told.length === 0) return;
+      measure(sheet);
+      // Over and over: moving the wrap bends it a little, so each pass lands nearer than the last.
+      // It stops early when every place is within a voxel, which is well under one step of the grid.
+      for (let round = 0; round < PIN_ROUNDS; round++) {
+        surfaceNormals(sheet, nu, nv, surfN, n0);
+        const values = placeValues(told, sheet, nu, nv, surfN);
+        if (values.every((one) => Math.abs(one.value) < PIN_CLOSE)) break;
+        saidField(grid, sp, values, u, undefined);
+        for (let k = 0; k < count; k++) {
+          const o = k * 3;
+          sheet[o] += surfN[o] * u[k];
+          sheet[o + 1] += surfN[o + 1] * u[k];
+          sheet[o + 2] += surfN[o + 2] * u[k];
+        }
+      }
+    };
+
+    /*
+     * How far the wrap ended from each place: the distance to the surface itself, over the squares of
+     * the grid.  Not the distance to the nearest node, which is a grid step even when the place is
+     * met exactly, and not the distance along the normal at a node, which is what `pin` sets to zero
+     * and so can only ever report success.  A number that cannot say no is not a measurement.
+     */
     const answered = (at: number, sheet: Float64Array) => {
-      for (const one of holds.get(at) ?? []) {
-        const o = one.node * 3;
-        said.push({
-          chain: one.chain,
-          away: Math.hypot(sheet[o] - one.at[0], sheet[o + 1] - one.at[1], sheet[o + 2] - one.at[2]),
-        });
+      const told = holds.get(at);
+      if (told === undefined || told.length === 0) return;
+      surfaceNormals(sheet, nu, nv, surfN, n0);
+      for (const one of told) {
+        const found = onWrap(sheet, nu, nv, surfN, one.at, one.cell);
+        if (found !== undefined && found.over) said.push({ chain: one.chain, away: found.away });
       }
     };
 
     const middle = X.slice();
-    told(0, middle);
+    const wander = new Float64Array(count).fill(BASE_STRAY);
+    const firm = new Float64Array(count);
+    told(0, middle, wander, firm);
     measure(middle);
     // The base wrap keeps its own freedom whether or not anything was said about it: `baseSurface` is
     // a guess made from the normals and needs the room to find the papyrus either way.
-    const first = fitSheet(field, middle, grid, sp, n0);
+    const first = fitSheet(field, middle, grid, sp, n0, wander);
+    pin(0, middle);
     answered(0, middle);
+    covers(firm, first.held);
     fillHoles(first.held, nu, nv);
     sheets.set(0, { X: middle, held: first.held });
     offs.push(first.off);
@@ -727,10 +963,14 @@ export function buildPatch(
       for (let k = 1; k <= K; k++) {
         measure(from);
         const next = nextSheet(field, from, grid, dir, sp, n0);
-        told(k * dir, next);
+        const loose = new Float64Array(count).fill(STEP_STRAY);
+        const spoken = new Float64Array(count);
+        told(k * dir, next, loose, spoken);
         measure(next);
-        const fitted = fitSheet(field, next, grid, sp, n0, STEP_STRAY);
+        const fitted = fitSheet(field, next, grid, sp, n0, loose);
+        pin(k * dir, next);
         answered(k * dir, next);
+        covers(spoken, fitted.held);
         fillHoles(fitted.held, nu, nv);
         sheets.set(k * dir, { X: next, held: fitted.held });
         offs.push(fitted.off);
@@ -741,11 +981,20 @@ export function buildPatch(
   };
 
   let grown = grow(new Map());
-  let spread: { chain: string; sheet: number; sheets: number }[] = [];
+  let spread: { chain: string; sheet: number; sheets: number; used: number; of: number }[] = [];
   if (chains.length > 0) {
-    const found = holdsFor(chains, grown.sheets, count, Math.max(grid.hu, grid.hv), seed);
+    const found = holdsFor(chains, grown.sheets, count, spacing * SAID_OF_PIECE, seed);
     spread = found.spread;
-    if (found.holds.size > 0) grown = grow(found.holds);
+    if (found.holds.size > 0) {
+      grown = grow(found.holds, grown.sheets);
+      /*
+       * Asked again of the piece that listened.  What matters to the person who drew a chain is
+       * whether its points are all on one wrap NOW — that is the thing they said and the thing they
+       * can go and look at — not how many wraps they were scattered over before anything was done
+       * about it.
+       */
+      spread = holdsFor(chains, grown.sheets, count, spacing * SAID_OF_PIECE, seed).spread;
+    }
   }
   const { sheets, offs, said } = grown;
 
@@ -857,6 +1106,8 @@ export function patchFacts(patch: Patch) {
       chain: one.chain,
       sheet: one.sheet,
       sheets: one.sheets,
+      used: one.used,
+      of: one.of,
       worst: Math.max(
         0,
         ...patch.said.filter((each) => each.chain === one.chain).map((each) => each.away),

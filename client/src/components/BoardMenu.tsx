@@ -20,6 +20,7 @@ const SHORTCUTS: { keys: string; action: string }[] = [
   { keys: "Drag card corner", action: "Resize card" },
   { keys: "⌘/Ctrl + C, then V", action: "Paste linked copies" },
   { keys: "⛓ on a card", action: "Unlink card" },
+  { keys: ".", action: "Back onto the nearest wrap" },
   { keys: "V", action: "Move tool" },
   { keys: "Q", action: "Same-winding point" },
   { keys: "E", action: "Relative-winding point" },

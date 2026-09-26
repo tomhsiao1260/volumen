@@ -8,6 +8,8 @@
  * no number says it half as clearly.
  */
 
+import type { PieceSpot } from "./types";
+
 export interface Sheet {
   // The surface card showing it, and the scan it belongs to.
   cardId: string;
@@ -45,6 +47,37 @@ export function forgetSheet(cardId: string) {
 export function sheetsOf(sourceId: string | null) {
   if (sourceId === null) return [];
   return [...sheets.values()].filter((sheet) => sheet.sourceId === sourceId);
+}
+
+/*
+ * Where each winding point falls on a card's piece: the answers the card asked the worker for, one
+ * point at a time.  The card draws from these, and they are kept here too so the question the
+ * drawing answers by fading — is every point of this chain on one and the same sheet? — can also be
+ * asked in numbers rather than only seen.
+ */
+const spots = new Map<string, Map<string, PieceSpot>>();
+
+export function setSpots(cardId: string, found: Map<string, PieceSpot>) {
+  spots.set(cardId, new Map(found));
+}
+
+export function spotsOf(cardId: string) {
+  return spots.get(cardId) ?? new Map<string, PieceSpot>();
+}
+
+/*
+ * And which of them the card last drew.  A point is drawn when it is on the piece, inside the card,
+ * and near enough to the sheet the card is turned to; so this list, read at a known sheet, is the
+ * answer to "are all of these on this one sheet" in the same terms the eye gets it in.
+ */
+const drawn = new Map<string, { chain: string; point: string; x: number; y: number }[]>();
+
+export function setDrawnDots(cardId: string, dots: { chain: string; point: string; x: number; y: number }[]) {
+  drawn.set(cardId, dots);
+}
+
+export function drawnDotsOf(cardId: string) {
+  return drawn.get(cardId) ?? [];
 }
 
 export function watchSheets(listener: () => void) {

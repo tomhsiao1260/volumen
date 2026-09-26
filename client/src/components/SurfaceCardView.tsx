@@ -17,6 +17,7 @@ import { sourceLabel } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
+import { setDrawnDots, setSpots } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { SPAN } from "../surface/types";
 import { chainsOf, watchChains } from "../surface/windings";
@@ -351,9 +352,11 @@ export function SurfaceCardView({
                   }
                 } else if (event.spot === null) {
                   dots.current.delete(event.token);
+                  setSpots(id, dots.current);
                   setSpotted((count) => count + 1);
                 } else {
                   dots.current.set(event.token, event.spot);
+                  setSpots(id, dots.current);
                   setSpotted((count) => count + 1);
                 }
                 return;
@@ -568,6 +571,7 @@ export function SurfaceCardView({
           context.restore();
         }
       }
+      setDrawnDots(id, drawnDots.current);
     }
     if (wantedPlane.current === "uv" || shown.current === undefined) return;
     /*
@@ -830,12 +834,23 @@ export function SurfaceCardView({
       </div>
 
       <div className="card-bottom">
+        {/*
+          * Whole numbers are the papyrus, halves the gap between one wrap and the next.  It is worth
+          * saying out loud: the wheel moves through them without stopping, so a card is as often
+          * resting in a gap as on a wrap — and a card resting in a gap looks like a wrap full of
+          * pits, which is a fault of where you are standing and not of the flattening.
+          */}
         <span
           className={`card-layer${loading ? " loading" : ""}`}
-          title="Sheets from the one the card was opened on; whole numbers are sheets"
+          title="Wraps from the one this card was opened on; whole numbers are the papyrus, halves the gap between two wraps"
         >
           {formatLayer(w)}
         </span>
+        {Math.abs(w - Math.round(w)) > 0.15 && (
+          <span className="card-between" title="Whole numbers are the papyrus; press . to go to the nearest">
+            between wraps
+          </span>
+        )}
         <span className="card-centre">{formatVoxel(seed)}</span>
       </div>
     </div>
