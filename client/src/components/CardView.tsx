@@ -35,8 +35,15 @@ function distanceToSegment(x: number, y: number, ax: number, ay: number, bx: num
   return Math.hypot(x - (ax + dx * t), y - (ay + dy * t));
 }
 
-// How near the pointer has to be to a sheet's line to take hold of it, in the card's pixels.
+/*
+ * How near the pointer has to be to take hold of something, in the card's pixels: a winding point, and
+ * a sheet's line.  The line's reach is wider, because it is thin and it wanders, and hunting for the
+ * one pixel that will catch it is the sort of thing that makes a person give up and go and do it
+ * somewhere else.  With Shift held there is no hunting at all: the nearest line is taken, from
+ * wherever on the card the press lands.
+ */
 const GRAB = 7;
+const GRAB_LINE = 16;
 
 /**
  * Which way each plane is laid out, as indices into a point read as (z, y, x): across the view, down
@@ -56,13 +63,6 @@ const AXES: Record<ViewOrientation, [number, number, number]> = {
 const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
 const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
 
-/*
- * The marked voxel: a ring with four ticks, in a warm colour so that it is never taken for a sheet's
- * line.  Solid on the slice the mark is on, dashed and faint on a card looking at another slice —
- * where it says where the place is across the picture, but not that it is in it.
- */
-const MARK = "rgba(255, 205, 100, 0.95)";
-const MARK_EDGE = "rgba(20, 10, 0, 0.6)";
 
 /*
  * A winding annotation, in the colours VC3D gives the same two things (`SpiralPclRole.hpp`): cyan for
@@ -150,31 +150,6 @@ export function drawDot(
   context.restore();
 }
 
-export function drawMark(context: CanvasRenderingContext2D, x: number, y: number, density: number, here: boolean) {
-  const radius = 7 * density;
-  const gap = 2.5 * density;
-  const tick = 5 * density;
-  const path = () => {
-    context.beginPath();
-    context.arc(x, y, radius, 0, 2 * Math.PI);
-    for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-      context.moveTo(x + ax * (radius + gap), y + ay * (radius + gap));
-      context.lineTo(x + ax * (radius + gap + tick), y + ay * (radius + gap + tick));
-    }
-  };
-  context.save();
-  context.globalAlpha = here ? 1 : 0.5;
-  context.setLineDash(here ? [] : [3 * density, 3 * density]);
-  context.strokeStyle = MARK_EDGE;
-  context.lineWidth = 3.4 * density;
-  path();
-  context.stroke();
-  context.strokeStyle = MARK;
-  context.lineWidth = 1.4 * density;
-  path();
-  context.stroke();
-  context.restore();
-}
 
 export function formatVoxel({ x, y, z }: Point) {
   return `x ${Math.round(x)} · y ${Math.round(y)} · z ${Math.round(z)}`;
@@ -204,7 +179,6 @@ export interface CardViewProps {
   // How many cards move with this one, itself included.
   linked: number;
   // The voxel the group has marked, if it has one.
-  mark: Point | undefined;
   // The chain the person is pointing at in the list, drawn loud like the one they are working on.
   lit: string | undefined;
   // What a press on the data does, and the scan the annotations of this card are filed under.
@@ -220,7 +194,6 @@ export interface CardViewProps {
   onLooked: () => void;
   // Takes this card out of its group, keeping it where it is looking.
   onUnlink: () => void;
-  onMark: (at: Point | null) => void;
   // Puts a winding point down at this voxel, joining the chain being drawn or starting one.
   onPlace: (at: Point) => void;
   /*
@@ -251,7 +224,6 @@ export function CardView({
   hue,
   selected,
   linked,
-  mark,
   lit,
   tool,
   scan,
@@ -261,7 +233,6 @@ export function CardView({
   dispatch,
   onLooked,
   onUnlink,
-  onMark,
   onPlace,
   onJoin,
   onPick,
@@ -507,8 +478,8 @@ export function CardView({
           const [mx, my] = [((x1 + x2) / 2) * density, ((y1 + y2) / 2) * density];
           const arm = 2.6 * density;
           context.beginPath();
-          context.moveTo(mx - uy * arm - ux * arm * 0.35, my + ux * arm - uy * arm * 0.35);
-          context.lineTo(mx + uy * arm + ux * arm * 0.35, my - ux * arm + uy * arm * 0.35);
+          context.moveTo(mx - uy * arm, my + ux * arm);
+          context.lineTo(mx + uy * arm, my - ux * arm);
           context.lineWidth = 1.7 * density;
           context.stroke();
         }
@@ -540,22 +511,26 @@ export function CardView({
       });
     }
     setDrawnDots(card.id, drawnDots.current);
-    if (mark !== undefined) {
-      const point = [mark.z, mark.y, mark.x];
-      drawMark(
-        context,
-        (canvas.clientWidth / 2 + (point[across] - at[across]) / zoom) * density,
-        (canvas.clientHeight / 2 + (point[down] - at[down]) / zoom) * density,
-        density,
-        Math.abs(point[sliced] - at[sliced]) <= 0.5,
-      );
-    }
-  }, [sheetsMoved, chainsMoved, centre, mark, picked, over, lit, scan, orientation, sourceId, groupId, session, card.width, card.height]);
+  }, [
+    sheetsMoved,
+    chainsMoved,
+    centre,
+    picked,
+    over,
+    lit,
+    scan,
+    orientation,
+    sourceId,
+    groupId,
+    session,
+    card.width,
+    card.height,
+  ]);
 
   // The sheet's line under the pointer, in the card's own pixels.
-  const lineUnder = (x: number, y: number) => {
+  const lineUnder = (x: number, y: number, anywhere = false) => {
     let found;
-    let nearest = GRAB;
+    let nearest = anywhere ? Infinity : GRAB_LINE;
     for (const line of drawnLines.current) {
       for (let i = 0; i + 3 < line.points.length; i += 4) {
         const away = distanceToSegment(x, y, line.points[i], line.points[i + 1], line.points[i + 2], line.points[i + 3]);
@@ -594,9 +569,9 @@ export function CardView({
       return found;
     };
 
-    const lineUnder = (x: number, y: number) => {
+    const lineUnder = (x: number, y: number, anywhere = false) => {
       let found;
-      let nearest = GRAB;
+      let nearest = anywhere ? Infinity : GRAB_LINE;
       for (const line of drawnLines.current) {
         for (let i = 0; i + 3 < line.points.length; i += 4) {
           const away = distanceToSegment(x, y, line.points[i], line.points[i + 1], line.points[i + 2], line.points[i + 3]);
@@ -646,7 +621,8 @@ export function CardView({
         return;
       }
       onPickRef.current(undefined);
-      const line = lineUnder(event.clientX - box.left, event.clientY - box.top);
+      // Shift pulls the nearest sheet's line from wherever the press lands, without having to find it.
+      const line = lineUnder(event.clientX - box.left, event.clientY - box.top, event.shiftKey);
       if (line === undefined) return;
       const sheet = sheetsOf(sourceId).find((one) => one.cardId === line.cardId);
       if (sheet === undefined) return;
@@ -708,7 +684,10 @@ export function CardView({
         element.style.cursor = "crosshair";
         return;
       }
-      element.style.cursor = lineUnder(event.clientX - box.left, event.clientY - box.top) !== undefined ? "ns-resize" : "";
+      element.style.cursor =
+        lineUnder(event.clientX - box.left, event.clientY - box.top, event.shiftKey) !== undefined
+          ? "ns-resize"
+          : "";
     };
     const onPointerLeave = () => setOver(undefined);
 
@@ -802,7 +781,6 @@ export function CardView({
         // Double-clicking the data marks the voxel under the pointer for the whole group: the other
         // cards move to it and show it.  The board's own double-click, which adds a card, is only
         // for the space between cards.
-        onDoubleClick={() => tool === "look" && pointer !== undefined && onMark(pointer)}
         onContextMenu={(event) => {
           event.preventDefault();
           if (sourceId === null || pointer === undefined) return;

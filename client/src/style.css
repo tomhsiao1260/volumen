@@ -911,6 +911,14 @@ button:focus-visible,
   background: #ffaa32;
 }
 
+/* Said but not yet taken in: warm, so that it reads as something waiting rather than something wrong. */
+.card-waiting {
+  flex: none;
+  color: #ffcd64;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
 .rail-anno-off {
   flex: none;
   padding: 0 4px;

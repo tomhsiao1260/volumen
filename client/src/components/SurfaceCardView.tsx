@@ -21,7 +21,7 @@ import { setDrawnDots, setSpots } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { SPAN } from "../surface/types";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
-import { drawDot, drawMark, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
+import { drawDot, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
 
@@ -110,7 +110,6 @@ export interface SurfaceCardViewProps {
   hue: number;
   linked: number;
   // The voxel the group has marked, which this card shows on its own piece.
-  mark: Point | undefined;
   // What has been said about the sheets of this scan, and is settled enough to build on.
   chains: ChainSaid[];
   // What a press on the papyrus does, the scan the annotations are filed under, and the point held.
@@ -121,13 +120,16 @@ export interface SurfaceCardViewProps {
   lit: string | undefined;
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
-  onMark: (at: Point | null) => void;
   // Puts a winding point down at this voxel, and takes hold of one already down.
   onPlace: (at: Point) => void;
   // A press with a winding tool on a point already down: that place is on what is being drawn too,
   // so the chain it belongs to and the chain being drawn are one and the same winding.
   onJoin: (at: PickedPoint) => void;
   onPick: (picked: PickedPoint | undefined) => void;
+  // Whether anything has been said that this piece has not been told yet, which happens while a
+  // winding tool is in hand: the pieces are left alone then, so that a run of annotations is not
+  // interrupted by a rebuild after each one.
+  behind: boolean;
   // What this piece made of each chain it was told, once it is built.
   onHeard: (heard: SurfaceFacts["heard"]) => void;
 }
@@ -138,7 +140,6 @@ export function SurfaceCardView({
   selected,
   hue,
   linked,
-  mark,
   chains,
   tool,
   scan,
@@ -146,11 +147,11 @@ export function SurfaceCardView({
   lit,
   dispatch,
   onUnlink,
-  onMark,
   onPlace,
   onJoin,
   onPick,
   onHeard,
+  behind,
 }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -206,14 +207,12 @@ export function SurfaceCardView({
     wantedPlane.current = plane;
   }, [w, plane]);
   // The listener below is set up once, and what it should do with an answer may have changed since.
-  const onMarkRef = useRef(onMark);
   const onPlaceRef = useRef(onPlace);
   const onJoinRef = useRef(onJoin);
   const onPickRef = useRef(onPick);
   const onHeardRef = useRef(onHeard);
   const toolRef = useRef(tool);
   useEffect(() => {
-    onMarkRef.current = onMark;
     onPlaceRef.current = onPlace;
     onJoinRef.current = onJoin;
     onPickRef.current = onPick;
@@ -369,10 +368,10 @@ export function SurfaceCardView({
                 }
                 return;
               }
-              // The answer to "where is this place on your piece", or to "which voxel is this".
+              // The answer to "which voxel is this place of the frame", which nothing asks for any
+              // more, or to "where is this voxel on your piece".
               if (event.voxel !== null) {
-                const [z, y, x] = event.voxel;
-                onMarkRef.current({ x, y, z });
+                return;
               } else if (event.spot !== null) {
                 spot.current = event.spot;
                 setSpotted((count) => count + 1);
@@ -517,25 +516,8 @@ export function SurfaceCardView({
       element.height = height;
     }
     context.clearRect(0, 0, width, height);
-    /*
-     * The place the group has marked, where it falls in this frame.  Along u and v it is a fraction
-     * of the piece; across the sheets it is how far from the sheet this card is on, which is the
-     * middle of the cut (`mapping` in `render.ts`, the same way round).
-     */
-    const here = spot.current;
+    // Which wrap this card is on, which is what every distance through the papyrus is measured from.
     const sheet = shown.current ?? wanted.current;
-    if (here !== null && shown.current !== undefined) {
-      const across = 0.5 + (here.w - sheet) / (2 * SPAN);
-      const at =
-        wantedPlane.current === "uv"
-          ? [here.fu, here.fv]
-          : wantedPlane.current === "uw"
-            ? [here.fu, across]
-            : [across, here.fv];
-      if (at[0] >= 0 && at[0] <= 1 && at[1] >= 0 && at[1] <= 1) {
-        drawMark(context, at[0] * width, at[1] * height, density, Math.abs(here.w - sheet) <= 1 / 16);
-      }
-    }
     /*
      * The winding points, wherever they fall on this piece.  On a card of the sheet laid flat they
      * fade as the card turns away from the sheet they were put on — which is the plainest answer
@@ -545,7 +527,11 @@ export function SurfaceCardView({
       drawnDots.current = [];
       for (const one of chainsOf(scan)) {
         const colour = chainColour(one);
+        const apart = one.kind === "step";
         const loud = one.id === lit || one.id === picked?.chain;
+        // Where this chain's points landed on the card, so that a relative winding can be drawn as
+        // the link it is: the places it holds apart, joined, and the join cut through the middle.
+        const seen: { x: number; y: number }[] = [];
         for (const point of one.points) {
           const found = dots.current.get(point.id);
           if (found === undefined) continue;
@@ -557,12 +543,18 @@ export function SurfaceCardView({
                 ? [found.fu, across]
                 : [across, found.fv];
           if (at[0] < 0 || at[0] > 1 || at[1] < 0 || at[1] > 1) continue;
-          // On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
-          const near =
-            wantedPlane.current === "uv" ? Math.max(0, 1 - Math.abs(found.w - sheet) / 0.5) : 1;
+          /*
+           * On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
+           * A relative winding is the exception and fades only so far: its points are on different
+           * wraps — that is the whole of what it says — so fading them out by how far they are from
+           * this one would hide exactly the thing it was drawn to show.
+           */
+          const away = Math.max(0, 1 - Math.abs(found.w - sheet) / 0.5);
+          const near = wantedPlane.current !== "uv" ? 1 : apart ? Math.max(0.45, away) : away;
           if (near === 0) continue;
           const x = at[0] * width, y = at[1] * height;
           drawnDots.current.push({ chain: one.id, point: point.id, x: x / density, y: y / density });
+          seen.push({ x, y });
           context.save();
           if (!one.on) context.globalAlpha = 0.35;
           drawDot(
@@ -578,6 +570,29 @@ export function SurfaceCardView({
             one.kind === "step",
             loud,
           );
+          context.restore();
+        }
+        if (apart && seen.length > 1) {
+          context.save();
+          context.globalAlpha = one.on ? 0.85 : 0.35;
+          context.strokeStyle = colour;
+          context.lineWidth = 1.8 * density;
+          context.beginPath();
+          context.moveTo(seen[0].x, seen[0].y);
+          for (const place of seen.slice(1)) context.lineTo(place.x, place.y);
+          context.stroke();
+          for (let k = 0; k + 1 < seen.length; k++) {
+            const [a, b] = [seen[k], seen[k + 1]];
+            const far = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+            const [ux, uy] = [(b.x - a.x) / far, (b.y - a.y) / far];
+            const [mx, my] = [(a.x + b.x) / 2, (a.y + b.y) / 2];
+            const arm = 2.6 * density;
+            context.beginPath();
+            context.moveTo(mx - uy * arm, my + ux * arm);
+            context.lineTo(mx + uy * arm, my - ux * arm);
+            context.lineWidth = 1.7 * density;
+            context.stroke();
+          }
           context.restore();
         }
       }
@@ -611,20 +626,6 @@ export function SurfaceCardView({
   };
 
   useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked, over]);
-
-  /*
-   * Where the group's mark is on this piece.  Asked again whenever the mark moves or the piece is
-   * built, since only the worker knows the piece; the answer turns the card to the sheet it is on.
-   */
-  useEffect(() => {
-    if (mark === undefined) {
-      spot.current = null;
-      setSpotted((count) => count + 1);
-      return;
-    }
-    if (status !== "ready") return;
-    surfaceEngine().point(id, [mark.z, mark.y, mark.x]);
-  }, [id, mark, status]);
 
   /*
    * And where each winding point of this scan is on this piece.  Asked again whenever the points
@@ -876,6 +877,16 @@ export function SurfaceCardView({
         {Math.abs(w - Math.round(w)) > 0.15 && (
           <span className="card-between" title="Whole numbers are the papyrus; press . to go to the nearest">
             between wraps
+          </span>
+        )}
+        {/*
+          * Said but not yet taken in.  The piece is left alone while a winding tool is in hand, so
+          * that a run of annotations is not interrupted by a rebuild after each one — and a card that
+          * is quietly a few annotations out of date looks exactly like one that has ignored them.
+          */}
+        {behind && (
+          <span className="card-waiting" title="The surface is left alone while you are annotating">
+            Enter to take it in
           </span>
         )}
         <span className="card-centre">{formatVoxel(seed)}</span>

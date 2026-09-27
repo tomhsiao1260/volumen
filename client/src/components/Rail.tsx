@@ -80,9 +80,15 @@ const CHOICES: Choice[] = [
 
 // What the picked tool is for, said where the hand is.  A tool nobody can guess the use of is a tool
 // nobody uses, and this one is a sentence long.
+/*
+ * What each tool is for, in the words of what it does rather than of what it is called.  The flattened
+ * cards are left alone while a tool is in hand, so the hints say which key ends a run of annotations
+ * and which one only ends the chain — that being the difference between waiting for a rebuild after
+ * every mark and marking everything first.
+ */
 const HINTS: Partial<Record<Tool, string>> = {
-  same: "Click along one wrap · Enter finishes · click a point and press Delete to remove it",
-  step: "Click outward, one point on each wrap · Enter finishes · click a point and press Delete to remove it",
+  same: "Click along one wrap, or on a point of another to say they are the same wrap · Q ends this one · Enter is done",
+  step: "Click a point of one wrap and a point of another to say they are not the same · E ends this one · Enter is done",
 };
 
 export interface RailProps {

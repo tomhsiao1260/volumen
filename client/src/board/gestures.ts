@@ -238,9 +238,15 @@ export function useBoardGestures({
         dispatch({ type: "select", ids: [] });
         dispatch({ type: "setTool", tool: "look" });
       }
-      // A chain is finished without leaving the tool, so that the next point starts another.
+      /*
+       * Enter is "done": the chain is finished AND the tool is put down, which is what lets the pieces
+       * be built again — they are left alone while a winding tool is in hand, so that a run of
+       * annotations is not interrupted by a rebuild after each one.  Pressing the same tool again
+       * finishes a chain without putting the tool down, for when the next one follows straight on.
+       */
       if (event.key === "Enter" && !typing(event.target)) {
         dispatch({ type: "adding", chainId: undefined });
+        dispatch({ type: "setTool", tool: "look" });
       }
       /*
        * The tools, by the letters VC3D uses for the same things — V for the arrow, E for counting one

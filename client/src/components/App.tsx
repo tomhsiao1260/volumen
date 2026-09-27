@@ -28,7 +28,7 @@ import { cssTransform, toBoard } from "../board/transform";
 import { drawnDotsOf, sheetsOf, spotsOf } from "../surface/layers";
 import { chain, chainsOf, forgetChain, loadChains, newChainId, setChain, watchChains } from "../surface/windings";
 import type { Point } from "viewer";
-import type { SurfaceFacts } from "../surface/types";
+import type { ChainSaid, SurfaceFacts } from "../surface/types";
 import { BoardMenu } from "./BoardMenu";
 import { Rail } from "./Rail";
 import { CardView } from "./CardView";
@@ -233,9 +233,23 @@ export function App() {
    * of the person placing its points.  `chainsMoved` is what brings a change here: the store is not
    * React state, so the count is what makes the page look again.
    */
-  const said = (source: Source | undefined) => {
+  /*
+   * What the flattened cards are told, and WHEN.
+   *
+   * Building a piece takes seconds, and rebuilding it the moment each annotation is finished takes the
+   * card out from under the person in the middle of a run of them: they meant to mark four things and
+   * got one, then a wait, then a card that has moved.  So while a winding tool is in hand the pieces
+   * are left alone, whatever is drawn; going back to the arrow — V, or Escape — is what says "now look
+   * at what I said".  It also makes the moment of rebuilding a thing the person chose rather than a
+   * thing that happened to them.
+   */
+  const told = useRef(new Map<string, { chains: ChainSaid[]; at: number }>());
+  const said = (source: Source | undefined): ChainSaid[] => {
     if (source === undefined) return [];
-    return chainsOf(scanOf(source))
+    const scan = scanOf(source);
+    const frozen = told.current.get(scan);
+    if (state.tool !== "look" && frozen !== undefined) return frozen.chains;
+    return chainsOf(scan)
       .filter((one) => one.on && one.id !== state.adding && one.points.length > 1)
       .map((one) => ({
         id: one.id,
@@ -248,6 +262,22 @@ export function App() {
         })),
       }));
   };
+  /*
+   * Whether anything has been said that the pieces have not been told yet.  A card that is quietly a
+   * few annotations out of date looks exactly like a card that has ignored them, so it says so.
+   */
+  const waiting = (source: Source | undefined) =>
+    source !== undefined && state.tool !== "look" && (told.current.get(scanOf(source))?.at ?? chainsMoved) !== chainsMoved;
+
+  // What was last handed over, per scan, so that the same thing can be handed over again while a
+  // winding tool is out and the pieces are to be left alone.
+  useEffect(() => {
+    if (state.tool !== "look") return;
+    for (const card of state.cards) {
+      const source = card.sourceId === null ? undefined : state.sources[card.sourceId];
+      if (source !== undefined) told.current.set(scanOf(source), { chains: said(source), at: chainsMoved });
+    }
+  });
 
   // Bumped when a chain changes, so that the cards are given the new one.
   const [chainsMoved, setChainsMoved] = useState(0);
@@ -286,15 +316,6 @@ export function App() {
 
   // A card leaving its group keeps the place it was looking at, rather than jumping to the middle of
   // the volume.
-  /*
-   * Marks a place for the card's group: the slices move to it, so that every card of the group is
-   * looking at the same voxel, and each draws it.  The move is the group's shared position, which is
-   * what makes "the other cards go there" nothing more than what linked cards already do.
-   */
-  const mark = (card: CardState, at: Point | null) => {
-    dispatch({ type: "mark", groupId: card.groupId, at });
-    if (at !== null) sessionRef.current?.group(card.groupId).navigation?.setPosition(at);
-  };
 
   /**
    * Puts a winding point down for the card's scan.  The first point of a chain starts it; the rest
@@ -541,15 +562,14 @@ export function App() {
                 hue={state.hues[card.groupId] ?? 0}
                 selected={state.selection.includes(card.id)}
                 linked={groupSize(state, card)}
-                mark={state.marks[card.groupId]}
                 chains={said(source)}
+                behind={waiting(source)}
                 lit={lit}
                 tool={state.tool}
                 scan={source === undefined ? "" : scanOf(source)}
                 picked={state.picked}
                 dispatch={dispatch}
                 onUnlink={() => unlink(card)}
-                onMark={(at) => mark(card, at)}
                 onPlace={(at) => place(card, at)}
                 onJoin={(at) => join(card, at)}
                 onPick={(held) => pick(card, held)}
@@ -574,10 +594,8 @@ export function App() {
                 dispatch={dispatch}
                 onLooked={() => restoredRef.current && store.schedule()}
                 onUnlink={() => unlink(card)}
-                mark={state.marks[card.groupId]}
                 tool={state.tool}
                 scan={source === undefined ? "" : scanOf(source)}
-                onMark={(at) => mark(card, at)}
                 picked={state.picked}
                 lit={lit}
                 onPlace={(at) => place(card, at)}
