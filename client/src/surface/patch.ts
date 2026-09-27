@@ -254,6 +254,8 @@ const SAID_IS_PAPYRUS = 0.5;
  * meet within this much of a wrap through the papyrus.  Anything else is two layers, which is what
  * drawing a second annotation means.
  */
+// How near a wrap has to come to a place held away from it before the claim is taken back.
+const KEEP_OFF = 0.35;
 const SAME_NEAR = 0.6;
 const SAME_DEPTH = 0.25;
 const PIN_ROUNDS = 8;
@@ -790,12 +792,26 @@ function holdsFor(
    * written down and not used yet.
    */
   const told = new Set<string>();
+  /*
+   * And the places a relative winding holds away from a chain.  Its two ends are on different wraps:
+   * where one end is on a chain's place and the other is a place of its own — the inside of a pit
+   * against the papyrus around it, say — that other place is one the chain's wrap may not claim.  It
+   * is the same statement as the one above, made about a place rather than about a group, and it is
+   * the one that a pit needs, since the middle of a pit is where nobody has annotated anything.
+   */
+  const keepOff = new Map<string, Vec3[]>();
   for (const chain of chains) {
     if (chain.kind !== "step") continue;
     const named = [...new Set(chain.points.map((point) => point.of?.chain).filter((id) => id !== undefined))];
     for (const a of named)
       for (const b of named)
         if (a !== b) told.add(`${a}|${b}`);
+    for (const point of chain.points)
+      for (const other of chain.points) {
+        const on = other.of?.chain;
+        if (on === undefined || on === point.of?.chain) continue;
+        keepOff.set(on, [...(keepOff.get(on) ?? []), point.at]);
+      }
   }
 
   // Every chain's answer, before any of them is given a wrap: they have to be seen together for
@@ -946,7 +962,7 @@ function holdsFor(
     for (const place of one.places) said.push({ chain: one.chain, node: place.node, at: place.at });
     holds.set(one.at, said);
   }
-  return { holds, spread };
+  return { holds, spread, keepOff };
 }
 
 export function buildPatch(
@@ -990,7 +1006,12 @@ export function buildPatch(
     spacingAt(field, sheet, spN, count, spacing, sp);
   };
 
-  const grow = (holds: Map<number, Held[]>, before?: Map<number, { held: Uint8Array }>) => {
+  const grow = (
+    holds: Map<number, Held[]>,
+    before?: Map<number, { held: Uint8Array }>,
+    // Places a relative winding says are not on the wrap a given chain is on.
+    keepOff = new Map<string, Vec3[]>(),
+  ) => {
     const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
     const offs: number[] = [];
     const said: { chain: string; away: number }[] = [];
@@ -1051,9 +1072,53 @@ export function buildPatch(
      * say about it.  A pit on the card is exactly a place the prediction has nothing to say; if the
      * only way to fill one were for the prediction to change its mind, saying so by hand could never
      * close a pit, which is the one thing a person most wants to do about one.
+     *
+     * And not only under the places themselves: a chain drawn ACROSS a pit carries the papyrus over
+     * it.  Saying "this place and that place are one wrap" of two places either side of a hole says
+     * the wrap runs between them — that is what a person means by drawing across it — and it is the
+     * plainest way to close one, two presses instead of a dozen.  Only along the chain, and only a
+     * step either side of it: it is a claim about the line drawn, not about the whole neighbourhood.
      */
-    const covers = (firm: Float64Array, held: Uint8Array) => {
+    const covers = (at: number, sheet: Float64Array, firm: Float64Array, held: Uint8Array) => {
       for (let k = 0; k < count; k++) if (firm[k] > SAID_IS_PAPYRUS) held[k] = 1;
+      const told = holds.get(at);
+      if (told === undefined) return;
+      /*
+       * And what the wrap may NOT claim: a place a relative winding holds away from one of the chains
+       * on this wrap.  Cleared after the marking, so that neither the places said nor the line drawn
+       * between them can carry the papyrus over something the person has said is another layer.
+       */
+      const off: Vec3[] = [];
+      for (const one of new Set(told.map((each) => each.chain))) off.push(...(keepOff.get(one) ?? []));
+      const ways = new Map<string, Held[]>();
+      for (const one of told) ways.set(one.chain, [...(ways.get(one.chain) ?? []), one]);
+      for (const way of ways.values())
+        for (let k = 0; k + 1 < way.length; k++) {
+          const [ai, aj] = [Math.floor(way[k].node / nu), way[k].node % nu];
+          const [bi, bj] = [Math.floor(way[k + 1].node / nu), way[k + 1].node % nu];
+          const steps = Math.max(Math.abs(bi - ai), Math.abs(bj - aj));
+          for (let step = 0; step <= steps; step++) {
+            const i = Math.round(ai + ((bi - ai) * step) / (steps || 1));
+            const j = Math.round(aj + ((bj - aj) * step) / (steps || 1));
+            for (let di = -1; di <= 1; di++)
+              for (let dj = -1; dj <= 1; dj++) {
+                const y = i + di, x = j + dj;
+                if (y >= 0 && y < nv && x >= 0 && x < nu) held[y * nu + x] = 1;
+              }
+          }
+        }
+      surfaceNormals(sheet, nu, nv, surfN, n0);
+      for (const place of off) {
+        const found = onWrap(sheet, nu, nv, surfN, place);
+        /*
+         * Only where the wrap actually comes near it.  "This place is not on your wrap" is answered
+         * by the wrap being somewhere else, and once it is, there is nothing left to do — clearing
+         * the nearest square anyway would punch a hole wherever the wrap happened to pass closest to
+         * the place, for ever, which is not what was said about it.
+         */
+        if (found === undefined || found.away > spacing * KEEP_OFF) continue;
+        for (const node of found.corners) held[node] = 0;
+      }
     };
     /*
      * And last of all, the places are met exactly.
@@ -1116,7 +1181,7 @@ export function buildPatch(
     const first = fitSheet(field, middle, grid, sp, n0, wander);
     pin(0, middle);
     answered(0, middle);
-    covers(firm, first.held);
+    covers(0, middle, firm, first.held);
     fillHoles(first.held, nu, nv);
     sheets.set(0, { X: middle, held: first.held });
     offs.push(first.off);
@@ -1133,7 +1198,7 @@ export function buildPatch(
         const fitted = fitSheet(field, next, grid, sp, n0, loose);
         pin(k * dir, next);
         answered(k * dir, next);
-        covers(spoken, fitted.held);
+        covers(k * dir, next, spoken, fitted.held);
         fillHoles(fitted.held, nu, nv);
         sheets.set(k * dir, { X: next, held: fitted.held });
         offs.push(fitted.off);
@@ -1149,7 +1214,7 @@ export function buildPatch(
     const found = holdsFor(chains, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0);
     spread = found.spread;
     if (found.holds.size > 0) {
-      grown = grow(found.holds, grown.sheets);
+      grown = grow(found.holds, grown.sheets, found.keepOff);
       /*
        * Asked again of the piece that listened.  What matters to the person who drew a chain is
        * whether its points are all on one wrap NOW — that is the thing they said and the thing they

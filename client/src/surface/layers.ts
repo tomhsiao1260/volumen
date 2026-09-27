@@ -70,9 +70,19 @@ export function spotsOf(cardId: string) {
  * and near enough to the sheet the card is turned to; so this list, read at a known sheet, is the
  * answer to "are all of these on this one sheet" in the same terms the eye gets it in.
  */
-const drawn = new Map<string, { chain: string; point: string; x: number; y: number }[]>();
+export interface DrawnDot {
+  chain: string;
+  point: string;
+  x: number;
+  y: number;
+  // How strongly it was drawn: 1 on the wrap it belongs to, faint elsewhere.  It is what says whether
+  // a point is on the wrap being looked at, now that a point off it is shown rather than hidden.
+  near: number;
+}
 
-export function setDrawnDots(cardId: string, dots: { chain: string; point: string; x: number; y: number }[]) {
+const drawn = new Map<string, DrawnDot[]>();
+
+export function setDrawnDots(cardId: string, dots: DrawnDot[]) {
   drawn.set(cardId, dots);
 }
 

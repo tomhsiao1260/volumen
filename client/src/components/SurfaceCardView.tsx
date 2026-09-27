@@ -17,7 +17,7 @@ import { sourceLabel } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
-import { setDrawnDots, setSpots } from "../surface/layers";
+import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 import { SPAN } from "../surface/types";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
@@ -71,6 +71,13 @@ const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
 const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
 // How near the pointer has to be to one to take hold of it.
 const GRAB = 7;
+
+/*
+ * How faint a winding point goes when the card is turned away from the wrap it is on.  Not to nothing:
+ * see the drawing below.
+ */
+const GHOST = 0.28;
+const GHOST_APART = 0.45;
 
 const PLANE_TITLES: Record<SurfacePlane, string> = {
   uv: "The sheet, laid flat",
@@ -179,7 +186,7 @@ export function SurfaceCardView({
   // The winding point the pointer is on, drawn ringed to say it can be pressed.
   const [over, setOver] = useState<PickedPoint>();
   // Where each of them was drawn, in the card's own pixels: what a press looks through to find one.
-  const drawnDots = useRef<{ chain: string; point: string; x: number; y: number }[]>([]);
+  const drawnDots = useRef<DrawnDot[]>([]);
   const [chainsMoved, setChainsMoved] = useState(0);
   useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
   const [status, setStatus] = useState<Status>("loading");
@@ -545,15 +552,17 @@ export function SurfaceCardView({
           if (at[0] < 0 || at[0] > 1 || at[1] < 0 || at[1] > 1) continue;
           /*
            * On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
-           * A relative winding is the exception and fades only so far: its points are on different
-           * wraps — that is the whole of what it says — so fading them out by how far they are from
-           * this one would hide exactly the thing it was drawn to show.
+           * But never to nothing: a point on another wrap is still a point, and a person looking at
+           * one wrap needs to see the annotations on the others — to press one and join it, to see
+           * where the next wrap was said to be.  So they ghost instead of going, small and faint, and
+           * "on this wrap" is said by the ones that are solid.  A relative winding ghosts less: its
+           * points are on different wraps, which is the whole of what it says.
            */
           const away = Math.max(0, 1 - Math.abs(found.w - sheet) / 0.5);
-          const near = wantedPlane.current !== "uv" ? 1 : apart ? Math.max(0.45, away) : away;
-          if (near === 0) continue;
+          const near = wantedPlane.current !== "uv" ? 1 : Math.max(apart ? GHOST_APART : GHOST, away);
+          const here = away > 0;
           const x = at[0] * width, y = at[1] * height;
-          drawnDots.current.push({ chain: one.id, point: point.id, x: x / density, y: y / density });
+          drawnDots.current.push({ chain: one.id, point: point.id, x: x / density, y: y / density, near: away });
           seen.push({ x, y });
           context.save();
           if (!one.on) context.globalAlpha = 0.35;
@@ -567,8 +576,8 @@ export function SurfaceCardView({
             (picked?.chain === one.id && picked.point === point.id) ||
               (over?.chain === one.id && over.point === point.id),
             colour,
-            one.kind === "step",
-            loud,
+            apart,
+            loud && here,
           );
           context.restore();
         }

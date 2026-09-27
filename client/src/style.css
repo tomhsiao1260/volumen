@@ -173,7 +173,6 @@ button {
   display: flex;
   align-items: baseline;
   gap: 7px;
-  overflow: hidden;
   height: 22px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   color: #aeb3c0;
@@ -182,8 +181,14 @@ button {
   user-select: none;
 }
 
+/*
+ * The top row does not clip: the plane menu hangs out of it, and a row 22 pixels high that clips would
+ * cut the menu off entirely — which is how it was, and a menu you can open but cannot press is worse
+ * than no menu.  What needed clipping was the scan's name, and that clips itself.
+ */
 .card-top {
   bottom: 100%;
+  overflow: visible;
   margin-bottom: 3px;
 }
 

@@ -21,7 +21,7 @@ import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
-import { crossSection, setDrawnDots, sheetsOf, watchSheets } from "../surface/layers";
+import { crossSection, setDrawnDots, sheetsOf, watchSheets, type DrawnDot } from "../surface/layers";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { SourcePicker } from "./SourcePicker";
 
@@ -252,7 +252,7 @@ export function CardView({
   const [chainsMoved, setChainsMoved] = useState(0);
   // Where each winding point was drawn, in the card's own pixels: what a press looks through to find
   // the point under it.
-  const drawnDots = useRef<{ chain: string; point: string; x: number; y: number }[]>([]);
+  const drawnDots = useRef<DrawnDot[]>([]);
   const lines = useRef<HTMLCanvasElement>(null);
   const body = useRef<HTMLDivElement>(null);
   /*
@@ -492,7 +492,7 @@ export function CardView({
         const held =
           (picked?.chain === one.id && picked.point === point.id) ||
           (over?.chain === one.id && over.point === point.id);
-        drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y });
+        drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y, near: place.near });
         context.save();
         if (!one.on) context.globalAlpha = 0.35;
         drawDot(
@@ -834,8 +834,19 @@ export function CardView({
         <div className="card-resize" title="Resize" />
       </div>
 
+      {/*
+        * Kept inside the card: opened near an edge the menu would otherwise hang over the row of
+        * coordinates below, which is a row of fields — and a menu lying over a field is a field that
+        * cannot be reached.
+        */}
       {menu !== undefined && (
-        <div className="card-menu" style={{ left: menu.x, top: menu.y }}>
+        <div
+          className="card-menu"
+          style={{
+            left: Math.max(4, Math.min(menu.x, card.width - 192)),
+            top: Math.max(4, Math.min(menu.y, card.height - 96)),
+          }}
+        >
           <button
             disabled={menu.surface !== "yes"}
             onClick={() => {
