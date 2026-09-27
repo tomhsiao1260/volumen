@@ -93,8 +93,8 @@ export function drawDot(
   turn: number | null,
   held = false,
   colour = STEP_DOT,
-  // A relative winding's points are drawn cornered, a same winding's round.
-  corners = false,
+  // A relative winding's points are drawn hollow, a same winding's filled.
+  apart = false,
   /*
    * A chain nobody is working on is drawn small and quiet.  A card may carry dozens of them, and
    * drawn all alike they cover the papyrus they are about — which is the one thing the person is
@@ -113,27 +113,30 @@ export function drawDot(
     context.stroke();
   }
   const radius = (loud ? 4.2 : 2.6) * (held ? HELD_LARGER : 1) * density;
-  context.beginPath();
   /*
-   * A round point says "the same wrap", a cornered one says "a different wrap".  The shape carries it
-   * because nothing else does any more: the two are drawn in their own colours, but a colour is which
-   * chain this is, not which of the two things it says, and the wrap numbers that used to tell them
-   * apart are gone.
+   * Filled says "the same wrap", hollow says "a different wrap".  Shape alone was not enough — a
+   * diamond and a circle four pixels across are the same mark — but solid against open reads at any
+   * size, and it carries the meaning: a same winding gathers places together, a relative winding
+   * holds them apart.  Nothing else can carry it, since a colour now says which chain this is rather
+   * than which of the two things it says, and the wrap numbers are gone.
    */
-  if (corners) {
-    const arm = radius * 1.35;
-    context.moveTo(x, y - arm);
-    context.lineTo(x + arm, y);
-    context.lineTo(x, y + arm);
-    context.lineTo(x - arm, y);
-    context.closePath();
-  } else context.arc(x, y, radius, 0, 2 * Math.PI);
+  context.beginPath();
+  context.arc(x, y, apart ? radius * 1.2 : radius, 0, 2 * Math.PI);
   context.strokeStyle = STEP_EDGE;
   context.lineWidth = (loud ? 3.2 : 2.2) * density;
-  context.lineJoin = "round";
   context.stroke();
-  context.fillStyle = colour;
-  context.fill();
+  if (apart) {
+    context.fillStyle = STEP_EDGE;
+    context.fill();
+    context.beginPath();
+    context.arc(x, y, radius * 1.2, 0, 2 * Math.PI);
+    context.strokeStyle = colour;
+    context.lineWidth = (loud ? 2.4 : 1.6) * density;
+    context.stroke();
+  } else {
+    context.fillStyle = colour;
+    context.fill();
+  }
   if (turn !== null && near > 0.6 && loud) {
     context.font = `${10 * density}px ui-monospace, monospace`;
     context.textAlign = "left";
@@ -465,26 +468,50 @@ export function CardView({
       const loud = one.id === lit || one.id === picked?.chain;
       // The thread belongs to the chain being worked on; on the others it is what makes a card of
       // papyrus look like a cat's cradle.
+      const apart = one.kind === "step";
       context.save();
-      // Quiet, but not gone: with a colour of its own per chain the thread is what makes a scatter of
-      // dots read as one winding rather than as a field of them.
-      context.globalAlpha = loud ? (one.on ? 0.75 : 0.3) : one.on ? 0.2 : 0.09;
+      /*
+       * Quiet, but not gone: with a colour of its own per chain the thread is what makes a scatter of
+       * dots read as one winding rather than as a field of them.  A relative winding's thread is drawn
+       * plainly and always, because the thread IS the thing it says — these two places are not the
+       * same wrap — and it is cut through the middle to say so.
+       */
+      context.globalAlpha = apart ? (one.on ? 0.85 : 0.35) : loud ? (one.on ? 0.75 : 0.3) : one.on ? 0.2 : 0.09;
       context.strokeStyle = colour;
-      context.lineWidth = 1.4 * density;
-      context.setLineDash([4 * density, 4 * density]);
+      context.lineWidth = (apart ? 1.8 : 1.4) * density;
+      context.setLineDash(apart ? [] : [4 * density, 4 * density]);
       context.beginPath();
       let drawing = false;
+      let from;
+      const cuts: [number, number, number, number][] = [];
       for (const place of places) {
         // The thread is drawn only between points that are both near enough to be shown.
         if (place.near === 0) {
           drawing = false;
+          from = undefined;
           continue;
         }
-        if (drawing) context.lineTo(place.x * density, place.y * density);
-        else context.moveTo(place.x * density, place.y * density);
+        if (drawing) {
+          context.lineTo(place.x * density, place.y * density);
+          if (from !== undefined) cuts.push([from.x, from.y, place.x, place.y]);
+        } else context.moveTo(place.x * density, place.y * density);
+        from = place;
         drawing = true;
       }
       context.stroke();
+      // The cut: a short bar across the middle of each link, the way a break is drawn.
+      if (apart)
+        for (const [x1, y1, x2, y2] of cuts) {
+          const away = Math.hypot(x2 - x1, y2 - y1) || 1;
+          const [ux, uy] = [(x2 - x1) / away, (y2 - y1) / away];
+          const [mx, my] = [((x1 + x2) / 2) * density, ((y1 + y2) / 2) * density];
+          const arm = 2.6 * density;
+          context.beginPath();
+          context.moveTo(mx - uy * arm - ux * arm * 0.35, my + ux * arm - uy * arm * 0.35);
+          context.lineTo(mx + uy * arm + ux * arm * 0.35, my - ux * arm + uy * arm * 0.35);
+          context.lineWidth = 1.7 * density;
+          context.stroke();
+        }
       context.restore();
       one.points.forEach((point, k) => {
         const place = places[k];

@@ -244,6 +244,7 @@ export function App() {
         points: one.points.map((point) => ({
           at: [point.at.z, point.at.y, point.at.x] as [number, number, number],
           turn: point.turn,
+          ...(point.of === undefined ? {} : { of: point.of }),
         })),
       }));
   };
@@ -399,6 +400,28 @@ export function App() {
     forgetChain(touched.id);
   };
 
+  /**
+   * Taking hold of a winding point takes the cards to it.
+   *
+   * A place annotated is a place worth looking at, and looking at it means all of it: the slices move
+   * to the slice it is on, and every flattened card turns to the wrap it is on — where the rest of its
+   * chain is then drawn, which is the whole of what "are these really one wrap?" looks like.  The
+   * flattened cards are asked where the point is rather than told: their own answers are what decides
+   * where its dot is drawn, so what a card turns to and what it then shows cannot disagree.
+   */
+  const pick = (card: CardState, held: PickedPoint | undefined) => {
+    dispatch({ type: "pick", picked: held });
+    if (held === undefined) return;
+    const place = chain(held.chain)?.points.find((point) => point.id === held.point);
+    if (place === undefined) return;
+    sessionRef.current?.group(card.groupId).navigation?.setPosition(place.at);
+    for (const one of latest.current.cards) {
+      if (one.kind !== "surface") continue;
+      const w = spotsOf(one.id).get(held.point)?.w;
+      if (w !== undefined) dispatch({ type: "setSurfaceLayer", id: one.id, w: Math.round(w) });
+    }
+  };
+
   /*
    * Removes the winding point being held, and the chain with it once its last point is gone.  It is
    * the only way a chain is edited: a point is taken hold of and taken away, and another put down —
@@ -529,7 +552,7 @@ export function App() {
                 onMark={(at) => mark(card, at)}
                 onPlace={(at) => place(card, at)}
                 onJoin={(at) => join(card, at)}
-                onPick={(picked) => dispatch({ type: "pick", picked })}
+                onPick={(held) => pick(card, held)}
                 onHeard={(said) =>
                   setHeard((was) => {
                     const now = { ...was };
@@ -559,7 +582,7 @@ export function App() {
                 lit={lit}
                 onPlace={(at) => place(card, at)}
                 onJoin={(at) => join(card, at)}
-                onPick={(picked) => dispatch({ type: "pick", picked })}
+                onPick={(held) => pick(card, held)}
                 onOpenSurface={(seed) =>
                   dispatch({
                     type: "addSurfaceCard",

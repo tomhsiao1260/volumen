@@ -137,45 +137,18 @@ const NEAR = 96;
  * where that finds nothing, guessed from the density — which is only ever right to within a few
  * times, so it is a last resort.
  */
-/*
- * How far a chain says the sheets are apart around `p`: the distance along the normal between two of
- * its points, divided by the wraps between them.  Only pairs whose points are both near enough to be
- * on this piece are counted, and only the part along the normal — two points on the same sheet a
- * long way apart would otherwise be read as a huge spacing.
- */
-const SAID_REACH = 420;
-
-function spacingSaid(p: Vec3, n: Vec3, chains: ChainSaid[]) {
-  const said: number[] = [];
-  const near = (q: [number, number, number]) =>
-    Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) <= SAID_REACH;
-  for (const chain of chains) {
-    if (chain.kind !== "step") continue;
-    for (let k = 0; k + 1 < chain.points.length; k++) {
-      const a = chain.points[k], b = chain.points[k + 1];
-      const wraps = (b.turn ?? 0) - (a.turn ?? 0);
-      if (wraps <= 0 || !near(a.at) || !near(b.at)) continue;
-      const along = Math.abs(
-        (b.at[0] - a.at[0]) * n[0] + (b.at[1] - a.at[1]) * n[1] + (b.at[2] - a.at[2]) * n[2],
-      );
-      const apart = along / wraps;
-      if (apart >= 8 && apart <= 300) said.push(apart);
-    }
-  }
-  if (said.length === 0) return NaN;
-  said.sort((x, y) => x - y);
-  return said[said.length >> 1];
-}
-
 /**
- * How far apart the sheets are here.  What a person has counted out comes first: the prediction's own
- * answer is taken in one small box at the seed and was measured, over six places on Scroll 1, to be a
- * fifth to a half wrong — and everything else is scaled by it, so it is the one number most worth
- * being told rather than guessed.
+ * How far apart the sheets are here.  The prediction's own answer is taken in one small box at the
+ * seed and was measured, over six places on Scroll 1, to be a fifth to a half wrong, and everything
+ * else is scaled by it — so it is the number most worth improving, and the place to start when the
+ * piece comes out with its wraps at the wrong spacing.
+ *
+ * It used to be told: a relative winding counted wraps, and the distance between two of its points
+ * divided by the wraps between them was a measured spacing.  Nobody counts wraps any more — saying
+ * "these two places are different wraps" is what a person can see, and how many wraps lie between
+ * them usually is not — so that reading has gone rather than being left to return NaN for ever.
  */
-function sheetSpacing(field: LasagnaField, p: Vec3, n: Vec3, chains: ChainSaid[] = []) {
-  const said = spacingSaid(p, n, chains);
-  if (!Number.isNaN(said)) return said;
+function sheetSpacing(field: LasagnaField, p: Vec3, n: Vec3) {
   const guess = Math.min(150, Math.max(15, 1 / (field.density(p[0], p[1], p[2]) || 1 / 60)));
   const measured = field.spacingAt(p[0], p[1], p[2], n[0], n[1], n[2], NEAR);
   return Number.isNaN(measured) ? guess : Math.min(300, Math.max(15, measured));
@@ -398,7 +371,7 @@ class Card {
       return undefined;
     }
     const n: Vec3 = [near.out[0], near.out[1], near.out[2]];
-    const spacing = sheetSpacing(near, seed, n, this.request.chains);
+    const spacing = sheetSpacing(near, seed, n);
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.

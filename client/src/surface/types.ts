@@ -23,8 +23,13 @@ export interface ChainSaid {
   id: string;
   rev: number;
   kind: "same" | "step";
-  // (z, y, x) and the wrap, in the order they were placed.
-  points: { at: [number, number, number]; turn: number | null }[];
+  /*
+   * (z, y, x) in the order they were placed, and — on a relative winding — the chain each point was
+   * put down on, when it was put on a place already there.  Two chains named by one relative winding
+   * have been said to be different wraps, and that is the only thing said that the fit cannot work out
+   * for itself.
+   */
+  points: { at: [number, number, number]; turn: number | null; of?: { chain: string; point: string } }[];
 }
 
 /*

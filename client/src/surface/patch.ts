@@ -779,6 +779,25 @@ function holdsFor(
       }
     return { sheet, node, away: Math.sqrt(away) };
   };
+  /*
+   * Which chains a person has said are NOT one another's wrap.
+   *
+   * A relative winding is drawn through places that belong to other chains, and each of its points
+   * carries the chain whose place it was put on.  Two chains it names are thereby two wraps, whatever
+   * the piece makes of them — the one thing about how the groups relate that the fit cannot work out
+   * by looking, and so the one thing worth carrying in.  A free point of a relative winding, put down
+   * somewhere no annotation was, says something about a PLACE rather than about two groups; it is
+   * written down and not used yet.
+   */
+  const told = new Set<string>();
+  for (const chain of chains) {
+    if (chain.kind !== "step") continue;
+    const named = [...new Set(chain.points.map((point) => point.of?.chain).filter((id) => id !== undefined))];
+    for (const a of named)
+      for (const b of named)
+        if (a !== b) told.add(`${a}|${b}`);
+  }
+
   // Every chain's answer, before any of them is given a wrap: they have to be seen together for
   // "two chains are two wraps" to mean anything.
   const asked: {
@@ -887,6 +906,7 @@ function holdsFor(
    */
   const layers: { chains: typeof asked }[] = [];
   const cannot = (a: (typeof asked)[0], b: (typeof asked)[0]) => {
+    if (told.has(`${a.chain}|${b.chain}`)) return true;
     const { along, sideways } = between(a, b, facing.get(a.sheet)!);
     return sideways <= spacing * SAME_NEAR && Math.abs(along) > spacing * SAME_DEPTH;
   };
