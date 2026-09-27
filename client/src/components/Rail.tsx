@@ -101,24 +101,11 @@ export interface RailProps {
   // themselves that the whole chain is one wrap: on that card the points are there, and on the next
   // one along they are gone.
   onGo: (id: string) => void;
-  // Puts a chain on a named layer, or hands it back to the fit with null.  Only sameness and
-  // difference of the names mean anything, never their order.
-  onLayer: (id: string, layer: string | null) => void;
   onRemove: (id: string) => void;
 }
 
-const LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
-
-export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, onGo, onLayer, onRemove }: RailProps) {
+export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, onGo, onRemove }: RailProps) {
   const [listing, setListing] = useState(false);
-  /*
-   * Pressing the button walks a fixed ring: no name, then A, B, C … one for every chain there is, and
-   * round to no name again.  Fixed on purpose — a ring built from the names currently in use changes
-   * under the press that changes them, and two chains can then swap names forever without either ever
-   * reaching the end of it.  Long enough that any chain can be put on any other chain's layer.
-   */
-  const ring: (string | null)[] = [null, ...LETTERS.slice(0, Math.max(2, chains.length))];
-  const after = (now: string | null) => ring[(ring.indexOf(now) + 1) % ring.length] ?? null;
   const says = HINTS[tool];
   return (
     <>
@@ -225,25 +212,6 @@ export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, 
                   </span>
                 )}
               </span>
-              {/*
-                * Which layer this chain is on, by name.  Two chains wearing the same letter are the
-                * same wrap; two wearing different letters are different wraps; a dot leaves it to the
-                * surface.  A letter and not a number because the thing a person can see is that two
-                * annotations are not the same layer — how many wraps lie between them is usually
-                * exactly what they cannot say, and is left to the fit.
-                */}
-              <button
-                type="button"
-                className={`rail-anno-layer${one.layer == null ? "" : " said"}`}
-                title={
-                  one.layer == null
-                    ? "The surface decides which wrap this is on. Click to name its layer: chains sharing a letter are the same wrap, different letters are different wraps."
-                    : `On layer ${one.layer}. Chains sharing a letter are the same wrap; different letters are different wraps. Click to change.`
-                }
-                onClick={() => onLayer(one.id, after(one.layer ?? null))}
-              >
-                {one.layer ?? "·"}
-              </button>
               <button
                 type="button"
                 className="rail-anno-off"

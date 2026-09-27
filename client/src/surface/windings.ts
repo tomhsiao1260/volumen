@@ -35,19 +35,6 @@ export interface WindChain {
   kind: "same" | "step";
   points: WindPoint[];
   on: boolean;
-  /*
-   * Which layer this chain is on, as a name rather than a number: two chains wearing the same name
-   * are the same wrap, two wearing different names are different wraps, and null leaves it to the
-   * fit.  A name and not a number on purpose — saying "these two are not the same layer" is a thing
-   * a person can see, while "these two are exactly one wrap apart" often is not, and demanding the
-   * second to be allowed to say the first is what makes an annotation tool unusable.  How far apart
-   * two named layers end up is then the fit's business, from the order they lie in.
-   *
-   * It is the community's `same_windings.json` exactly: one collection per layer, saying nothing
-   * about the distance between collections.  Saying how many wraps apart two places are is what the
-   * relative winding tool is for.
-   */
-  layer: string | null;
   note: string;
   author: string;
   rev: number;

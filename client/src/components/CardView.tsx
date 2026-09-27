@@ -21,7 +21,7 @@ import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
-import { crossSection, sheetsOf, watchSheets } from "../surface/layers";
+import { crossSection, setDrawnDots, sheetsOf, watchSheets } from "../surface/layers";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { SourcePicker } from "./SourcePicker";
 
@@ -203,6 +203,11 @@ export interface CardViewProps {
   onMark: (at: Point | null) => void;
   // Puts a winding point down at this voxel, joining the chain being drawn or starting one.
   onPlace: (at: Point) => void;
+  /*
+   * A press with a winding tool on a point already down.  It says that point is part of what is being
+   * drawn, so the chain it belongs to and the chain being drawn are one and the same winding.
+   */
+  onJoin: (at: PickedPoint) => void;
   // Takes hold of a winding point already down, or lets go.
   onPick: (picked: PickedPoint | undefined) => void;
   // Opens a surface card on the sheet at `seed`.
@@ -238,6 +243,7 @@ export function CardView({
   onUnlink,
   onMark,
   onPlace,
+  onJoin,
   onPick,
   onOpenSurface,
 }: CardViewProps) {
@@ -246,6 +252,8 @@ export function CardView({
   const [loaded, setLoaded] = useState(false);
   const [centre, setCentre] = useState<Point>();
   const [pointer, setPointer] = useState<Point>();
+  // The winding point the pointer is on, which is drawn ringed to say it can be pressed.
+  const [over, setOver] = useState<PickedPoint>();
   // The place being typed into the card's own coordinates, while someone is typing one.
   const [typed, setTyped] = useState<string>();
   // Bumped when a surface card moves to another sheet, so that its line is drawn again.
@@ -337,11 +345,13 @@ export function CardView({
   const toolRef = useRef(tool);
   const pointerRef = useRef<Point | undefined>(undefined);
   const onPlaceRef = useRef(onPlace);
+  const onJoinRef = useRef(onJoin);
   const onPickRef = useRef(onPick);
   useEffect(() => {
     toolRef.current = tool;
     pointerRef.current = pointer;
     onPlaceRef.current = onPlace;
+    onJoinRef.current = onJoin;
     onPickRef.current = onPick;
   });
 
@@ -462,7 +472,11 @@ export function CardView({
       one.points.forEach((point, k) => {
         const place = places[k];
         if (place.near === 0) return;
-        const held = picked?.chain === one.id && picked.point === point.id;
+        // Ringed while the pointer is on it, so that "this point can be pressed" — and with a winding
+        // tool that means "joined to what I am drawing" — is seen rather than remembered.
+        const held =
+          (picked?.chain === one.id && picked.point === point.id) ||
+          (over?.chain === one.id && over.point === point.id);
         drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y });
         context.save();
         if (!one.on) context.globalAlpha = 0.35;
@@ -470,6 +484,7 @@ export function CardView({
         context.restore();
       });
     }
+    setDrawnDots(card.id, drawnDots.current);
     if (mark !== undefined) {
       const point = [mark.z, mark.y, mark.x];
       drawMark(
@@ -480,7 +495,7 @@ export function CardView({
         Math.abs(point[sliced] - at[sliced]) <= 0.5,
       );
     }
-  }, [sheetsMoved, chainsMoved, centre, mark, picked, lit, scan, orientation, sourceId, groupId, session, card.width, card.height]);
+  }, [sheetsMoved, chainsMoved, centre, mark, picked, over, lit, scan, orientation, sourceId, groupId, session, card.width, card.height]);
 
   // The sheet's line under the pointer, in the card's own pixels.
   const lineUnder = (x: number, y: number) => {
@@ -546,21 +561,32 @@ export function CardView({
        * board would otherwise take hold of the card, and the sheet lines below would take the press
        * as a drag.
        */
+      const box = element.getBoundingClientRect();
+      const scale = box.width / element.clientWidth;
+      const under = dotUnder((event.clientX - box.left) / scale, (event.clientY - box.top) / scale);
       if (toolRef.current !== "look") {
         event.stopPropagation();
         event.preventDefault();
-        const box = element.getBoundingClientRect();
-        const scale = box.width / element.clientWidth;
-        const held = dotUnder((event.clientX - box.left) / scale, (event.clientY - box.top) / scale);
-        // A press on a point already down takes hold of it; anywhere else puts another one down.
-        if (held !== undefined) onPickRef.current(held);
+        /*
+         * A press on a point already down says that point belongs to what is being drawn too — which
+         * is how a person says two annotations are one and the same winding, and the two are then
+         * merged.  Anywhere else puts another point down.  Taking hold of a point to move or delete it
+         * is the arrow tool's press, below: one gesture cannot mean both.
+         */
+        if (under !== undefined) onJoinRef.current(under);
         else {
           const at = pointerRef.current;
           if (at !== undefined) onPlaceRef.current(at);
         }
         return;
       }
-      const box = element.getBoundingClientRect();
+      // The arrow takes hold of a point, which is what Delete then acts on.
+      if (under !== undefined) {
+        event.stopPropagation();
+        event.preventDefault();
+        onPickRef.current(under);
+        return;
+      }
       const line = lineUnder(event.clientX - box.left, event.clientY - box.top);
       if (line === undefined) return;
       const sheet = sheetsOf(sourceId).find((one) => one.cardId === line.cardId);
@@ -606,26 +632,33 @@ export function CardView({
       window.addEventListener("pointercancel", stop, true);
     };
 
-    // The cursor says when a line can be taken hold of.
+    // The cursor says when a point or a line can be taken hold of, and the point itself is ringed.
     const onPointerMove = (event: PointerEvent) => {
       if (dragging.current !== undefined) return;
       const box = element.getBoundingClientRect();
-      if (toolRef.current !== "look") {
-        const scale = box.width / element.clientWidth;
-        element.style.cursor =
-          dotUnder((event.clientX - box.left) / scale, (event.clientY - box.top) / scale) === undefined
-            ? "crosshair"
-            : "pointer";
+      const scale = box.width / element.clientWidth;
+      const under = dotUnder((event.clientX - box.left) / scale, (event.clientY - box.top) / scale);
+      setOver((was) =>
+        was?.chain === under?.chain && was?.point === under?.point ? was : under,
+      );
+      if (under !== undefined) {
+        element.style.cursor = "pointer";
         return;
       }
-      const over = lineUnder(event.clientX - box.left, event.clientY - box.top) !== undefined;
-      element.style.cursor = over ? "ns-resize" : "";
+      if (toolRef.current !== "look") {
+        element.style.cursor = "crosshair";
+        return;
+      }
+      element.style.cursor = lineUnder(event.clientX - box.left, event.clientY - box.top) !== undefined ? "ns-resize" : "";
     };
+    const onPointerLeave = () => setOver(undefined);
 
     element.addEventListener("pointerdown", onPointerDown);
+    element.addEventListener("pointerleave", onPointerLeave);
     element.addEventListener("pointermove", onPointerMove);
     return () => {
       element.removeEventListener("pointerdown", onPointerDown);
+      element.removeEventListener("pointerleave", onPointerLeave);
       element.removeEventListener("pointermove", onPointerMove);
     };
   }, [sourceId, dispatch]);

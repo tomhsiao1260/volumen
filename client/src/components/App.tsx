@@ -15,7 +15,7 @@ import { useBoardGestures } from "../board/gestures";
 import { newGroupId } from "../board/links";
 import type { GroupPlace } from "../board/session";
 import { Session } from "../board/session";
-import type { BoardState, CardState } from "../board/state";
+import type { BoardState, CardState, PickedPoint } from "../board/state";
 import {
   boardReducer,
   CARD_HEIGHT,
@@ -241,7 +241,6 @@ export function App() {
         id: one.id,
         rev: one.rev,
         kind: one.kind,
-        layer: one.layer ?? null,
         points: one.points.map((point) => ({
           at: [point.at.z, point.at.y, point.at.x] as [number, number, number],
           turn: point.turn,
@@ -331,8 +330,6 @@ export function App() {
             kind,
             points: [point],
             on: true,
-            // Left to the fit until the person says which layer it is on.
-            layer: null,
             note: "",
             author: "",
             rev: 0,
@@ -341,6 +338,38 @@ export function App() {
         : { ...open, points: [...open.points, point] },
     );
     if (open === undefined) dispatch({ type: "adding", chainId: saved.id });
+  };
+
+  /**
+   * A press with a winding tool on a point already down.
+   *
+   * Saying "these are the same winding" of two annotations drawn at different times is done by
+   * drawing through them: a point of theirs pressed while a chain is being drawn says that place is
+   * on this winding too, and a place cannot be on two windings, so the two chains are one.  They are
+   * merged there and then — the points of the chain pressed are taken into the one being drawn and it
+   * is gone — which is what makes the two groups turn one colour on the cards.
+   *
+   * Pressed before anything is being drawn, it takes up that chain instead: the next point put down
+   * carries on the same winding rather than starting another.
+   */
+  const join = (card: CardState, at: PickedPoint) => {
+    const kind = latest.current.tool === "same" ? "same" : "step";
+    const source = card.sourceId === null ? undefined : latest.current.sources[card.sourceId];
+    const scan = source === undefined ? "" : scanOf(source);
+    const touched = chain(at.chain);
+    // Only two chains that say the same KIND of thing can be one chain.  A press on a chain of the
+    // other kind is a statement about how the two relate, which is a thing of its own.
+    if (touched === undefined || touched.kind !== kind || touched.scan !== scan) return;
+    const drawing = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
+    const open = drawing?.kind === kind && drawing.scan === scan ? drawing : undefined;
+    if (open === undefined) {
+      dispatch({ type: "adding", chainId: touched.id });
+      return;
+    }
+    if (open.id === touched.id) return;
+    // The chain being drawn takes the other one in, and keeps the order they were drawn in.
+    setChain({ ...open, points: [...open.points, ...touched.points] });
+    forgetChain(touched.id);
   };
 
   /*
@@ -423,10 +452,6 @@ export function App() {
             if (ws.length > 0) dispatch({ type: "setSurfaceLayer", id: card.id, w: Math.round(ws[ws.length >> 1]) });
           }
         }}
-        onLayer={(id: string, layer: string | null) => {
-          const one = chain(id);
-          if (one !== undefined) setChain({ ...one, layer });
-        }}
         onRemove={(id) => {
           forgetChain(id);
           if (state.adding === id) dispatch({ type: "adding", chainId: undefined });
@@ -476,6 +501,7 @@ export function App() {
                 onUnlink={() => unlink(card)}
                 onMark={(at) => mark(card, at)}
                 onPlace={(at) => place(card, at)}
+                onJoin={(at) => join(card, at)}
                 onPick={(picked) => dispatch({ type: "pick", picked })}
                 onHeard={(said) =>
                   setHeard((was) => {
@@ -505,6 +531,7 @@ export function App() {
                 picked={state.picked}
                 lit={lit}
                 onPlace={(at) => place(card, at)}
+                onJoin={(at) => join(card, at)}
                 onPick={(picked) => dispatch({ type: "pick", picked })}
                 onOpenSurface={(seed) =>
                   dispatch({

@@ -783,8 +783,6 @@ function holdsFor(
   // "two chains are two wraps" to mean anything.
   const asked: {
     chain: string;
-    // The layer the person put this chain on, by name, if they named one.
-    said: string | null;
     sheet: number;
     off: number;
     sheets: number;
@@ -818,7 +816,6 @@ function holdsFor(
     const off = under === undefined || !Number.isFinite(under.gap) ? 0 : under.gap;
     asked.push({
       chain: chain.id,
-      said: chain.layer ?? null,
       sheet: anchor.sheet,
       off,
       sheets: new Set(places.map((place) => place.sheet)).size,
@@ -878,39 +875,27 @@ function holdsFor(
   /*
    * Which chains are the same layer.
    *
-   * The fit's own answer is kept: two chains it put on one wrap stay on one wrap, because two
-   * annotations drawn separately are often about the same winding and it is not for the tool to
-   * decide otherwise.  Only one thing overrides it, and it is not a guess about what was meant but a
-   * fact about the papyrus: where two chains pass close by each other and are further apart through
-   * the sheet than a quarter of a wrap, no single surface can hold both, and forcing one to — which
-   * is what happened while every place said was met exactly — makes it weave from one layer to the
-   * other and back.  Those are split.
+   * Nothing in what was said settles this: two chains drawn separately may be one winding or two, and
+   * the person says which by joining them into one chain or by marking them apart — until they do, it
+   * is the fit's to judge.  So the fit's own answer is kept: chains it put on one wrap stay together.
    *
-   * And a chain the person has named is on the layer of that name and no other: same name, same wrap;
-   * different names, different wraps; whatever the fit thought.  That is the whole of what a person
-   * can usually see, and having to say instead how many wraps apart two places are — which they often
-   * cannot know — is what would make the tool unusable.
+   * One thing overrides it, and it is not a guess about what was meant but a fact about the papyrus:
+   * where two chains pass close by each other and are further apart through the sheet than a quarter
+   * of a wrap, no single surface can hold both.  Forcing one to — which is what happened while every
+   * place said was met exactly — makes it weave from one layer to the other and back between them.
+   * Those are split.
    */
-  const layers: { chains: typeof asked; said: string | null }[] = [];
+  const layers: { chains: typeof asked }[] = [];
   const cannot = (a: (typeof asked)[0], b: (typeof asked)[0]) => {
     const { along, sideways } = between(a, b, facing.get(a.sheet)!);
     return sideways <= spacing * SAME_NEAR && Math.abs(along) > spacing * SAME_DEPTH;
   };
   for (const one of order) {
-    if (one.said !== null) {
-      const already = layers.find((layer) => layer.said === one.said);
-      if (already !== undefined) already.chains.push(one);
-      else layers.push({ chains: [one], said: one.said });
-      continue;
-    }
     const with_ = layers.find(
-      (layer) =>
-        layer.said === null &&
-        layer.chains[0].sheet === one.sheet &&
-        !layer.chains.some((each) => cannot(each, one)),
+      (layer) => layer.chains[0].sheet === one.sheet && !layer.chains.some((each) => cannot(each, one)),
     );
     if (with_ !== undefined) with_.chains.push(one);
-    else layers.push({ chains: [one], said: null });
+    else layers.push({ chains: [one] });
   }
   /*
    * And where each layer goes: as near as it can to where its chains were found, and never onto the

@@ -124,6 +124,9 @@ export interface SurfaceCardViewProps {
   onMark: (at: Point | null) => void;
   // Puts a winding point down at this voxel, and takes hold of one already down.
   onPlace: (at: Point) => void;
+  // A press with a winding tool on a point already down: that place is on what is being drawn too,
+  // so the chain it belongs to and the chain being drawn are one and the same winding.
+  onJoin: (at: PickedPoint) => void;
   onPick: (picked: PickedPoint | undefined) => void;
   // What this piece made of each chain it was told, once it is built.
   onHeard: (heard: SurfaceFacts["heard"]) => void;
@@ -145,6 +148,7 @@ export function SurfaceCardView({
   onUnlink,
   onMark,
   onPlace,
+  onJoin,
   onPick,
   onHeard,
 }: SurfaceCardViewProps) {
@@ -171,6 +175,8 @@ export function SurfaceCardView({
    * and they fade as the card turns away from the sheet they are on.
    */
   const dots = useRef(new Map<string, PieceSpot>());
+  // The winding point the pointer is on, drawn ringed to say it can be pressed.
+  const [over, setOver] = useState<PickedPoint>();
   // Where each of them was drawn, in the card's own pixels: what a press looks through to find one.
   const drawnDots = useRef<{ chain: string; point: string; x: number; y: number }[]>([]);
   const [chainsMoved, setChainsMoved] = useState(0);
@@ -202,12 +208,14 @@ export function SurfaceCardView({
   // The listener below is set up once, and what it should do with an answer may have changed since.
   const onMarkRef = useRef(onMark);
   const onPlaceRef = useRef(onPlace);
+  const onJoinRef = useRef(onJoin);
   const onPickRef = useRef(onPick);
   const onHeardRef = useRef(onHeard);
   const toolRef = useRef(tool);
   useEffect(() => {
     onMarkRef.current = onMark;
     onPlaceRef.current = onPlace;
+    onJoinRef.current = onJoin;
     onPickRef.current = onPick;
     onHeardRef.current = onHeard;
     toolRef.current = tool;
@@ -564,7 +572,8 @@ export function SurfaceCardView({
             density,
             near,
             point.turn,
-            picked?.chain === one.id && picked.point === point.id,
+            (picked?.chain === one.id && picked.point === point.id) ||
+              (over?.chain === one.id && over.point === point.id),
             colour,
             loud,
           );
@@ -600,7 +609,7 @@ export function SurfaceCardView({
     context.stroke();
   };
 
-  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked]);
+  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked, over]);
 
   /*
    * Where the group's mark is on this piece.  Asked again whenever the mark moves or the piece is
@@ -661,12 +670,15 @@ export function SurfaceCardView({
     };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
+      const box = element.getBoundingClientRect();
+      const under = dotUnder(event.clientX - box.left, event.clientY - box.top);
       if (toolRef.current !== "look") {
         event.stopPropagation();
         event.preventDefault();
-        const box = element.getBoundingClientRect();
-        const held = dotUnder(event.clientX - box.left, event.clientY - box.top);
-        if (held !== undefined) onPickRef.current(held);
+        // A press on a point already down says that place is on what is being drawn too, and the two
+        // chains are one winding; anywhere else puts another point down.  Taking hold of a point is
+        // the arrow tool's press.
+        if (under !== undefined) onJoinRef.current(under);
         else {
           // Asked loosely: the places most worth saying something about are the ones the fit itself
           // has given up on.
@@ -680,8 +692,14 @@ export function SurfaceCardView({
         }
         return;
       }
+      // The arrow takes hold of a point, which is what Delete then acts on.
+      if (under !== undefined) {
+        event.stopPropagation();
+        event.preventDefault();
+        onPickRef.current(under);
+        return;
+      }
       if (plane === "uv") return;
-      const box = element.getBoundingClientRect();
       const across = down ? element.clientHeight : element.clientWidth;
       const at = down ? event.clientY - box.top : event.clientX - box.left;
       if (Math.abs(at - across / 2) > GRAB) return;
@@ -721,9 +739,14 @@ export function SurfaceCardView({
     const onPointerMove = (event: PointerEvent) => {
       if (pulling.current !== undefined) return;
       const box = element.getBoundingClientRect();
+      const under = dotUnder(event.clientX - box.left, event.clientY - box.top);
+      setOver((was) => (was?.chain === under?.chain && was?.point === under?.point ? was : under));
+      if (under !== undefined) {
+        element.style.cursor = "pointer";
+        return;
+      }
       if (toolRef.current !== "look") {
-        element.style.cursor =
-          dotUnder(event.clientX - box.left, event.clientY - box.top) === undefined ? "crosshair" : "pointer";
+        element.style.cursor = "crosshair";
         return;
       }
       if (plane === "uv") {
@@ -736,6 +759,7 @@ export function SurfaceCardView({
     };
     element.addEventListener("pointerdown", onPointerDown);
     element.addEventListener("pointermove", onPointerMove);
+    element.addEventListener("pointerleave", () => setOver(undefined));
     return () => {
       element.removeEventListener("pointerdown", onPointerDown);
       element.removeEventListener("pointermove", onPointerMove);

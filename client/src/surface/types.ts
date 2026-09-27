@@ -23,9 +23,6 @@ export interface ChainSaid {
   id: string;
   rev: number;
   kind: "same" | "step";
-  // Which layer the person said this chain is on, or null to let the fit work it out.  Two chains
-  // with the same name are one wrap; two with different names are different wraps.
-  layer: string | null;
   // (z, y, x) and the wrap, in the order they were placed.
   points: { at: [number, number, number]; turn: number | null }[];
 }
