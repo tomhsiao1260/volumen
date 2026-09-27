@@ -93,6 +93,8 @@ export function drawDot(
   turn: number | null,
   held = false,
   colour = STEP_DOT,
+  // A relative winding's points are drawn cornered, a same winding's round.
+  corners = false,
   /*
    * A chain nobody is working on is drawn small and quiet.  A card may carry dozens of them, and
    * drawn all alike they cover the papyrus they are about — which is the one thing the person is
@@ -110,10 +112,25 @@ export function drawDot(
     context.lineWidth = 1.6 * density;
     context.stroke();
   }
+  const radius = (loud ? 4.2 : 2.6) * (held ? HELD_LARGER : 1) * density;
   context.beginPath();
-  context.arc(x, y, (loud ? 4.2 : 2.6) * (held ? HELD_LARGER : 1) * density, 0, 2 * Math.PI);
+  /*
+   * A round point says "the same wrap", a cornered one says "a different wrap".  The shape carries it
+   * because nothing else does any more: the two are drawn in their own colours, but a colour is which
+   * chain this is, not which of the two things it says, and the wrap numbers that used to tell them
+   * apart are gone.
+   */
+  if (corners) {
+    const arm = radius * 1.35;
+    context.moveTo(x, y - arm);
+    context.lineTo(x + arm, y);
+    context.lineTo(x, y + arm);
+    context.lineTo(x - arm, y);
+    context.closePath();
+  } else context.arc(x, y, radius, 0, 2 * Math.PI);
   context.strokeStyle = STEP_EDGE;
   context.lineWidth = (loud ? 3.2 : 2.2) * density;
+  context.lineJoin = "round";
   context.stroke();
   context.fillStyle = colour;
   context.fill();
@@ -480,7 +497,18 @@ export function CardView({
         drawnDots.current.push({ chain: one.id, point: point.id, x: place.x, y: place.y });
         context.save();
         if (!one.on) context.globalAlpha = 0.35;
-        drawDot(context, place.x * density, place.y * density, density, place.near, place.turn, held, colour, loud);
+        drawDot(
+          context,
+          place.x * density,
+          place.y * density,
+          density,
+          place.near,
+          place.turn,
+          held,
+          colour,
+          one.kind === "step",
+          loud,
+        );
         context.restore();
       });
     }
@@ -575,18 +603,22 @@ export function CardView({
          */
         if (under !== undefined) onJoinRef.current(under);
         else {
+          onPickRef.current(undefined);
           const at = pointerRef.current;
           if (at !== undefined) onPlaceRef.current(at);
         }
         return;
       }
-      // The arrow takes hold of a point, which is what Delete then acts on.
+      // The arrow takes hold of a point, which is what Delete then acts on — and lets go of one when
+      // the press lands anywhere else on the data, since a ring left behind on a point nobody is
+      // working on says something is held that is not.
       if (under !== undefined) {
         event.stopPropagation();
         event.preventDefault();
         onPickRef.current(under);
         return;
       }
+      onPickRef.current(undefined);
       const line = lineUnder(event.clientX - box.left, event.clientY - box.top);
       if (line === undefined) return;
       const sheet = sheetsOf(sourceId).find((one) => one.cardId === line.cardId);

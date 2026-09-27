@@ -317,9 +317,10 @@ export function App() {
     const point = {
       id: `${madeAt}-${(placed.current += 1)}`,
       at: { x: at.x, y: at.y, z: at.z },
-      // A chain that says "the same sheet" carries no wrap at all — that is what tells the fitter,
-      // ours and the community's, which of the two things is being said.
-      turn: kind === "same" ? null : open === undefined ? 0 : (open.points[open.points.length - 1]?.turn ?? 0) + 1,
+      // No wrap counted, on either kind.  A relative winding says its points are on different wraps;
+      // how many wraps apart they are is a thing to add when there is a need for it, and until then
+      // asking for it would be asking for what the person cannot see.
+      turn: null,
       madeAt,
     };
     const saved = setChain(
@@ -357,17 +358,43 @@ export function App() {
     const source = card.sourceId === null ? undefined : latest.current.sources[card.sourceId];
     const scan = source === undefined ? "" : scanOf(source);
     const touched = chain(at.chain);
-    // Only two chains that say the same KIND of thing can be one chain.  A press on a chain of the
-    // other kind is a statement about how the two relate, which is a thing of its own.
-    if (touched === undefined || touched.kind !== kind || touched.scan !== scan) return;
+    const place = touched?.points.find((point) => point.id === at.point);
+    if (touched === undefined || place === undefined || touched.scan !== scan) return;
     const drawing = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
     const open = drawing?.kind === kind && drawing.scan === scan ? drawing : undefined;
+
+    /*
+     * A relative winding drawn through a place does not take that place's chain in — it points at it.
+     * Saying "these two are different wraps" is a relation between two groups, and a relation is not a
+     * merger: both groups stay as they are, drawn as they were, and what is written down is a point of
+     * the relative winding that names the place it was put on.
+     */
+    if (kind === "step") {
+      const madeAt = Date.now();
+      const point = {
+        id: `${madeAt}-${(placed.current += 1)}`,
+        at: { ...place.at },
+        turn: null,
+        of: { chain: touched.id, point: place.id },
+        madeAt,
+      };
+      const saved = setChain(
+        open === undefined
+          ? { id: newChainId(), scan, kind, points: [point], on: true, note: "", author: "", rev: 0, madeAt }
+          : { ...open, points: [...open.points, point] },
+      );
+      if (open === undefined) dispatch({ type: "adding", chainId: saved.id });
+      return;
+    }
+
+    // And a same winding drawn through a place does take it in: a place cannot be on two windings, so
+    // the chain it belonged to and the chain being drawn are one and the same.
+    if (touched.kind !== kind) return;
     if (open === undefined) {
       dispatch({ type: "adding", chainId: touched.id });
       return;
     }
     if (open.id === touched.id) return;
-    // The chain being drawn takes the other one in, and keeps the order they were drawn in.
     setChain({ ...open, points: [...open.points, ...touched.points] });
     forgetChain(touched.id);
   };

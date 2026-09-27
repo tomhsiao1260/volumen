@@ -23,8 +23,24 @@ export interface WindPoint {
   id: string;
   // The voxel, in the scan's own full-resolution grid.
   at: { x: number; y: number; z: number };
-  // Which wrap, counted along the chain; null on a `same` chain.  Only differences mean anything.
+  /*
+   * Which wrap, counted along the chain.  Null everywhere for now: a person putting two places down as
+   * different wraps can usually see that they ARE different without being able to say how many wraps
+   * lie between them, and being made to say so to be allowed to say the first is what would make the
+   * tool unusable.  Counting them is a thing to add when there is a need for it; until then a relative
+   * winding says only that its points are on different wraps, which is what it is drawn to say.
+   */
   turn: number | null;
+  /*
+   * The point this one was put down ON, when it was put down on one already there.
+   *
+   * Two chains are named, not just the point, because what a reader wants from it is which GROUPS have
+   * been said to be different wraps, and finding the chain of a point otherwise means walking every
+   * point of every chain.  It is written on the point that refers, never on the point referred to, so
+   * that nothing has to be kept in step: take a chain away and what pointed at it is a dangling name,
+   * which reads as nothing said rather than as something false.
+   */
+  of?: { chain: string; point: string };
   madeAt: number;
 }
 
@@ -75,10 +91,12 @@ export function chainsOf(scan: string | undefined) {
  * before.  The first chain of each kind keeps exactly the colour the kind always had.
  *
  * The blues around 200 are left out: that is the colour of the fitted wrap's line on a slice card,
- * and an annotation must never be mistaken for the surface it is correcting.
+ * and an annotation must never be mistaken for the surface it is correcting.  The order is not the
+ * colour wheel's: chains are drawn one after another as they are made, so what matters is that each
+ * is far from the one before it, and no two neighbours here are less than a hundred degrees apart.
  */
-const SAME_HUES = [168, 132, 276, 316, 246, 104];
-const STEP_HUES = [32, 48, 16];
+const SAME_HUES = [168, 300, 100, 240, 135, 330, 75, 265];
+const STEP_HUES = [32, 52, 16, 42];
 
 export function chainColour(one: WindChain, alpha = 0.95) {
   const kin = chainsOf(one.scan).filter((each) => each.kind === one.kind);
@@ -87,7 +105,9 @@ export function chainColour(one: WindChain, alpha = 0.95) {
     kin.findIndex((each) => each.id === one.id),
   );
   const hues = one.kind === "same" ? SAME_HUES : STEP_HUES;
-  return `hsla(${hues[at % hues.length]}, 100%, 60%, ${alpha})`;
+  // Every other one a shade lighter as well, so that two chains are told apart even where a screen or
+  // an eye is poor at the hue between them.
+  return `hsla(${hues[at % hues.length]}, 100%, ${at % 2 === 0 ? 60 : 70}%, ${alpha})`;
 }
 
 export function chain(id: string) {

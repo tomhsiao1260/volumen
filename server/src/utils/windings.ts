@@ -24,6 +24,9 @@ export interface WindPoint {
   // Which wrap, counted along the chain: 0, 1, 2, … for a chain that counts outward, and null for
   // one that only says "the same wrap".  Only the differences mean anything.
   turn: number | null;
+  // The point this one was put down on, when it was put down on one already there.  The chain is named
+  // beside it so that "which groups were said to be different wraps" can be read without a search.
+  of?: { chain: string; point: string };
   madeAt: number;
 }
 
@@ -74,6 +77,9 @@ function parsePoint(value: any): WindPoint | undefined {
     id: text(value.id),
     at: { x: at.x, y: at.y, z: at.z },
     turn: value.turn == null ? null : number(value.turn, 0),
+    ...(text(value.of?.chain) === "" || text(value.of?.point) === ""
+      ? {}
+      : { of: { chain: text(value.of.chain), point: text(value.of.point) } }),
     madeAt: number(value.madeAt, 0),
   };
 }
@@ -105,7 +111,10 @@ export async function getChains(scan: string): Promise<WindChain[]> {
     const chains = Array.isArray(stored?.chains) ? stored.chains : [];
     return chains
       .map((chain: unknown) => parseChain(chain, scan))
-      .filter((chain: WindChain | undefined): chain is WindChain => chain !== undefined);
+      .filter((chain: WindChain | undefined): chain is WindChain => chain !== undefined)
+      // A chain with nothing in it is not a record of anything.  Older files kept every deletion as an
+      // empty chain; they are dropped on the way in, and the next save writes the file without them.
+      .filter((chain: WindChain) => chain.deletedAt === undefined && chain.points.length > 0);
   } catch {
     return [];
   }
@@ -116,6 +125,13 @@ let writing: Promise<unknown> = Promise.resolve();
 /**
  * Merges `changed` into what is stored for `scan`, one chain at a time: the higher revision wins, and
  * a chain nobody has touched is left alone.  Returns everything the scan now has.
+ *
+ * A chain that comes in deleted takes the stored one away rather than being written down as an empty
+ * one.  A tombstone is how a deletion travels — it has to beat the revision it is deleting — but it is
+ * not a record of anything, and a file filling up with `"points": []` is a file that no longer says
+ * plainly what has been annotated.  The cost is that a client that has not heard of the deletion can
+ * put the chain back; with one person and one board that has not happened, and the file being readable
+ * is worth more.  If several people ever annotate one scan at once, this is the line to revisit.
  */
 export async function saveChains(scan: string, changed: unknown): Promise<WindChain[]> {
   const file = scanPath(scan);
@@ -128,9 +144,11 @@ export async function saveChains(scan: string, changed: unknown): Promise<WindCh
       const chain = parseChain(value, scan);
       if (chain === undefined) continue;
       const had = byId.get(chain.id);
-      if (had === undefined || chain.rev >= had.rev) byId.set(chain.id, chain);
+      if (had !== undefined && chain.rev < had.rev) continue;
+      if (chain.deletedAt !== undefined || chain.points.length === 0) byId.delete(chain.id);
+      else byId.set(chain.id, chain);
     }
-    result = [...byId.values()];
+    result = [...byId.values()].filter((chain) => chain.deletedAt === undefined && chain.points.length > 0);
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(file, JSON.stringify({ version: 1, chains: result }, null, 2), "utf-8");
   });

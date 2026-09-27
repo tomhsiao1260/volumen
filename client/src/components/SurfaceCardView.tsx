@@ -575,6 +575,7 @@ export function SurfaceCardView({
             (picked?.chain === one.id && picked.point === point.id) ||
               (over?.chain === one.id && over.point === point.id),
             colour,
+            one.kind === "step",
             loud,
           );
           context.restore();
@@ -680,6 +681,7 @@ export function SurfaceCardView({
         // the arrow tool's press.
         if (under !== undefined) onJoinRef.current(under);
         else {
+          onPickRef.current(undefined);
           // Asked loosely: the places most worth saying something about are the ones the fit itself
           // has given up on.
           surfaceEngine().where(
@@ -692,13 +694,14 @@ export function SurfaceCardView({
         }
         return;
       }
-      // The arrow takes hold of a point, which is what Delete then acts on.
+      // The arrow takes hold of a point, and lets go of one when the press lands anywhere else.
       if (under !== undefined) {
         event.stopPropagation();
         event.preventDefault();
         onPickRef.current(under);
         return;
       }
+      onPickRef.current(undefined);
       if (plane === "uv") return;
       const across = down ? element.clientHeight : element.clientWidth;
       const at = down ? event.clientY - box.top : event.clientX - box.left;
