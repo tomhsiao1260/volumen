@@ -47,6 +47,11 @@ export function forgetSheet(cardId: string) {
   if (sheets.delete(cardId)) changed();
 }
 
+// The one a card is showing, for the card itself to ask what holds its wrap up.
+export function sheetOf(cardId: string) {
+  return sheets.get(cardId);
+}
+
 // The sheets shown of one scan, which are the ones a slice card of that scan can draw.
 export function sheetsOf(sourceId: string | null) {
   if (sourceId === null) return [];

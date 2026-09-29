@@ -12,6 +12,12 @@ export type { SurfacePlane };
  * card works out where a marked place falls in its frame, which is the same mapping the other way
  * round (`mapping` in `render.ts`).
  */
+/*
+ * What held a node of a fitted wrap up.  Shared because both sides need it: the fit writes it and the
+ * card washes itself with it.
+ */
+export const WHY_NOTHING = 0, WHY_PREDICTION = 1, WHY_SCAN = 2, WHY_SAID = 3;
+
 export const SPAN = 2;
 
 /*

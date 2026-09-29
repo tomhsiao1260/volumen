@@ -988,3 +988,28 @@ button:focus-visible,
 .card-between {
   white-space: nowrap;
 }
+
+/*
+ * What holds the wrap up, asked for.  It is off by default and says nothing while it is off: the
+ * card is for reading the papyrus, and a card permanently washed in diagnosis is harder to read.
+ */
+.card-why {
+  flex: none;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 0 4px;
+  background: none;
+  color: #7c8794;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.card-why:hover {
+  color: #c3ccd6;
+}
+
+.card-why.on {
+  border-color: #ff4646;
+  color: #ff8a8a;
+}

@@ -21,6 +21,7 @@
 
 import type { LasagnaField, Vec3 } from "./field";
 import type { ChainSaid } from "./types";
+import { WHY_NOTHING, WHY_PREDICTION, WHY_SAID, WHY_SCAN } from "./types";
 
 // Positions and directions are full-resolution voxels in (z, y, x) order.
 const add = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -200,7 +201,7 @@ const SCAN_CONTRAST = 28;
  */
 const GUESSED = 0.72;
 // What a node of a fitted wrap ended up standing on.
-export const WHY_NOTHING = 0, WHY_PREDICTION = 1, WHY_SCAN = 2, WHY_SAID = 3;
+
 /*
  * Of a sheet's spacing: how near the next sheet may be and how far, when a piece steps from one to
  * the next.  The search has to start beyond the sheet it is leaving — the prediction marks both of
@@ -273,6 +274,13 @@ const SAID_IS_PAPYRUS = 0.5;
  */
 // How near a wrap has to come to a place held away from it before the claim is taken back.
 const KEEP_OFF = 0.35;
+/*
+ * And how far it must stay from one, as a part of the wrap spacing.  A relative winding says the
+ * place is on another layer; two layers are one spacing apart, so anything approaching half of that
+ * is the wrap sitting on the wrong one.  It is a floor, not a target: a wrap already clear of the
+ * place is asked for nothing.
+ */
+const KEEP_APART = 0.45;
 // How far a place may be moved onto the papyrus: enough for a hand, not enough to reach the next wrap.
 const SNAP_REACH = 0.33;
 const SAME_NEAR = 0.6;
@@ -411,6 +419,17 @@ function fitSheet(
   // How far each node may drift from where this fit started, as a part of its own wrap spacing.  One
   // number for the whole sheet, until a person has said something about part of it.
   wander: number | Float64Array = BASE_STRAY,
+  /*
+   * How much of each node's place came from a person, from `told`.  Where it is 1 the search window
+   * is nothing and the band pull is switched off for that node entirely.
+   *
+   * An annotation is a constraint, not a place to start looking from.  Before this, `told` moved the
+   * wrap onto what was said and then thirty sweeps of band pull asked the prediction again from the
+   * new place and put it back on the band next door — so a person could say the same thing twice and
+   * watch the line not move, which is what makes a tool useless.  This is how VC3D has it: where
+   * somebody has spoken it does not go looking for evidence to overrule them.
+   */
+  firm?: Float64Array,
 ) {
   const { nu, nv, hu, hv } = grid;
   const count = nu * nv;
@@ -419,7 +438,7 @@ function fitSheet(
   const moves = new Float64Array(count);
   const smooth = new Float64Array(count);
   const held = new Uint8Array(count);
-  const span = (k: number) => sp[k] * LOOK;
+  const span = (k: number) => sp[k] * LOOK * (firm === undefined ? 1 : 1 - firm[k]);
   const stray = (k: number) => sp[k] * (typeof wander === "number" ? wander : wander[k]);
   // A node that was told where to be may go there, however far that is: the clamp is what keeps the
   // fit from wandering onto a neighbouring sheet, and being on the neighbouring sheet is the very
@@ -446,9 +465,15 @@ function fitSheet(
       if (asking) fromScan = 0;
       for (let k = 0; k < count; k++) {
         const o = k * 3;
-        moves[k] = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span(k));
+        const look = span(k);
+        // Nothing left to look in: this node is where a person put it.
+        if (look < 0.5) {
+          moves[k] = NaN;
+          continue;
+        }
+        moves[k] = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], look);
         if (asking && Number.isNaN(moves[k])) {
-          moves[k] = scanRidge(scan!, X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span(k));
+          moves[k] = scanRidge(scan!, X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], look);
           if (!Number.isNaN(moves[k])) fromScan++;
         }
       }
@@ -1180,16 +1205,53 @@ export function buildPatch(
      * second is the same field as the first, solved once more with every told place worth one: it is
      * how much of this node's position came from a person rather than from the guess it started as.
      */
+    /*
+     * A place one of this wrap's chains was told to keep away from, turned into how far along the
+     * normal the wrap has to move to clear it.
+     *
+     * This is the other half of what a person can say.  "The wrap passes here" is a place to be met;
+     * "this is another layer" is a place to be avoided, and until now it was only a mask — `covers`
+     * stopped a few nodes being DRAWN and the wrap itself never moved, so a pit marked relative came
+     * back looking exactly the same.  It is one-sided, the way VC3D has its winding constraints: a
+     * wrap already clear of the place asks for nothing, so saying "not here" about somewhere the wrap
+     * was never going pushes nothing around.
+     */
+    const keptFrom = (at: number) => {
+      const held = holds.get(at);
+      if (held === undefined) return [];
+      const off: Vec3[] = [];
+      for (const one of new Set(held.map((each) => each.chain))) off.push(...(keepOff.get(one) ?? []));
+      return off;
+    };
+    const pushOff = (off: Vec3[], sheet: Float64Array, taken: Set<number>) => {
+      const out: { node: number; value: number }[] = [];
+      for (const place of off) {
+        const found = onWrap(sheet, nu, nv, surfN, place);
+        if (found === undefined || !found.over) continue;
+        const want = sp[found.corners[0]] * KEEP_APART;
+        if (Math.abs(found.gap) >= want) continue;
+        // Away from the place along the normal, keeping the side the wrap is already on.
+        const value = found.gap - (Math.sign(found.gap) || 1) * want;
+        // A place said to be ON this wrap wins: a person who says both about the same node is
+        // telling us the piece is wrong somewhere else, not that the node should be pulled apart.
+        for (const node of found.corners) if (!taken.has(node)) out.push({ node, value });
+      }
+      return out;
+    };
+
     const told = (at: number, sheet: Float64Array, wander: Float64Array, firm: Float64Array) => {
       const held = holds.get(at);
       if (held === undefined || held.length === 0) return;
       const papyrus = before?.get(at)?.held;
+      const off = keptFrom(at);
       measure(sheet);
       const diagonal = Math.hypot(grid.hu, grid.hv);
       for (let round = 0; round < SAID_ROUNDS; round++) {
         surfaceNormals(sheet, nu, nv, surfN, n0);
         // What is still wanted, from where the wrap is now: it shrinks as the places are met.
-        saidField(grid, sp, placeValues(held, sheet, nu, nv, surfN), u, papyrus);
+        const wanted = placeValues(held, sheet, nu, nv, surfN);
+        const taken = new Set(wanted.map((one) => one.node));
+        saidField(grid, sp, [...wanted, ...pushOff(off, sheet, taken)], u, papyrus);
         for (let k = 0; k < count; k++) {
           const o = k * 3;
           sheet[o] += surfN[o] * u[k];
@@ -1207,12 +1269,18 @@ export function buildPatch(
             }
       }
       surfaceNormals(sheet, nu, nv, surfN, n0);
-      // One at every told node asks for the shape of the field rather than the correction, which
-      // comes out as how much of each node's position came from a person rather than from the guess.
+      /*
+       * One at every node a person moved — met or pushed off — asks for the shape of the field
+       * rather than the correction, which comes out as how much of each node's position came from a
+       * person rather than from the guess.  `fitSheet` then leaves those nodes alone, which is the
+       * whole point: a correction the band pull is free to undo is not a correction.
+       */
+      const met = placeValues(held, sheet, nu, nv, surfN);
+      const pushed = pushOff(off, sheet, new Set(met.map((one) => one.node)));
       saidField(
         grid,
         sp,
-        placeValues(held, sheet, nu, nv, surfN).map((one) => ({ ...one, value: 1 })),
+        [...met, ...pushed].map((one) => ({ ...one, value: 1 })),
         u,
         papyrus,
       );
@@ -1333,7 +1401,7 @@ export function buildPatch(
     measure(middle);
     // The base wrap keeps its own freedom whether or not anything was said about it: `baseSurface` is
     // a guess made from the normals and needs the room to find the papyrus either way.
-    const first = fitSheet(field, scan, middle, grid, sp, n0, wander);
+    const first = fitSheet(field, scan, middle, grid, sp, n0, wander, firm);
     looked += first.fromScan;
     for (const one of holds.get(0) ?? []) first.why[one.node] = WHY_SAID;
     pin(0, middle);
@@ -1352,7 +1420,7 @@ export function buildPatch(
         const spoken = new Float64Array(count);
         told(k * dir, next, loose, spoken);
         measure(next);
-        const fitted = fitSheet(field, scan, next, grid, sp, n0, loose);
+        const fitted = fitSheet(field, scan, next, grid, sp, n0, loose, spoken);
         looked += fitted.fromScan;
         for (const one of holds.get(k * dir) ?? []) fitted.why[one.node] = WHY_SAID;
         pin(k * dir, next);

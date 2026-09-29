@@ -17,9 +17,9 @@ import { sourceLabel } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
-import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
+import { setDrawnDots, setSpots, sheetOf, type DrawnDot } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
-import { SPAN } from "../surface/types";
+import { SPAN, WHY_NOTHING, WHY_SAID, WHY_SCAN } from "../surface/types";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { drawDot, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
 
@@ -194,6 +194,14 @@ export function SurfaceCardView({
   const [drawn, setDrawn] = useState(false);
   const [loading, setLoading] = useState(true);
   const [planeMenu, setPlaneMenu] = useState(false);
+  /*
+   * Whether to wash the card with what holds each part of the wrap up.  The flattening is a guess in
+   * places and a reading of the data in others, and which is which is invisible in the picture: a
+   * stretch the grid carried across a hole looks exactly like papyrus, only wrong.  So it can be
+   * asked for, and then the places nobody found anything glow — which is where an annotation is
+   * worth making, and the plainest way to see whether one did anything.
+   */
+  const [showWhy, setShowWhy] = useState(false);
   /*
    * The piece is built again when what was said about the sheets changes — the spacing decides how
    * big a box of prediction is read and how finely, so there is nothing of the old piece to keep.
@@ -524,6 +532,51 @@ export function SurfaceCardView({
       element.height = height;
     }
     context.clearRect(0, 0, width, height);
+    /*
+     * What holds this wrap up, one square per node, under everything else.  The prediction is left
+     * clear, since that is the ordinary case and washing the whole card says nothing; what shows is
+     * the rest — red where nothing was found and the grid carried the surface across, blue where the
+     * scan was read because the prediction had nothing to say, green where a person said so.
+     */
+    if (showWhy && wantedPlane.current === "uv" && shown.current !== undefined) {
+      const found = sheetOf(id);
+      if (found !== undefined && found.why.length === found.nu * found.nv) {
+        const { nu, nv } = found;
+        const small = document.createElement("canvas");
+        small.width = nu;
+        small.height = nv;
+        const into = small.getContext("2d");
+        if (into !== null) {
+          const paint = into.createImageData(nu, nv);
+          for (let k = 0; k < nu * nv; k++) {
+            const [r, g, b, a] =
+              found.why[k] === WHY_NOTHING
+                ? [255, 70, 70, 120]
+                : found.why[k] === WHY_SCAN
+                  ? [80, 170, 255, 80]
+                  : found.why[k] === WHY_SAID
+                    ? [90, 230, 140, 90]
+                    : [0, 0, 0, 0];
+            paint.data[k * 4] = r;
+            paint.data[k * 4 + 1] = g;
+            paint.data[k * 4 + 2] = b;
+            paint.data[k * 4 + 3] = a;
+          }
+          into.putImageData(paint, 0, 0);
+          context.save();
+          // One node is one square, not a gradient: a node either stood on something or it did not.
+          context.imageSmoothingEnabled = false;
+          /*
+           * The grid's corners are the corners of the picture — a node is a point of it, so the wash
+           * is drawn half a cell outside on every side for the cells to be centred on their nodes,
+           * the same mapping `render.ts` draws the card itself with.
+           */
+          const cw = width / (nu - 1), ch = height / (nv - 1);
+          context.drawImage(small, -cw / 2, -ch / 2, width + cw, height + ch);
+          context.restore();
+        }
+      }
+    }
     // Which wrap this card is on, which is what every distance through the papyrus is measured from.
     const sheet = shown.current ?? wanted.current;
     /*
@@ -635,7 +688,21 @@ export function SurfaceCardView({
     context.stroke();
   };
 
-  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked, over]);
+  useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked, over, showWhy]);
+
+  /*
+   * And how much of the wrap is guess rather than reading — the one number that says whether a card
+   * is showing the papyrus or the grid's opinion of where it would be.  Worked out only while the
+   * wash is asked for, since it is the wash put into a word.
+   */
+  const guessed = (() => {
+    if (!showWhy) return undefined;
+    const found = sheetOf(id);
+    if (found === undefined || found.why.length === 0) return undefined;
+    let nothing = 0;
+    for (const one of found.why) if (one === WHY_NOTHING) nothing++;
+    return Math.round((100 * nothing) / found.why.length);
+  })();
 
   /*
    * And where each winding point of this scan is on this piece.  Asked again whenever the points
@@ -898,6 +965,15 @@ export function SurfaceCardView({
           <span className="card-waiting" title="The surface is left alone while you are annotating">
             Enter to take it in
           </span>
+        )}
+        {plane === "uv" && (
+          <button
+            className={`card-why${showWhy ? " on" : ""}`}
+            onClick={() => setShowWhy((was) => !was)}
+            title="What holds each part of this wrap up: red nothing was found, blue read from the scan, green said by a person"
+          >
+            {guessed === undefined ? "why" : `why · ${guessed}% guessed`}
+          </button>
         )}
         <span className="card-centre">{formatVoxel(seed)}</span>
       </div>
