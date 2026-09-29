@@ -13,9 +13,9 @@ import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
 import { chunksFor, LasagnaField, readMask } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
-import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt } from "./patch";
+import { buildPatch, coverageAt, layerGrid, layerWhy, nearestOn, outward, patchFacts, positionAt } from "./patch";
 import type { SurfacePlane } from "./render";
-import { drawPlane, pieceAt, planeChunks } from "./render";
+import { drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
 import type { ChainSaid, FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./types";
 import { SPAN } from "./types";
@@ -262,6 +262,9 @@ class Card {
         ny: await channelLevel(lasagna.channels.ny.sourceId, lasagna.channels.ny.level),
       };
       const at: Vec3 = [seed.z, seed.y, seed.x];
+      // Before the piece is built, not after: the fit reads the scan itself where the prediction has
+      // nothing to say, and a scan it does not have yet is a fit that never asks.
+      this.scan = await scan;
       const built = await this.build(at, outward(lasagna.umbilicus, at));
       if (this.closed) return;
       if (built === undefined) {
@@ -270,7 +273,6 @@ class Card {
       }
       this.patch = built.patch;
       this.spacing = built.spacing;
-      this.scan = await scan;
       if (this.closed) return;
       this.post({
         type: "status",
@@ -385,10 +387,50 @@ class Card {
         ? undefined
         : await maskLevel(lasagna.mask, 2 * Math.max(...half) * lasagna.micron),
     );
+    /*
+     * And the scan itself, for the fit to look at where the prediction says nothing.  Coarse on
+     * purpose: what it is asked is "where is the sheet along this line", and the wraps are tens of
+     * voxels apart, so a level four or eight times coarser answers that for a sixty-fourth of the
+     * downloading.  It is asked for the same box the prediction was read over.
+     */
+    const lo = seed.map((v, i) => v - half[i]) as Vec3;
+    const hi = seed.map((v, i) => v + half[i]) as Vec3;
+    const scan = this.scanAt(lo, hi, spacing);
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains);
+    const patch = buildPatch(field, scan, seed, n, grid, K, PER, spacing, this.request.chains);
     const fitted = performance.now() - started - read;
     return patch === undefined ? undefined : { patch, spacing, read, fitted };
+  }
+
+  /**
+   * A way of reading the scan over a box, at a level coarse enough to be cheap and fine enough to
+   * show a sheet.  Undefined when the scan is not open yet or nothing could be read, in which case
+   * the fit simply has only the prediction, as it always had.
+   */
+  private scanAt(lo: Vec3, hi: Vec3, spacing: number) {
+    const levels = this.scan;
+    if (levels === undefined || levels.length === 0) return undefined;
+    // Fine enough that a wrap is ten voxels or so across, and no finer: what it is asked is "where is
+    // the sheet along this line", and the wraps are tens of voxels apart.
+    const want = Math.max(1, spacing / 10);
+    let level = levels[0];
+    for (const one of levels) if (one.factor <= want && one.factor > level.factor) level = one;
+    const f = level.factor;
+    const box = (v: Vec3) => v.map((c) => (c + 0.5) / f - 0.5) as Vec3;
+    const [a, b] = [box(lo), box(hi)];
+    /*
+     * Asked for, not waited for.  Building a piece must not stop while a dozen megabytes of scan come
+     * down a wire — the card would sit saying "looking for the sheet" for a minute, which is what it
+     * did when this waited.  So the chunks are set going and the fit reads whatever has arrived;
+     * `sample` answers -1 for the rest and `scanRidge` says nothing about those places.  The piece is
+     * built again whenever anything is said or the card moves, and by then they are here.
+     */
+    void level
+      .loadAll(level.chunksBetween(a.map(Math.floor) as Vec3, b.map((c) => Math.floor(c) + 1) as Vec3))
+      .catch(() => undefined);
+    const reader = new LevelReader(level);
+    return (z: number, y: number, x: number) =>
+      reader.sample((z + 0.5) / f - 0.5, (y + 0.5) / f - 0.5, (x + 0.5) / f - 0.5);
   }
 
   /**
@@ -493,6 +535,7 @@ class Card {
         if (this.sent !== line) {
           this.sent = line;
           const grid = layerGrid(patch, sheet);
+          const { why, away } = layerWhy(patch, sheet);
           this.post(
             {
               type: "sheet",
@@ -501,10 +544,12 @@ class Card {
               nu: patch.nu,
               nv: patch.nv,
               grid: grid.buffer,
+              why: why.buffer,
+              away: away.buffer,
               normal: patch.normal,
               spacing: this.spacing,
             },
-            [grid.buffer],
+            [grid.buffer, why.buffer, away.buffer],
           );
         }
         /*

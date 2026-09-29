@@ -112,6 +112,10 @@ export interface Patch extends PatchGrid {
   spread: { chain: string; sheet: number; sheets: number; used: number; of: number; moved: number }[];
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
+  // How many nodes the scan found a sheet for that the prediction had nothing to say about.
+  looked: number;
+  // Per fitted wrap: what held each of its nodes up, and how far it ended from that.
+  why: Map<number, { why: Uint8Array; away: Float32Array }>;
 }
 
 /**
@@ -185,6 +189,19 @@ const SWEEPS = 30;
 // it started before it is no longer the same sheet.
 const LOOK = 0.45;
 /*
+ * How much brighter the brightest part of a stretch of scan has to be than its darkest before the fit
+ * will believe there is a sheet in it, out of 255.  A stretch with no contrast is air, or one flat
+ * grey, and a brightest point of noise is not a sheet.
+ */
+const SCAN_CONTRAST = 28;
+/*
+ * How strongly a place is drawn that neither the prediction nor the scan found a sheet for, and which
+ * is there because the grid carried the surface across it.  Not nothing, and not quite the rest.
+ */
+const GUESSED = 0.72;
+// What a node of a fitted wrap ended up standing on.
+export const WHY_NOTHING = 0, WHY_PREDICTION = 1, WHY_SCAN = 2, WHY_SAID = 3;
+/*
  * Of a sheet's spacing: how near the next sheet may be and how far, when a piece steps from one to
  * the next.  The search has to start beyond the sheet it is leaving — the prediction marks both of
  * its faces, and a search that starts too near finds the far one and calls it the next sheet, which
@@ -256,6 +273,8 @@ const SAID_IS_PAPYRUS = 0.5;
  */
 // How near a wrap has to come to a place held away from it before the claim is taken back.
 const KEEP_OFF = 0.35;
+// How far a place may be moved onto the papyrus: enough for a hand, not enough to reach the next wrap.
+const SNAP_REACH = 0.33;
 const SAME_NEAR = 0.6;
 const SAME_DEPTH = 0.25;
 const PIN_ROUNDS = 8;
@@ -329,8 +348,56 @@ function holdEdge(X: Float64Array, a: number, b: number, rest: number, stiffness
  * Returns which points ended up on a sheet.  The rest are holes: the papyrus has parted there, or is
  * not there at all, and a card showing a plausible picture of the wrong place would be worse.
  */
+/**
+ * Where the papyrus is, according to the scan itself, along the normal from a place.
+ *
+ * The prediction is a model and models have blind spots — a crushed or delaminated stretch where it
+ * says nothing at all, which is exactly the stretch a person is looking at and can see the papyrus
+ * in.  So where it says nothing, the fit asks the same thing the person is looking at: the brightest
+ * band within its search window, and the middle of that band, the way `nearestSheet` takes the middle
+ * of a predicted one.
+ *
+ * Nothing is taken from a stretch with no contrast in it — all air, or one flat grey — because the
+ * brightest point of noise is not a sheet, and a sheet invented out of noise is worse than a hole.
+ */
+function scanRidge(
+  scan: (z: number, y: number, x: number) => number,
+  z: number,
+  y: number,
+  x: number,
+  nz: number,
+  ny: number,
+  nx: number,
+  span: number,
+) {
+  const step = Math.max(0.5, span / 20);
+  const count = Math.floor((2 * span) / step) + 1;
+  const seen = new Float32Array(count);
+  let best = -1, at = 0, low = 255, high = -1;
+  for (let i = 0; i < count; i++) {
+    const t = -span + i * step;
+    const v = scan(z + nz * t, y + ny * t, x + nx * t);
+    // A chunk that has not arrived: say nothing, rather than half of it.
+    if (v < 0) return NaN;
+    seen[i] = v;
+    if (v > best) (best = v), (at = i);
+    if (v < low) low = v;
+    if (v > high) high = v;
+  }
+  if (high - low < SCAN_CONTRAST) return NaN;
+  // The band around the brightest place: out from it while the scan stays above halfway.
+  const edge = (low + high) / 2;
+  let from = at, to = at;
+  while (from > 0 && seen[from - 1] >= edge) from--;
+  while (to + 1 < count && seen[to + 1] >= edge) to++;
+  return -span + ((from + to) / 2) * step;
+}
+
 function fitSheet(
   field: LasagnaField,
+  // The scan, for the places the prediction has nothing to say about.  It takes the scan's own
+  // full-resolution voxels and answers -1 where the data it needs has not arrived.
+  scan: ((z: number, y: number, x: number) => number) | undefined,
   X: Float64Array,
   grid: PatchGrid,
   // How far apart the wraps are AT EACH NODE.  One number for the whole card is not enough: measured
@@ -359,6 +426,9 @@ function fitSheet(
   // thing being corrected.
   const most = Math.min(hu, hv);
   const diagonal = Math.hypot(hu, hv);
+  // How many nodes the scan found a sheet for that the prediction had nothing to say about: the size
+  // of the hole the prediction left, and of how much of it was filled by looking.
+  let fromScan = 0;
 
   for (let sweep = 0; sweep < SWEEPS; sweep++) {
     if (sweep % 10 === 0) resampleNormals(field, X, N, count, reference);
@@ -367,9 +437,20 @@ function fitSheet(
     // Asking the prediction is most of the work and the answer hardly changes between one sweep and
     // the next, so it is asked every other sweep and the grid settles in between.
     if (sweep % 2 === 0 || sweep >= SWEEPS - 2) {
+      /*
+       * The scan is asked only where the prediction said nothing, and only once the grid has settled
+       * enough that a node is somewhere sensible to look from — and then every sixth sweep, since
+       * looking is the expensive half and the answer hardly moves between sweeps.
+       */
+      const asking = scan !== undefined && sweep >= SWEEPS / 3 && sweep % 6 === 0;
+      if (asking) fromScan = 0;
       for (let k = 0; k < count; k++) {
         const o = k * 3;
         moves[k] = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span(k));
+        if (asking && Number.isNaN(moves[k])) {
+          moves[k] = scanRidge(scan!, X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], span(k));
+          if (!Number.isNaN(moves[k])) fromScan++;
+        }
       }
       median3(moves, smooth, nu, nv);
     }
@@ -410,44 +491,79 @@ function fitSheet(
     }
   }
 
+  /*
+   * And last, what each node ended up standing on, which is the only honest answer to "why is the
+   * line here".  Three different things hold a wrap up and they are not equally trustworthy: the
+   * prediction's band, the scan's own brightest ridge where the prediction had nothing to say, and —
+   * where neither found anything — the grid, which carried the surface across because its neighbours
+   * did have something.  `away` is how far it ended from whatever held it.
+   */
   resampleNormals(field, X, N, count, reference);
+  const why = new Uint8Array(count);
+  const away = new Float32Array(count);
   let off = 0, on = 0;
   for (let k = 0; k < count; k++) {
     const o = k * 3;
-    const t = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], Math.max(2, most * 0.6));
-    held[k] = Number.isNaN(t) ? 0 : 1;
+    const look = Math.max(2, most * 0.6);
+    let t = field.nearestSheet(X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], look);
+    if (!Number.isNaN(t)) why[k] = WHY_PREDICTION;
+    else if (scan !== undefined) {
+      t = scanRidge(scan, X[o], X[o + 1], X[o + 2], N[o], N[o + 1], N[o + 2], look);
+      if (!Number.isNaN(t)) why[k] = WHY_SCAN;
+    }
+    away[k] = Number.isNaN(t) ? NaN : Math.abs(t);
+    held[k] = why[k] === WHY_NOTHING ? 0 : 1;
     if (held[k]) {
       off += Math.abs(t);
       on++;
     }
   }
-  return { held, off: on === 0 ? NaN : off / on };
+  return { held, why, away, fromScan, off: on === 0 ? NaN : off / on };
 }
 
 /**
- * Fills the small holes: a point with no sheet of its own, ringed by points that have one, is on the
- * papyrus too — the fit's springs have already put it where the surface goes, and the prediction
- * simply has nothing to say there.  Only holes a point or two across close this way; a real gap
- * stays a gap.
+ * Fills the holes that are surrounded.
+ *
+ * A point with no sheet of its own, with papyrus all the way round it, is on the papyrus too: the
+ * fit's springs have already carried the surface across — it is the smooth continuation of the sheet
+ * either side — and all that is missing is the prediction having anything to say there.  Drawing
+ * nothing in that case is the worst of both, because the person is shown a hole where the scan has
+ * something to show them, and the thing they most want to look at is exactly the part the prediction
+ * could not do.
+ *
+ * So: anything the outside cannot reach is inside.  A flood from the edge of the grid through the
+ * unheld points marks what is really open; what it does not reach is a lake, and a lake in the middle
+ * of the sheet is sheet.  It says nothing about whether the surface is in the RIGHT place there —
+ * that is the fit's business, and where the prediction is silent the only other thing that knows is
+ * the scan itself.
  */
 function fillHoles(held: Uint8Array, nu: number, nv: number) {
-  for (let round = 0; round < 2; round++) {
-    const was = held.slice();
-    for (let i = 0; i < nv; i++)
-      for (let j = 0; j < nu; j++) {
-        const k = i * nu + j;
-        if (was[k]) continue;
-        let around = 0, ringed = 0;
-        for (let di = -1; di <= 1; di++)
-          for (let dj = -1; dj <= 1; dj++) {
-            const a = i + di, b = j + dj;
-            if ((di === 0 && dj === 0) || a < 0 || b < 0 || a >= nv || b >= nu) continue;
-            around++;
-            if (was[a * nu + b]) ringed++;
-          }
-        if (around >= 5 && ringed >= around - 2) held[k] = 1;
-      }
+  const count = nu * nv;
+  const outside = new Uint8Array(count);
+  const stack: number[] = [];
+  const open = (i: number, j: number) => {
+    const k = i * nu + j;
+    if (held[k] || outside[k]) return;
+    outside[k] = 1;
+    stack.push(k);
+  };
+  for (let j = 0; j < nu; j++) {
+    open(0, j);
+    open(nv - 1, j);
   }
+  for (let i = 0; i < nv; i++) {
+    open(i, 0);
+    open(i, nu - 1);
+  }
+  while (stack.length > 0) {
+    const k = stack.pop()!;
+    const i = Math.floor(k / nu), j = k % nu;
+    if (i > 0) open(i - 1, j);
+    if (i + 1 < nv) open(i + 1, j);
+    if (j > 0) open(i, j - 1);
+    if (j + 1 < nu) open(i, j + 1);
+  }
+  for (let k = 0; k < count; k++) if (!held[k] && !outside[k]) held[k] = 1;
 }
 
 /**
@@ -735,6 +851,9 @@ function placeValues(held: Held[], X: Float64Array, nu: number, nv: number, N: F
  */
 function holdsFor(
   chains: ChainSaid[],
+  // For putting a place onto the papyrus before it is believed: see `snap` below.
+  field: LasagnaField,
+  scan: ((z: number, y: number, x: number) => number) | undefined,
   sheets: Map<number, { X: Float64Array }>,
   nu: number,
   nv: number,
@@ -766,6 +885,37 @@ function holdsFor(
     surfaceNormals(one.X, nu, nv, N, outward);
     facing.set(which, N);
   }
+  /*
+   * A press onto the papyrus.
+   *
+   * Nobody can press exactly on a sheet.  A sheet is twenty or forty micrometres thick — a voxel or
+   * two — and a press is a hand on a card at whatever zoom it happens to be at; the place is right to
+   * within a few voxels and no better.  Believing it to the voxel puts the hand's error into the
+   * surface: the wrap is dragged through each place exactly and kinks at every one of them, which is
+   * the wobble a person sees after annotating, and a press that lands a little to one side of a wrap
+   * is read as a chain that crosses wraps.
+   *
+   * So what ought to be taken as said is the sheet nearest the press, not the press.  MEASURED, AND
+   * WORSE: moving each place on its own to the band nearest it scattered a chain that had been on one
+   * wrap over a fifth of a wrap, left places nine voxels off the surface where they had been one, and
+   * took `pup/flatter.cjs` from 0.144 → 0.120 with four annotations to 0.144 → 0.172.  Of course:
+   * each place then goes to whatever band is nearest IT, which is the hand's noise amplified rather
+   * than removed.  A snap has to be made for the CHAIN — the chain is the thing that says "one
+   * sheet", and the places have to agree about which sheet that is — not for one place at a time.
+   * Kept here, unused, as the shape of the next attempt.
+   */
+  const unused_snap = (at: Vec3, sheet: number, node: number): Vec3 => {
+    const N = facing.get(sheet);
+    if (N === undefined) return at;
+    const o = node * 3;
+    const reach = spacing * SNAP_REACH;
+    let t = field.nearestSheet(at[0], at[1], at[2], N[o], N[o + 1], N[o + 2], reach);
+    if (Number.isNaN(t) && scan !== undefined)
+      t = scanRidge(scan, at[0], at[1], at[2], N[o], N[o + 1], N[o + 2], reach);
+    if (Number.isNaN(t)) return at;
+    return [at[0] + N[o] * t, at[1] + N[o + 1] * t, at[2] + N[o + 2] * t];
+  };
+
   const nearest = (at: Vec3) => {
     let sheet = 0, node = -1, away = Infinity;
     for (const [which, one] of sheets)
@@ -967,6 +1117,8 @@ function holdsFor(
 
 export function buildPatch(
   field: LasagnaField,
+  // The scan itself, for the places the prediction has nothing to say about.
+  scan: ((z: number, y: number, x: number) => number) | undefined,
   seed: Vec3,
   towards: Vec3,
   grid: PatchGrid,
@@ -1012,9 +1164,12 @@ export function buildPatch(
     // Places a relative winding says are not on the wrap a given chain is on.
     keepOff = new Map<string, Vec3[]>(),
   ) => {
-    const sheets = new Map<number, { X: Float64Array; held: Uint8Array }>();
+    const sheets = new Map<number, { X: Float64Array; held: Uint8Array; why: Uint8Array; away: Float32Array }>();
     const offs: number[] = [];
     const said: { chain: string; away: number }[] = [];
+    // How many nodes, over all the wraps, were found by looking at the scan where the prediction had
+    // nothing to say.  It is the plainest measure of how much of a piece the prediction could not do.
+    let looked = 0;
     /*
      * What was said about this wrap, put in before it is fitted: the wrap is moved onto the places
      * and then fitted from there, the same way it would be fitted from anywhere else.  Nothing about
@@ -1178,12 +1333,14 @@ export function buildPatch(
     measure(middle);
     // The base wrap keeps its own freedom whether or not anything was said about it: `baseSurface` is
     // a guess made from the normals and needs the room to find the papyrus either way.
-    const first = fitSheet(field, middle, grid, sp, n0, wander);
+    const first = fitSheet(field, scan, middle, grid, sp, n0, wander);
+    looked += first.fromScan;
+    for (const one of holds.get(0) ?? []) first.why[one.node] = WHY_SAID;
     pin(0, middle);
     answered(0, middle);
     covers(0, middle, firm, first.held);
     fillHoles(first.held, nu, nv);
-    sheets.set(0, { X: middle, held: first.held });
+    sheets.set(0, { X: middle, held: first.held, why: first.why, away: first.away });
     offs.push(first.off);
 
     for (const dir of [1, -1] as const) {
@@ -1195,23 +1352,25 @@ export function buildPatch(
         const spoken = new Float64Array(count);
         told(k * dir, next, loose, spoken);
         measure(next);
-        const fitted = fitSheet(field, next, grid, sp, n0, loose);
+        const fitted = fitSheet(field, scan, next, grid, sp, n0, loose);
+        looked += fitted.fromScan;
+        for (const one of holds.get(k * dir) ?? []) fitted.why[one.node] = WHY_SAID;
         pin(k * dir, next);
         answered(k * dir, next);
         covers(k * dir, next, spoken, fitted.held);
         fillHoles(fitted.held, nu, nv);
-        sheets.set(k * dir, { X: next, held: fitted.held });
+        sheets.set(k * dir, { X: next, held: fitted.held, why: fitted.why, away: fitted.away });
         offs.push(fitted.off);
         from = next;
       }
     }
-    return { sheets, offs, said };
+    return { sheets, offs, said, looked };
   };
 
   let grown = grow(new Map());
   let spread: { chain: string; sheet: number; sheets: number; used: number; of: number; moved: number }[] = [];
   if (chains.length > 0) {
-    const found = holdsFor(chains, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0);
+    const found = holdsFor(chains, field, scan, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0);
     spread = found.spread;
     if (found.holds.size > 0) {
       grown = grow(found.holds, grown.sheets, found.keepOff);
@@ -1221,10 +1380,10 @@ export function buildPatch(
        * can go and look at — not how many wraps they were scattered over before anything was done
        * about it.
        */
-      spread = holdsFor(chains, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0).spread;
+      spread = holdsFor(chains, field, scan, grown.sheets, nu, nv, spacing * SAID_OF_PIECE, seed, spacing, n0).spread;
     }
   }
-  const { sheets, offs, said } = grown;
+  const { sheets, offs, said, looked } = grown;
 
   // The table: each sheet, and the layers within half a sheet either side of it.  Between two sheets
   // the layers follow the way from one to the other; where the next sheet is missing they follow the
@@ -1244,8 +1403,23 @@ export function buildPatch(
         const neighbour = sheets.get(k + Math.sign(s));
         const t = Math.abs(s) / per;
         const o = layer * count + node;
-        // Where two sheets meet in the same layer, the one that has something there wins.
-        const coverage = here.held[node] * (1 - t) + (neighbour?.held[node] ?? 0) * t;
+        /*
+         * Where two sheets meet in the same layer, the one that has something there wins.
+         *
+         * And a place the prediction could not do is still a place.  The grid's own stiffness has
+         * already carried the surface across it — it is the smooth continuation of the sheet either
+         * side — so the scan there is shown, a little dimmer to say that it is the fit's word rather
+         * than the prediction's.  Drawing nothing was the worst of both: a hole exactly where the
+         * person most wants to look, and no way to tell a gap in the papyrus from a gap in the model.
+         *
+         * This is how VC3D's own fitter behaves, by construction rather than by choice: it has no
+         * sheet mesh and no per-node coverage at all — a sheet is an integer level set of one smooth
+         * map fitted over the whole scroll (`vc3d/fs.py`, fit_spiral), the map is defined everywhere
+         * inside its bounds, and a hole in a sheet is not a thing that can be represented.  Where the
+         * data says nothing there, the regulariser carries the surface and the level set goes through.
+         */
+        const found = here.held[node] * (1 - t) + (neighbour?.held[node] ?? 0) * t;
+        const coverage = neighbour === undefined ? found : Math.max(found, GUESSED);
         if (!Number.isNaN(P[o * 3]) && coverage <= A[o]) continue;
         A[o] = coverage;
         for (let c = 0; c < 3; c++) {
@@ -1257,7 +1431,14 @@ export function buildPatch(
       }
     }
   }
-  return { ...grid, K, per, P, A, right, down, normal: n0, off: offs, said, spread };
+  /*
+   * And what held each node of each fitted wrap up, kept by wrap so that a card can be asked why its
+   * line is where it is.  Only the fitted wraps have one; a layer between two of them is drawn from
+   * both, and nobody held it anywhere.
+   */
+  const why = new Map<number, { why: Uint8Array; away: Float32Array }>();
+  for (const [k, one] of sheets) why.set(k, { why: one.why, away: one.away });
+  return { ...grid, K, per, P, A, right, down, normal: n0, off: offs, said, spread, looked, why };
 }
 
 /**
@@ -1346,6 +1527,8 @@ export function patchFacts(patch: Patch) {
     // says the piece sits on the predicted sheets, and whatever is wrong is wrong with those.
     off: off.length ? `${(off.reduce((s, v) => s + v, 0) / off.length).toFixed(1)}–${Math.max(...off).toFixed(1)}` : "–",
     holes: percent(holes),
+    // What the prediction could not do, and the fit found by looking at the scan instead.
+    looked: patch.looked,
     torn: percent(torn),
     apart: apart.map((a) => Math.round(a)).join(" "),
     stretch: stretch.length
@@ -1463,6 +1646,13 @@ export function nearestOn(patch: Patch, at: Vec3) {
  * The grid of layer `w` (sheets from the base, fractional): positions (flat z, y, x, row by row),
  * NaN where the table has nothing, linear between the table's layers.
  */
+// What held each node of the nearest fitted wrap to `w`, and how far it ended from it.
+export function layerWhy(patch: Patch, w: number) {
+  const count = patch.nu * patch.nv;
+  const found = patch.why.get(Math.round(w));
+  return found ?? { why: new Uint8Array(count), away: new Float32Array(count).fill(NaN) };
+}
+
 export function layerGrid(patch: Patch, w: number) {
   const { nu, nv, K, per, P, A } = patch;
   const count = nu * nv;

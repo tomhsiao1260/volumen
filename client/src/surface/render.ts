@@ -56,7 +56,7 @@ export function pieceAt(patch: Patch, plane: SurfacePlane, w: number, fx: number
 }
 
 // Reads voxels of one level, remembering the chunks it has looked up during one drawing.
-class LevelReader {
+export class LevelReader {
   private cache = new Map<number, Uint8Array | null | undefined>();
   // The chunk looked up last, kept beside the rest: a sheet crosses a handful of chunks and runs
   // along each of them for thousands of pixels in a row, so nearly every look-up is the last one

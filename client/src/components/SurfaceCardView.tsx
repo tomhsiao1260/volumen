@@ -104,7 +104,8 @@ function describe(facts: SurfaceFacts) {
     `grid ${facts.across} × ${facts.down}, ${facts.step} voxels apart · ` +
     `prediction read in ${facts.read} ms · piece built in ${facts.built} ms\n` +
     `   wraps ${facts.apart} voxels apart · annotations ${facts.said}` +
-    ` · off the prediction ${facts.off} voxels · holes ${facts.holes} · torn ${facts.torn} · stretch ×${facts.stretch}`
+    ` · off the prediction ${facts.off} voxels · holes ${facts.holes} · torn ${facts.torn}` +
+    ` · stretch ×${facts.stretch} · found by looking ${facts.looked}`
   );
 }
 

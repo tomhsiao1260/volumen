@@ -134,6 +134,8 @@ export interface SurfaceFacts {
     // How many wraps it had to be moved to keep off another chain's wrap; 0 for almost every chain.
     moved: number;
   }[];
+  // Nodes the fit found by looking at the scan, where the prediction had nothing to say.
+  looked: number;
   // Sheets are this many voxels apart at the seed, as the prediction has it.
   spacing: number;
   // Points across and down the piece of sheet, and their spacing in voxels.
@@ -199,6 +201,13 @@ export interface SheetEvent {
   nu: number;
   nv: number;
   grid: ArrayBuffer;
+  /*
+   * What holds each point of it up — nothing, the prediction, the scan, or a person — and how far it
+   * ended from whatever that was.  It is the only honest answer to "why is the line here", which is
+   * the question somebody asks of a wrap that has gone somewhere they did not expect.
+   */
+  why: ArrayBuffer;
+  away: ArrayBuffer;
   // The way w grows, and how many voxels a sheet is from the next: enough to turn a drag across the
   // line on a slice card into sheets.
   normal: [number, number, number];
