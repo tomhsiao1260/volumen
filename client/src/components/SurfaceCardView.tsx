@@ -103,9 +103,8 @@ function describe(facts: SurfaceFacts) {
     `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
     `grid ${facts.across} × ${facts.down}, ${facts.step} voxels apart · ` +
     `prediction read in ${facts.read} ms · piece built in ${facts.built} ms\n` +
-    `   wraps ${facts.apart} voxels apart · annotations ${facts.said}` +
-    ` · off the prediction ${facts.off} voxels · holes ${facts.holes} · torn ${facts.torn}` +
-    ` · stretch ×${facts.stretch} · found by looking ${facts.looked}`
+    `   wraps ${facts.apart} voxels apart · holes ${facts.holes}` +
+    ` · torn ${facts.torn} · stretch ×${facts.stretch}`
   );
 }
 
@@ -138,8 +137,6 @@ export interface SurfaceCardViewProps {
   // winding tool is in hand: the pieces are left alone then, so that a run of annotations is not
   // interrupted by a rebuild after each one.
   behind: boolean;
-  // What this piece made of each chain it was told, once it is built.
-  onHeard: (heard: SurfaceFacts["heard"]) => void;
 }
 
 export function SurfaceCardView({
@@ -158,7 +155,6 @@ export function SurfaceCardView({
   onPlace,
   onJoin,
   onPick,
-  onHeard,
   behind,
 }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
@@ -226,13 +222,11 @@ export function SurfaceCardView({
   const onPlaceRef = useRef(onPlace);
   const onJoinRef = useRef(onJoin);
   const onPickRef = useRef(onPick);
-  const onHeardRef = useRef(onHeard);
   const toolRef = useRef(tool);
   useEffect(() => {
     onPlaceRef.current = onPlace;
     onJoinRef.current = onJoin;
     onPickRef.current = onPick;
-    onHeardRef.current = onHeard;
     toolRef.current = tool;
   });
   // The size the sheet was built for; it is not built again while the card is resized, since the
@@ -402,7 +396,6 @@ export function SurfaceCardView({
               return;
             }
             setStatus(event.status);
-            if (event.facts !== undefined) onHeardRef.current(event.facts.heard);
             if (event.facts !== undefined && DEBUG) console.info(`${id}: ${describe(event.facts)}`);
             if (event.message !== undefined) console.error(event.message);
           },

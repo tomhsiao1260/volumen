@@ -178,9 +178,6 @@ class Card {
   private drawing = false;
   // Resolves the wait of the drawing in progress when another sheet is asked for.
   private changed: (() => void) | undefined;
-  // The scan chunks the fit asked for and did not wait for, and whether the piece is worth drawing
-  // again once they are here.
-  private scanArriving: Promise<unknown> | undefined;
   private stale = false;
   /*
    * Whether the hand that asked for this sheet has let go.
@@ -304,8 +301,6 @@ class Card {
           ...patchFacts(built.patch),
         },
       });
-      // And once the scan is here, the fit gets the look it could not have the first time.
-      void this.lookAgain(at, outward(lasagna.umbilicus, at));
       await this.run();
     } catch (error) {
       this.fail(error);
@@ -313,58 +308,10 @@ class Card {
   }
 
   /**
-   * Builds the piece a second time, once the scan has arrived.
-   *
-   * The fit reads the scan itself wherever the prediction has nothing to say, and that is exactly
-   * where the holes in a piece are — but the chunks are asked for and not waited for, because waiting
-   * leaves the card saying "looking for the sheet" for a minute.  So the first piece is built with
-   * whatever had arrived, which on a card just opened is nothing: the one path that can fill a hole
-   * from the data never ran.  Measured on Scroll 1: `scan 0%` on every piece, and a hole of 159 nodes
-   * that the scan has a clear ridge through.
-   *
-   * It is done only when it would change something — a piece every node of which stands on the
-   * prediction has nothing to gain — and only while the card is still on the sheet it opened on, so
-   * that it never moves under a hand that has gone somewhere else.
-   */
-  private async lookAgain(at: Vec3, towards: Vec3 | undefined) {
-    const arriving = this.scanArriving;
-    if (arriving === undefined || this.patch === undefined) return;
-    let unheld = false;
-    for (const one of this.patch.why.values()) if (one.why.includes(WHY_NOTHING)) unheld = true;
-    if (!unheld) return;
-    const was = this.wanted;
-    await arriving;
-    if (this.closed || this.wanted !== was || this.patch === undefined) return;
-    const again = await this.build(at, towards, true);
-    if (this.closed || again === undefined || this.wanted !== was) return;
-    this.patch = again.patch;
-    this.spacing = again.spacing;
-    // The line and the picture are both of the piece that has gone, so both are said again.
-    this.sent = undefined;
-    this.stale = true;
-    this.post({
-      type: "status",
-      id: this.request.id,
-      status: "ready",
-      facts: {
-        spacing: again.spacing,
-        across: again.patch.nu,
-        down: again.patch.nv,
-        step: Math.round(Math.max(again.patch.hu, again.patch.hv)),
-        read: Math.round(again.read),
-        built: Math.round(again.fitted),
-        ...patchFacts(again.patch),
-      },
-    });
-    this.changed?.();
-    if (!this.drawing) void this.run();
-  }
-
-  /**
    * Reads the prediction around `seed` and builds the piece of sheet there, w growing along the
    * normal that agrees with `towards` — away from the scroll's axis, or the way the last piece went.
    */
-  private async build(seed: Vec3, towards: Vec3 | undefined, afresh = false) {
+  private async build(seed: Vec3, towards: Vec3 | undefined, from?: Float32Array) {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
@@ -380,18 +327,14 @@ class Card {
       // What was said about the sheets here is part of what the piece is: two cards told the same
       // thing share one, and a piece built before a chain was drawn is not that piece any more.
       this.request.chains.map((chain) => `${chain.id}.${chain.rev}`).join(","),
+      from === undefined ? "" : "from",
     ].join("|");
-    /*
-     * Pieces are kept by what was asked for, and what the scan had arrived by then is not part of
-     * that — so a second look would be handed back the very piece it is trying to improve on.
-     */
-    if (afresh) pieces.delete(key);
     let shared = pieces.get(key);
     const fresh = shared === undefined;
     if (shared === undefined) {
       // Behind whatever is already reading, so that two boxes of prediction are never in the store
       // at once, and kept before it finishes so that the cards asking meanwhile wait for this one.
-      shared = building.then(() => this.make(seed, towards, grid));
+      shared = building.then(() => this.make(seed, towards, grid, from));
       building = shared.catch(() => undefined);
       pieces.set(key, shared);
       for (const old of pieces.keys()) {
@@ -411,7 +354,7 @@ class Card {
   }
 
   // Reads what the piece needs and fits it; `build` is what says whether it has to be done at all.
-  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid): Promise<Piece | undefined> {
+  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid, from?: Float32Array): Promise<Piece | undefined> {
     const { zoom, density, width, height } = this.request;
     const across = width / density, down = height / density;
     const channels = this.channels!;
@@ -448,17 +391,8 @@ class Card {
     const tangent = Math.hypot(across, down) * zoom * 0.6;
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
-    /*
-     * And the scan itself, for the fit to look at where the prediction says nothing.  Coarse on
-     * purpose: what it is asked is "where is the sheet along this line", and the wraps are tens of
-     * voxels apart, so a level four or eight times coarser answers that for a sixty-fourth of the
-     * downloading.  It is asked for the same box the prediction was read over.
-     */
-    const lo = seed.map((v, i) => v - half[i]) as Vec3;
-    const hi = seed.map((v, i) => v + half[i]) as Vec3;
-    const scan = this.scanAt(lo, hi, spacing);
     const read = performance.now() - started;
-    const patch = buildPatch(field, scan, seed, n, grid, K, PER, spacing, this.request.chains);
+    const patch = buildPatch(field, seed, n, grid, K, PER, from);
     const fitted = performance.now() - started - read;
     if (patch === undefined) return undefined;
     /*
@@ -470,41 +404,6 @@ class Card {
     return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted };
   }
 
-  /**
-   * A way of reading the scan over a box, at a level coarse enough to be cheap and fine enough to
-   * show a sheet.  Undefined when the scan is not open yet or nothing could be read, in which case
-   * the fit simply has only the prediction, as it always had.
-   */
-  private scanAt(lo: Vec3, hi: Vec3, spacing: number) {
-    const levels = this.scan;
-    if (levels === undefined || levels.length === 0) return undefined;
-    // Fine enough that a wrap is ten voxels or so across, and no finer: what it is asked is "where is
-    // the sheet along this line", and the wraps are tens of voxels apart.
-    const want = Math.max(1, spacing / 10);
-    let level = levels[0];
-    for (const one of levels) if (one.factor <= want && one.factor > level.factor) level = one;
-    const f = level.factor;
-    const box = (v: Vec3) => v.map((c) => (c + 0.5) / f - 0.5) as Vec3;
-    const [a, b] = [box(lo), box(hi)];
-    /*
-     * Asked for, not waited for.  Building a piece must not stop while a dozen megabytes of scan come
-     * down a wire — the card would sit saying "looking for the sheet" for a minute, which is what it
-     * did when this waited.  So the chunks are set going and the fit reads whatever has arrived;
-     * `sample` answers -1 for the rest and `scanRidge` says nothing about those places.  The piece is
-     * built again whenever anything is said or the card moves, and by then they are here.
-     */
-    this.scanArriving = level
-      .loadAll(level.chunksBetween(a.map(Math.floor) as Vec3, b.map((c) => Math.floor(c) + 1) as Vec3))
-      .catch(() => undefined);
-    const reader = new LevelReader(level);
-    return (z: number, y: number, x: number) =>
-      reader.sample((z + 0.5) / f - 0.5, (y + 0.5) / f - 0.5, (x + 0.5) / f - 0.5);
-  }
-
-  /**
-   * Makes the piece cover `w`, building pieces around the sheets reached on the way; returns the
-   * nearest sheet it could reach, which is `w` unless the sheets ran out.
-   */
   /**
    * The sheet this piece can show of the one asked for, building further out first where it has to.
    *
@@ -527,8 +426,14 @@ class Card {
         if (!Number.isNaN(grid[centre])) found = { k, at: [grid[centre], grid[centre + 1], grid[centre + 2]] };
       }
       if (found === undefined) break;
-      // Signed like the piece it continues, so that w keeps growing the same way.
-      const next = await this.build(found.at, patch.normal);
+      /*
+       * Signed like the piece it continues, so that w keeps growing the same way — and started from
+       * the wrap itself rather than from a fresh solve of the tangent plane.  That wrap is already in
+       * the table, it is the very surface the new piece is to be centred on, and re-deriving it costs
+       * a third of the build and can only come out slightly different, which shows as the piece
+       * shifting the moment it is rebuilt.
+       */
+      const next = await this.build(found.at, patch.normal, layerGrid(patch, found.k));
       if (this.closed || next === undefined) break;
       this.patch = next.patch;
       this.spacing = next.spacing;
@@ -608,7 +513,7 @@ class Card {
         if (this.sent !== line) {
           this.sent = line;
           const grid = layerGrid(patch, sheet);
-          const { why, away } = layerWhy(patch, sheet);
+          const why = layerWhy(patch, sheet);
           this.post(
             {
               type: "sheet",
@@ -618,11 +523,10 @@ class Card {
               nv: patch.nv,
               grid: grid.buffer,
               why: why.buffer,
-              away: away.buffer,
               normal: patch.normal,
               spacing: this.spacing,
             },
-            [grid.buffer, why.buffer, away.buffer],
+            [grid.buffer, why.buffer],
           );
         }
         /*

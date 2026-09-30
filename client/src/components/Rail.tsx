@@ -100,7 +100,6 @@ export interface RailProps {
   // The chain the pointer is over, which the cards draw loudly while it is.
   lit: string | undefined;
   // What the pieces made of each chain, by chain id.
-  heard: Record<string, { sheet: number; sheets: number; used: number; of: number; worst: number; moved: number }>;
   onLit: (id: string | undefined) => void;
   onShow: (id: string, on: boolean) => void;
   // Turns the flattened cards to the wrap this chain was answered on, which is how a person sees for
@@ -110,7 +109,7 @@ export interface RailProps {
   onRemove: (id: string) => void;
 }
 
-export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, onGo, onRemove }: RailProps) {
+export function Rail({ tool, onTool, chains, adding, lit, onLit, onShow, onGo, onRemove }: RailProps) {
   const [listing, setListing] = useState(false);
   const says = HINTS[tool];
   return (
@@ -174,7 +173,7 @@ export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, 
               />
               <span
                 className="rail-anno-what"
-                title={heard[one.id]?.used ? "Show the wrap this is on" : undefined}
+                title="Show the wrap this is on"
                 onClick={() => onGo(one.id)}
               >
                 <span className="rail-anno-kind">
@@ -184,39 +183,6 @@ export function Rail({ tool, onTool, chains, adding, lit, heard, onLit, onShow, 
                   {/* One point on its own says nothing that two do not, so the fit is never given it. */}
                   {one.points.length < 2 && one.id !== adding ? " · not used" : ""}
                 </span>
-                {/*
-                  * What became of it, read off the finished surface rather than the first guess.  A
-                  * same winding says "all of these are one wrap", so "on one wrap" is the surface
-                  * agreeing, and anything else — points still spread over two wraps, points it could
-                  * not reach at all — is the thing worth showing, because it is the annotation not
-                  * being obeyed.
-                  */}
-                {heard[one.id] !== undefined && one.id !== adding && (
-                  <span
-                    className={`rail-anno-heard${
-                      heard[one.id].used < heard[one.id].of || heard[one.id].sheets > 1 ? " crossed" : ""
-                    }`}
-                  >
-                    {heard[one.id].used === 0
-                      ? "none of it is on this surface"
-                      : [
-                          /*
-                           * Which wrap it ended on, counted from the one the card is showing.  Two
-                           * chains are two wraps — the fit will not put two of them on one — so this
-                           * number is how a person checks that the layers they meant are the layers
-                           * the surface found.
-                           */
-                          `wrap ${heard[one.id].sheet > 0 ? "+" : ""}${heard[one.id].sheet}`,
-                          heard[one.id].sheets > 1 ? `drawn across ${heard[one.id].sheets}` : undefined,
-                          heard[one.id].used < heard[one.id].of
-                            ? `${heard[one.id].used} of ${heard[one.id].of} points`
-                            : undefined,
-                          `${Math.round(heard[one.id].worst)} voxels off`,
-                        ]
-                          .filter((part) => part !== undefined)
-                          .join(" · ")}
-                  </span>
-                )}
               </span>
               <button
                 type="button"

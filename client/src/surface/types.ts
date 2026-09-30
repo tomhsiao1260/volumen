@@ -131,37 +131,17 @@ export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "failed";
 
 // What the card found, which is all it shows for now: nothing is drawn yet.
 export interface SurfaceFacts {
-  // How far the fit ended from the prediction's bands, in voxels: mean and worst over the sheets.
-  off: string;
-  // How many places a person held the sheets to, and how far the worst of them ended up.
-  said: string;
-  // The same chain by chain, for the list the person reads.
-  heard: {
-    chain: string;
-    // Which wrap of the piece it was answered on, counted from the wrap the piece was built on.  Two
-    // chains never share one: see `holdsFor`.
-    sheet: number;
-    sheets: number;
-    used: number;
-    of: number;
-    worst: number;
-    // How many wraps it had to be moved to keep off another chain's wrap; 0 for almost every chain.
-    moved: number;
-  }[];
-  // Nodes the fit found by looking at the scan, where the prediction had nothing to say.
-  looked: number;
-  // Sheets are this many voxels apart at the seed, as the prediction has it.
+  // How far apart the wraps came out, and the grid the piece was built on.
   spacing: number;
-  // Points across and down the piece of sheet, and their spacing in voxels.
   across: number;
   down: number;
   step: number;
-  // Reading the prediction, and building the sheet, in milliseconds.
+  // How long it took to read the prediction, and to walk the piece out of it.
   read: number;
   built: number;
-  // How the fit came out, for a debug page: per sheet, how much of it is missing and how much is
-  // torn; how far apart the sheets ended up; and how far the grid's edges are from the length they
-  // were laid out with, which is the card's scale.
+  // Per wrap: how much of it the prediction ran out on, how much of the grid is stretched past the
+  // shape it was laid out in, how far apart one wrap and the next are, and the spread of the
+  // stretching.  All of it the piece describing itself.
   holes: string;
   torn: string;
   apart: string;
@@ -221,7 +201,6 @@ export interface SheetEvent {
    * the question somebody asks of a wrap that has gone somewhere they did not expect.
    */
   why: ArrayBuffer;
-  away: ArrayBuffer;
   // The way w grows, and how many voxels a sheet is from the next: enough to turn a drag across the
   // line on a slice card into sheets.
   normal: [number, number, number];

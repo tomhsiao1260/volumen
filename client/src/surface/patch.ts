@@ -107,15 +107,10 @@ export interface Patch extends PatchGrid {
   A: Float32Array;
   right: Vec3;
   down: Vec3;
-  // Kept for the card's footer; this fit measures itself against nothing, so it says nothing.
-  off: number[];
-  said: { chain: string; away: number }[];
-  spread: { chain: string; sheet: number; sheets: number; used: number; of: number; moved: number }[];
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
-  looked: number;
-  // Per fitted wrap: what held each of its nodes up, and how far it ended from that.
-  why: Map<number, { why: Uint8Array; away: Float32Array }>;
+  // Per whole wrap: what held each of its nodes up.
+  why: Map<number, Uint8Array>;
 }
 
 /**
@@ -270,18 +265,16 @@ function march(
  */
 export function buildPatch(
   field: LasagnaField,
-  scan: ((z: number, y: number, x: number) => number) | undefined,
   seed: Vec3,
   towards: Vec3,
   grid: PatchGrid,
   K = 3,
   per = 8,
-  spacing = 40,
-  chains: ChainSaid[] = [],
+  // The surface to start from, node by node, when there already is one — a piece built further out
+  // starts from the wrap it is centred on rather than solving the tangent plane again.  NaN where
+  // that wrap has nothing at a node, and the piece has nothing there either.
+  from?: Float32Array,
 ): Patch | undefined {
-  void scan;
-  void spacing;
-  void chains;
   // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
   // about which sheet they meant, and this fit makes no such decisions.
   const n0 = normalAt(field, seed, towards);
@@ -289,7 +282,10 @@ export function buildPatch(
 
   const { nu, nv } = grid;
   const count = nu * nv;
-  const { X, right, down } = baseSurface(field, seed, n0, grid);
+  const { X, right, down } =
+    from !== undefined && from.length === count * 3
+      ? { X: Float64Array.from(from), ...frame(n0) }
+      : baseSurface(field, seed, n0, grid);
   const layers = 2 * K * per + 1;
   const P = new Float32Array(layers * count * 3).fill(NaN);
   const A = new Float32Array(layers * count);
@@ -297,45 +293,28 @@ export function buildPatch(
 
   for (let node = 0; node < count; node++) {
     const o = at(0, node);
+    if (Number.isNaN(X[node * 3])) continue;
     P[o * 3] = X[node * 3];
     P[o * 3 + 1] = X[node * 3 + 1];
     P[o * 3 + 2] = X[node * 3 + 2];
     A[o] = 1;
-  }
-  let reached = 0;
-  for (let node = 0; node < count; node++) {
-    const from: Vec3 = [X[node * 3], X[node * 3 + 1], X[node * 3 + 2]];
-    for (const dir of [1, -1] as const) reached += march(field, from, dir, n0, K, per, P, A, count, node);
+    const start: Vec3 = [X[node * 3], X[node * 3 + 1], X[node * 3 + 2]];
+    for (const dir of [1, -1] as const) march(field, start, dir, n0, K, per, P, A, count, node);
   }
 
   /*
    * And what holds each node of each whole wrap up, which under this fit is one of two things: the
    * prediction's normal field reached it, or it ran out on the way and nothing did.
    */
-  const why = new Map<number, { why: Uint8Array; away: Float32Array }>();
+  const why = new Map<number, Uint8Array>();
   for (let k = -K; k <= K; k++) {
     const held = new Uint8Array(count);
     for (let node = 0; node < count; node++)
       held[node] = A[at(k * per, node)] >= 0.5 ? WHY_PREDICTION : WHY_NOTHING;
-    why.set(k, { why: held, away: new Float32Array(count) });
+    why.set(k, held);
   }
-  void reached;
 
-  return {
-    ...grid,
-    K,
-    per,
-    P,
-    A,
-    right,
-    down,
-    off: [],
-    said: [],
-    spread: [],
-    normal: n0,
-    looked: 0,
-    why,
-  };
+  return { ...grid, K, per, P, A, right, down, normal: n0, why };
 }
 
 /**
@@ -407,46 +386,13 @@ export function patchFacts(patch: Patch) {
   }
   stretch.sort((a, b) => a - b);
   const percent = (xs: number[]) => xs.map((x) => `${Math.round(x * 100)}%`).join(" ");
-  const off = patch.off.filter((one) => !Number.isNaN(one));
   return {
-    /*
-     * Whether what was said got through, where it did least well, and — the part worth looking at
-     * before anything else — how many sheets each chain's points were found on to begin with.  A
-     * chain meant to lie along one sheet whose points were found on four of them is either a bad
-     * piece or a bad chain, and saying so is the difference between a tool and a guess.
-     */
-    said:
-      patch.spread.length === 0
-        ? "–"
-        : `${patch.said.length} points, chains on ${patch.spread.map((one) => `${one.sheets} wrap${one.sheets === 1 ? "" : "s"}`).join(", ")}` +
-          (patch.said.length === 0
-            ? ""
-            : ` · furthest ${Math.max(...patch.said.map((one) => one.away)).toFixed(0)} voxels`),
-    /*
-     * And the same, chain by chain, for the person who wrote them: which sheet of this piece each was
-     * answered on, how many sheets its points were found spread over, and how far the fitted sheet
-     * ended from the furthest of them.  A chain found on one sheet is one the piece agrees with; a
-     * chain found on three is either a jump being corrected or a chain drawn across the sheets, and
-     * only the person can say which — but they cannot say it at all unless they are told.
-     */
-    heard: patch.spread.map((one) => ({
-      chain: one.chain,
-      sheet: one.sheet,
-      sheets: one.sheets,
-      used: one.used,
-      of: one.of,
-      moved: one.moved,
-      worst: Math.max(
-        0,
-        ...patch.said.filter((each) => each.chain === one.chain).map((each) => each.away),
-      ),
-    })),
-    // How far the fit ended from the prediction it was following, at worst and on average: small
-    // says the piece sits on the predicted sheets, and whatever is wrong is wrong with those.
-    off: off.length ? `${(off.reduce((s, v) => s + v, 0) / off.length).toFixed(1)}–${Math.max(...off).toFixed(1)}` : "–",
+    // Per wrap, how much of it the prediction ran out on before the march could finish it.
     holes: percent(holes),
-    // What the prediction could not do, and the fit found by looking at the scan instead.
-    looked: patch.looked,
+    // And how badly the grid is pulled about: neighbours further apart than they were laid out, and
+    // how far apart one wrap and the next came out.  Both are the piece describing itself; nothing
+    // here is measured against the prediction, because this fit does not disagree with it anywhere —
+    // it IS the prediction, walked.
     torn: percent(torn),
     apart: apart.map((a) => Math.round(a)).join(" "),
     stretch: stretch.length
@@ -566,19 +512,17 @@ export function nearestOn(patch: Patch, at: Vec3) {
  */
 // What held each node of the nearest fitted wrap to `w`, and how far it ended from it.
 /**
- * What held each node of the wrap nearest `w` up, and how far it ended from it — as COPIES.
+ * What held each node of the wrap nearest `w` up — as a COPY.
  *
- * Copies because the caller sends them to the card, and sending an array to another thread hands the
- * memory over and leaves this side with nothing.  Handing over the piece's own arrays worked once and
+ * A copy because the caller sends it to the card, and sending an array to another thread hands the
+ * memory over and leaves this side with nothing.  Handing over the piece's own array worked once and
  * then threw on every later send of the same wrap, which killed the drawing loop — so a card's line
  * moved once per wrap and stood still in between, and a drag across the sheet lines went in steps of
  * a whole wrap instead of following the hand.
  */
 export function layerWhy(patch: Patch, w: number) {
-  const count = patch.nu * patch.nv;
   const found = patch.why.get(Math.round(w));
-  if (found === undefined) return { why: new Uint8Array(count), away: new Float32Array(count).fill(NaN) };
-  return { why: found.why.slice(), away: found.away.slice() };
+  return found === undefined ? new Uint8Array(patch.nu * patch.nv) : found.slice();
 }
 
 export function layerGrid(patch: Patch, w: number) {

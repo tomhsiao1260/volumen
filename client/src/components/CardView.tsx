@@ -661,7 +661,18 @@ export function CardView({
         window.removeEventListener("pointercancel", stop, true);
         const grabbed = dragging.current;
         dragging.current = undefined;
-        if (grabbed !== undefined) dispatch({ type: "setSurfaceLayer", id: grabbed.cardId, w: asked });
+        if (grabbed === undefined) return;
+        /*
+         * Where the line ACTUALLY got to, not where the hand asked it to go.
+         *
+         * A piece only holds a few wraps either side of its own, and while a hand is dragging it is
+         * not rebuilt — so a long drag asks for more than the piece can show and the line stops at
+         * the edge of it.  Taking the hand's number here would then move the line again on release,
+         * past the place it had been left, which is the one thing a drag must never do: it has to
+         * stop where it was let go.
+         */
+        const line = sheetsOf(sourceId).find((one) => one.cardId === grabbed.cardId);
+        dispatch({ type: "setSurfaceLayer", id: grabbed.cardId, w: line?.w ?? asked });
       };
       window.addEventListener("pointermove", move, true);
       window.addEventListener("pointerup", stop, true);

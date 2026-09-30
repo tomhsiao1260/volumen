@@ -219,9 +219,6 @@ export function App() {
         spots: (cardId: string) => Object.fromEntries(spotsOf(cardId)),
         // And which of them it drew, the last time it drew.
         drawnDots: (cardId: string) => drawnDotsOf(cardId),
-        get heard() {
-          return heardRef.current;
-        },
         dispatch,
       },
     });
@@ -283,16 +280,6 @@ export function App() {
   const [chainsMoved, setChainsMoved] = useState(0);
   // The chain the pointer is over in the list, which the cards draw loudly while it is.
   const [lit, setLit] = useState<string | undefined>(undefined);
-  /*
-   * What the pieces made of each chain: which sheet it was answered on, how many sheets its points
-   * were found spread over, and how far the fit ended from the furthest of them.  Kept by chain, the
-   * last piece to be built winning, so that the list can say whether a chain was any use.
-   */
-  const [heard, setHeard] = useState<Record<string, SurfaceFacts["heard"][0]>>({});
-  const heardRef = useRef(heard);
-  useEffect(() => {
-    heardRef.current = heard;
-  }, [heard]);
   useEffect(() => watchChains(() => setChainsMoved((moved) => moved + 1)), []);
 
   // Everything said about the scans the board is showing, for the list in the rail.
@@ -495,7 +482,6 @@ export function App() {
         chains={onTheBoard()}
         adding={state.adding}
         lit={lit}
-        heard={heard}
         onLit={setLit}
         onShow={(id, on) => {
           const one = chain(id);
@@ -573,13 +559,6 @@ export function App() {
                 onPlace={(at) => place(card, at)}
                 onJoin={(at) => join(card, at)}
                 onPick={(held) => pick(card, held)}
-                onHeard={(said) =>
-                  setHeard((was) => {
-                    const now = { ...was };
-                    for (const one of said) now[one.chain] = one;
-                    return now;
-                  })
-                }
               />
             ) : (
               <CardView

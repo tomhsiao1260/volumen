@@ -21,10 +21,8 @@ export interface Sheet {
   nu: number;
   nv: number;
   grid: Float32Array;
-  // What holds each point of it up — nothing, the prediction, the scan, or a person — and how far it
-  // ended from that.  The answer to "why is the line here".
+  // What holds each point of it up: the answer to "why is the line here".
   why: Uint8Array;
-  away: Float32Array;
   // The way w grows (z, y, x), and how many voxels apart the sheets are: what turns a drag across
   // the line into sheets.
   normal: [number, number, number];
