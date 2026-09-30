@@ -651,7 +651,8 @@ export function CardView({
         waiting = true;
         requestAnimationFrame(() => {
           waiting = false;
-          if (dragging.current !== undefined) surfaceEngine().showLayer(grabbed.cardId, asked);
+          // Still held: the piece is not to be rebuilt under the hand (`ShowRequest.resting`).
+          if (dragging.current !== undefined) surfaceEngine().showLayer(grabbed.cardId, asked, false);
         });
       };
       const stop = () => {

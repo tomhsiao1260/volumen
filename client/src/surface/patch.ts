@@ -189,9 +189,13 @@ function baseSurface(field: LasagnaField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
  */
 const STEP_MOST = 3;
 const STEP_LEAST = 0.4;
-// And how much of a winding a step may cross, which is what actually sets the step where the sheets
-// are close together.
-const STEP_OF_WRAP = 1 / 24;
+/*
+ * And how much of a winding a step may cross, which is what actually sets the step.  There are `per`
+ * samples to a winding, so a step of a twelfth crosses one sample every step and a half — enough for
+ * the midpoint rule, which is second order, and no more.  Measured: at a twenty-fourth a piece took
+ * 400 ms to build and a drag across the sheet lines froze for as long as that every third wrap.
+ */
+const STEP_OF_WRAP = 1 / 12;
 // A march that has taken this many steps without crossing the wraps asked of it has gone wrong.
 const STEP_LIMIT = 4000;
 
@@ -233,8 +237,11 @@ function march(
     // Taken at the middle of the step, so that a normal that turns does not walk the march off the
     // sheet — the same reason a curve is integrated by its midpoint and not by its start.
     const half: Vec3 = [p[0] + (n[0] * dir * ds) / 2, p[1] + (n[1] * dir * ds) / 2, p[2] + (n[2] * dir * ds) / 2];
+    // The direction at the middle of the step, which is what the step is taken along; how much of a
+    // winding it is worth is taken from where the step began, since that changes far more slowly than
+    // the direction does and costs as much to ask.
     const middle = normalAt(field, half, ref) ?? n;
-    const density = field.density(half[0], half[1], half[2]) || rho;
+    const density = rho;
     const was: Vec3 = [p[0], p[1], p[2]];
     const wWas = w;
     p = [p[0] + middle[0] * dir * ds, p[1] + middle[1] * dir * ds, p[2] + middle[2] * dir * ds];
@@ -329,6 +336,32 @@ export function buildPatch(
     looked: 0,
     why,
   };
+}
+
+/**
+ * How far apart this piece's wraps actually came out, in voxels: the middle of the distances from
+ * each node of wrap 0 to the same node of wrap 1.
+ *
+ * Asked of the piece rather than of the prediction on purpose.  The number is what a drag across the
+ * sheet lines is measured in and what sets the card's scale, and for that it has to describe the
+ * wraps that are drawn — not what the prediction said before they were walked.  Measured on Scroll 1
+ * the two differ by half: `grad_mag` says a winding takes 30 voxels there and the wraps come out 34
+ * apart, while the papyrus itself repeats every 46.  That last gap is a fault of the prediction's
+ * winding scale and is for the layer above this one to correct; this only stops the card telling the
+ * hand one thing and the eye another.
+ */
+export function wrapGap(patch: Patch) {
+  const { nu, nv, K, per, P } = patch;
+  const count = nu * nv;
+  const gaps: number[] = [];
+  for (let node = 0; node < count; node++) {
+    const a = (0 + K * per) * count + node, b = (per + K * per) * count + node;
+    if (Number.isNaN(P[a * 3]) || Number.isNaN(P[b * 3])) continue;
+    gaps.push(Math.hypot(P[a * 3] - P[b * 3], P[a * 3 + 1] - P[b * 3 + 1], P[a * 3 + 2] - P[b * 3 + 2]));
+  }
+  if (gaps.length === 0) return NaN;
+  gaps.sort((one, two) => one - two);
+  return gaps[gaps.length >> 1];
 }
 
 export function patchFacts(patch: Patch) {
@@ -532,10 +565,20 @@ export function nearestOn(patch: Patch, at: Vec3) {
  * NaN where the table has nothing, linear between the table's layers.
  */
 // What held each node of the nearest fitted wrap to `w`, and how far it ended from it.
+/**
+ * What held each node of the wrap nearest `w` up, and how far it ended from it — as COPIES.
+ *
+ * Copies because the caller sends them to the card, and sending an array to another thread hands the
+ * memory over and leaves this side with nothing.  Handing over the piece's own arrays worked once and
+ * then threw on every later send of the same wrap, which killed the drawing loop — so a card's line
+ * moved once per wrap and stood still in between, and a drag across the sheet lines went in steps of
+ * a whole wrap instead of following the hand.
+ */
 export function layerWhy(patch: Patch, w: number) {
   const count = patch.nu * patch.nv;
   const found = patch.why.get(Math.round(w));
-  return found ?? { why: new Uint8Array(count), away: new Float32Array(count).fill(NaN) };
+  if (found === undefined) return { why: new Uint8Array(count), away: new Float32Array(count).fill(NaN) };
+  return { why: found.why.slice(), away: found.away.slice() };
 }
 
 export function layerGrid(patch: Patch, w: number) {

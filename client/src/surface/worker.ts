@@ -13,7 +13,7 @@ import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
 import { chunksFor, LasagnaField } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
-import { buildPatch, coverageAt, layerGrid, layerWhy, nearestOn, outward, patchFacts, positionAt } from "./patch";
+import { buildPatch, coverageAt, layerGrid, layerWhy, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
 import { WHY_NOTHING } from "./types";
 import type { SurfacePlane } from "./render";
 import { drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
@@ -182,6 +182,15 @@ class Card {
   // again once they are here.
   private scanArriving: Promise<unknown> | undefined;
   private stale = false;
+  /*
+   * Whether the hand that asked for this sheet has let go.
+   *
+   * It is said by the hand rather than worked out from the time of the last ask.  Building a piece is
+   * synchronous, so while it happens the asks pile up unread in the queue, and the last one read
+   * looks old the moment the build ends — so the fit decided the hand had stopped and started
+   * another build, and another, right through a drag that never paused once.
+   */
+  private resting = true;
   // The sheet whose line the page has, so that it is sent once rather than with every frame.
   private sent: string | undefined;
   // When a sheet was last asked for, which says whether the hand has come to rest.
@@ -196,9 +205,10 @@ class Card {
     request.height = Math.max(1, Math.round(request.height));
   }
 
-  show(w: number, plane: SurfacePlane) {
+  show(w: number, plane: SurfacePlane, resting = true) {
     this.wanted = w;
     this.plane = plane;
+    this.resting = resting;
     this.askedAt = performance.now();
     this.changed?.();
     if (!this.drawing) this.run().catch((error) => this.fail(error));
@@ -450,7 +460,14 @@ class Card {
     const read = performance.now() - started;
     const patch = buildPatch(field, scan, seed, n, grid, K, PER, spacing, this.request.chains);
     const fitted = performance.now() - started - read;
-    return patch === undefined ? undefined : { patch, spacing, read, fitted };
+    if (patch === undefined) return undefined;
+    /*
+     * The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
+     * would be.  A drag across the sheet lines is measured in this number, and a card whose lines are
+     * 34 voxels apart while it is told 24 moves nearly half again as fast as the lines it is moving.
+     */
+    const gap = wrapGap(patch);
+    return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted };
   }
 
   /**
@@ -488,15 +505,18 @@ class Card {
    * Makes the piece cover `w`, building pieces around the sheets reached on the way; returns the
    * nearest sheet it could reach, which is `w` unless the sheets ran out.
    */
+  /**
+   * The sheet this piece can show of the one asked for, building further out first where it has to.
+   *
+   * Building is synchronous work on this thread, so while it happens nothing else here runs — no
+   * line is sent and no frame is drawn.  That is why it is not done while a hand is still dragging
+   * (`ShowRequest.resting`): measured, a build is 250 to 450 ms, and a line that stops dead for that
+   * long under the hand and then moves a whole wrap is what a drag felt like.  Once the hand lets go
+   * there is nothing to interrupt, and waiting for it is the simplest thing that can work.
+   */
   private async reach(w: number) {
-    /*
-     * Pieces built on the way, at most.  Each one is a second or more of reading and fitting, and a
-     * card asked for a sheet twenty away would spend a minute building pieces nobody sees on the way
-     * — better to arrive as far as a few pieces reach and say so, which the card shows as the sheet
-     * it came to rest on.
-     */
     let left = 4;
-    while (this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
+    while (this.resting && this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
       const patch: Patch = this.patch;
       const step = Math.max(-K, Math.min(K, Math.round(w - this.baseW)));
       // The centre of that sheet, or of the nearest one back towards this piece's own.
@@ -511,6 +531,7 @@ class Card {
       const next = await this.build(found.at, patch.normal);
       if (this.closed || next === undefined) break;
       this.patch = next.patch;
+      this.spacing = next.spacing;
       this.baseW += found.k;
       if (found.k !== step) break;
     }
@@ -605,10 +626,16 @@ class Card {
           );
         }
         /*
-         * A quick, coarse look first, so that turning the wheel keeps up, and then the whole thing —
-         * but only once the hand has rested: drawn while it is still moving, the sharp frame is
-         * thrown away before anyone sees it, and it costs five of the quick ones.
+         * The line first and the picture second, and if another sheet has been asked for in the
+         * meantime the picture is skipped altogether.
+         *
+         * A drag on the sheet lines asks for a new sheet every frame of the hand's movement, and each
+         * one costs a line — which is a table lookup — and a picture, which is a hundred times that.
+         * Drawing the picture for a sheet nobody is looking at any more spends the whole budget on
+         * frames that are thrown away, and the line, which is the thing being dragged, then moves
+         * once per picture instead of once per frame: it steps.  So the picture waits for the hand.
          */
+        if (this.wanted !== w || this.plane !== plane) continue;
         if (sketched !== asked) {
           send(2, preview);
           sketched = asked;
@@ -673,7 +700,7 @@ worker.onmessage = ({ data: request }) => {
       break;
     }
     case "show":
-      cards.get(request.id)?.show(request.w, request.plane);
+      cards.get(request.id)?.show(request.w, request.plane, request.resting);
       break;
     case "point":
       cards.get(request.id)?.point(request.at, request.token);

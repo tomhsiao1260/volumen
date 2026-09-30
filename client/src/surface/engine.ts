@@ -76,10 +76,10 @@ class SurfaceEngine {
   }
 
   // Another sheet of a card, without saying which plane: whatever it is showing.
-  showLayer(id: string, w: number) {
+  showLayer(id: string, w: number, resting = true) {
     const plane = this.planes.get(id);
     if (plane === undefined) return;
-    this.post({ type: "show", id, w, plane });
+    this.post({ type: "show", id, w, plane, resting });
     this.alongWith(id, w);
   }
 

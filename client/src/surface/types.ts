@@ -107,6 +107,14 @@ export interface WhereRequest {
 // Shows another sheet, or another of the sheet's planes.
 export interface ShowRequest {
   type: "show";
+  /*
+   * Whether the hand has let go.  A drag says false all the way along and true when it ends, and
+   * while it is false the piece is not rebuilt: a rebuild is a third of a second of work on the same
+   * thread as the drawing, and a line that stops dead under the hand for that long and then moves a
+   * whole wrap at once is exactly what this is here to stop.  The line goes as far as the piece
+   * already reaches and no further until the hand lets go.
+   */
+  resting?: boolean;
   id: string;
   w: number;
   plane: SurfacePlane;
