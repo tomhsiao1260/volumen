@@ -10,10 +10,11 @@
  */
 
 import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
-import { chunksFor, LasagnaField, readMask } from "./field";
+import { chunksFor, LasagnaField } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, coverageAt, layerGrid, layerWhy, nearestOn, outward, patchFacts, positionAt } from "./patch";
+import { WHY_NOTHING } from "./types";
 import type { SurfacePlane } from "./render";
 import { drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
@@ -86,12 +87,6 @@ function scanLevels(sourceId: string) {
  * across.  A card twice as wide covers four times the area, and at one fixed level that is four times
  * the downloading — which is what left a large card waiting for minutes.
  */
-function maskLevel(mask: { sourceId: string; base: number; micron: number }, micron: number) {
-  const wanted = Math.max(10, Math.min(20, micron / 220));
-  const level = Math.max(0, Math.min(5, Math.round(Math.log2(wanted / mask.micron))));
-  return channelLevel(`${mask.sourceId}/${level}`, mask.base + level);
-}
-
 function channelLevel(sourceId: string, level: number) {
   const key = `${sourceId}@${level}`;
   let array = opened.get(key);
@@ -148,10 +143,17 @@ const NEAR = 96;
  * "these two places are different wraps" is what a person can see, and how many wraps lie between
  * them usually is not — so that reading has gone rather than being left to return NaN for ever.
  */
+/**
+ * How far apart the sheets are here, from the prediction's own magnitude: `density` is how much of a
+ * winding one voxel along the normal is worth, so one over it is how many voxels a winding takes.
+ *
+ * It is not measured by looking for the sheets on either side any more.  The fit walks the winding
+ * rather than stepping a distance, so this number no longer decides where a sheet is — it only sets
+ * how large a box to read and how the card is scaled, and for that the field's own answer is enough.
+ */
 function sheetSpacing(field: LasagnaField, p: Vec3, n: Vec3) {
-  const guess = Math.min(150, Math.max(15, 1 / (field.density(p[0], p[1], p[2]) || 1 / 60)));
-  const measured = field.spacingAt(p[0], p[1], p[2], n[0], n[1], n[2], NEAR);
-  return Number.isNaN(measured) ? guess : Math.min(300, Math.max(15, measured));
+  void n;
+  return Math.min(300, Math.max(15, 1 / (field.density(p[0], p[1], p[2]) || 1 / 60)));
 }
 
 function gridFor(width: number, height: number, zoom: number): PatchGrid {
@@ -176,6 +178,10 @@ class Card {
   private drawing = false;
   // Resolves the wait of the drawing in progress when another sheet is asked for.
   private changed: (() => void) | undefined;
+  // The scan chunks the fit asked for and did not wait for, and whether the piece is worth drawing
+  // again once they are here.
+  private scanArriving: Promise<unknown> | undefined;
+  private stale = false;
   // The sheet whose line the page has, so that it is sent once rather than with every frame.
   private sent: string | undefined;
   // When a sheet was last asked for, which says whether the hand has come to rest.
@@ -288,6 +294,8 @@ class Card {
           ...patchFacts(built.patch),
         },
       });
+      // And once the scan is here, the fit gets the look it could not have the first time.
+      void this.lookAgain(at, outward(lasagna.umbilicus, at));
       await this.run();
     } catch (error) {
       this.fail(error);
@@ -295,10 +303,58 @@ class Card {
   }
 
   /**
+   * Builds the piece a second time, once the scan has arrived.
+   *
+   * The fit reads the scan itself wherever the prediction has nothing to say, and that is exactly
+   * where the holes in a piece are — but the chunks are asked for and not waited for, because waiting
+   * leaves the card saying "looking for the sheet" for a minute.  So the first piece is built with
+   * whatever had arrived, which on a card just opened is nothing: the one path that can fill a hole
+   * from the data never ran.  Measured on Scroll 1: `scan 0%` on every piece, and a hole of 159 nodes
+   * that the scan has a clear ridge through.
+   *
+   * It is done only when it would change something — a piece every node of which stands on the
+   * prediction has nothing to gain — and only while the card is still on the sheet it opened on, so
+   * that it never moves under a hand that has gone somewhere else.
+   */
+  private async lookAgain(at: Vec3, towards: Vec3 | undefined) {
+    const arriving = this.scanArriving;
+    if (arriving === undefined || this.patch === undefined) return;
+    let unheld = false;
+    for (const one of this.patch.why.values()) if (one.why.includes(WHY_NOTHING)) unheld = true;
+    if (!unheld) return;
+    const was = this.wanted;
+    await arriving;
+    if (this.closed || this.wanted !== was || this.patch === undefined) return;
+    const again = await this.build(at, towards, true);
+    if (this.closed || again === undefined || this.wanted !== was) return;
+    this.patch = again.patch;
+    this.spacing = again.spacing;
+    // The line and the picture are both of the piece that has gone, so both are said again.
+    this.sent = undefined;
+    this.stale = true;
+    this.post({
+      type: "status",
+      id: this.request.id,
+      status: "ready",
+      facts: {
+        spacing: again.spacing,
+        across: again.patch.nu,
+        down: again.patch.nv,
+        step: Math.round(Math.max(again.patch.hu, again.patch.hv)),
+        read: Math.round(again.read),
+        built: Math.round(again.fitted),
+        ...patchFacts(again.patch),
+      },
+    });
+    this.changed?.();
+    if (!this.drawing) void this.run();
+  }
+
+  /**
    * Reads the prediction around `seed` and builds the piece of sheet there, w growing along the
    * normal that agrees with `towards` — away from the scroll's axis, or the way the last piece went.
    */
-  private async build(seed: Vec3, towards: Vec3 | undefined) {
+  private async build(seed: Vec3, towards: Vec3 | undefined, afresh = false) {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
@@ -315,6 +371,11 @@ class Card {
       // thing share one, and a piece built before a chain was drawn is not that piece any more.
       this.request.chains.map((chain) => `${chain.id}.${chain.rev}`).join(","),
     ].join("|");
+    /*
+     * Pieces are kept by what was asked for, and what the scan had arrived by then is not part of
+     * that — so a second look would be handed back the very piece it is trying to improve on.
+     */
+    if (afresh) pieces.delete(key);
     let shared = pieces.get(key);
     const fresh = shared === undefined;
     if (shared === undefined) {
@@ -346,16 +407,16 @@ class Card {
     const channels = this.channels!;
     const lasagna = this.request.lasagna;
     const started = performance.now();
-    // Without a surface prediction the phase has to say where the sheets are; with one it is never
-    // read, and reading it would be most of the card's downloading for nothing.
-    const withPhase = lasagna.mask === null;
-    const all = [channels.grad_mag, channels.nx, channels.ny, ...(withPhase ? [channels.cos] : [])];
-    const load = async (lo: Vec3, hi: Vec3, mask?: ZarrLevel) => {
-      const [box] = await Promise.all([
-        mask === undefined ? undefined : readMask(mask, lo, hi),
-        ...all.map((level) => level.loadAll(chunksFor(level, lo, hi))),
-      ]);
-      return new LasagnaField(withPhase ? channels : { ...channels, cos: undefined }, lo, hi, box);
+    /*
+     * Only the normal field is read: `nx`, `ny` for the direction and `grad_mag` for how much of a
+     * winding a voxel of it is worth.  The phase and the surface mask are not downloaded at all —
+     * measured on Scroll 1 neither says where a sheet is well enough to be worth the bytes, and the
+     * fit no longer asks either of them (`patch.ts`).
+     */
+    const all = [channels.grad_mag, channels.nx, channels.ny];
+    const load = async (lo: Vec3, hi: Vec3) => {
+      await Promise.all(all.map((level) => level.loadAll(chunksFor(level, lo, hi))));
+      return new LasagnaField({ ...channels, cos: undefined }, lo, hi, undefined);
     };
 
     /*
@@ -363,11 +424,7 @@ class Card {
      * prediction is read at its finest here: it is a small box, and the spacing measured on it sets
      * the scale of everything after.
      */
-    const near = await load(
-      seed.map((v) => v - NEAR) as Vec3,
-      seed.map((v) => v + NEAR) as Vec3,
-      lasagna.mask === null ? undefined : await maskLevel(lasagna.mask, 2 * NEAR * lasagna.micron),
-    );
+    const near = await load(seed.map((v) => v - NEAR) as Vec3, seed.map((v) => v + NEAR) as Vec3);
     const reference = towards ?? [0, 1, 0];
     if (!near.normal(seed[0], seed[1], seed[2], reference[0], reference[1], reference[2])) {
       return undefined;
@@ -380,13 +437,7 @@ class Card {
     const depth = (REACH_SHEETS + 0.5) * spacing;
     const tangent = Math.hypot(across, down) * zoom * 0.6;
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
-    const field = await load(
-      seed.map((v, i) => v - half[i]) as Vec3,
-      seed.map((v, i) => v + half[i]) as Vec3,
-      lasagna.mask === null
-        ? undefined
-        : await maskLevel(lasagna.mask, 2 * Math.max(...half) * lasagna.micron),
-    );
+    const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     /*
      * And the scan itself, for the fit to look at where the prediction says nothing.  Coarse on
      * purpose: what it is asked is "where is the sheet along this line", and the wraps are tens of
@@ -425,7 +476,7 @@ class Card {
      * `sample` answers -1 for the rest and `scanRidge` says nothing about those places.  The piece is
      * built again whenever anything is said or the card moves, and by then they are here.
      */
-    void level
+    this.scanArriving = level
       .loadAll(level.chunksBetween(a.map(Math.floor) as Vec3, b.map((c) => Math.floor(c) + 1) as Vec3))
       .catch(() => undefined);
     const reader = new LevelReader(level);
@@ -479,7 +530,8 @@ class Card {
       let drawn: string | undefined;
       // The sheet the quick look is already showing, so that resting does not draw it twice.
       let sketched: string | undefined;
-      while (!this.closed && drawn !== `${this.wanted} ${this.plane}`) {
+      while (!this.closed && (this.stale || drawn !== `${this.wanted} ${this.plane}`)) {
+        this.stale = false;
         const w = this.wanted, plane = this.plane;
         const asked = `${w} ${plane}`;
         const changed = new Promise<void>((resolve) => (this.changed = resolve));
