@@ -35,7 +35,6 @@
 
 import type { LasagnaField, Vec3 } from "./field";
 import type { ChainSaid } from "./types";
-import { WHY_NOTHING, WHY_PREDICTION } from "./types";
 // Positions and directions are full-resolution voxels in (z, y, x) order.
 const add = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const mul = (a: Vec3, s: number): Vec3 => [a[0] * s, a[1] * s, a[2] * s];
@@ -109,8 +108,6 @@ export interface Patch extends PatchGrid {
   down: Vec3;
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
-  // Per whole wrap: what held each of its nodes up.
-  why: Map<number, Uint8Array>;
 }
 
 /**
@@ -302,19 +299,7 @@ export function buildPatch(
     for (const dir of [1, -1] as const) march(field, start, dir, n0, K, per, P, A, count, node);
   }
 
-  /*
-   * And what holds each node of each whole wrap up, which under this fit is one of two things: the
-   * prediction's normal field reached it, or it ran out on the way and nothing did.
-   */
-  const why = new Map<number, Uint8Array>();
-  for (let k = -K; k <= K; k++) {
-    const held = new Uint8Array(count);
-    for (let node = 0; node < count; node++)
-      held[node] = A[at(k * per, node)] >= 0.5 ? WHY_PREDICTION : WHY_NOTHING;
-    why.set(k, held);
-  }
-
-  return { ...grid, K, per, P, A, right, down, normal: n0, why };
+  return { ...grid, K, per, P, A, right, down, normal: n0 };
 }
 
 /**
@@ -511,20 +496,6 @@ export function nearestOn(patch: Patch, at: Vec3) {
  * NaN where the table has nothing, linear between the table's layers.
  */
 // What held each node of the nearest fitted wrap to `w`, and how far it ended from it.
-/**
- * What held each node of the wrap nearest `w` up — as a COPY.
- *
- * A copy because the caller sends it to the card, and sending an array to another thread hands the
- * memory over and leaves this side with nothing.  Handing over the piece's own array worked once and
- * then threw on every later send of the same wrap, which killed the drawing loop — so a card's line
- * moved once per wrap and stood still in between, and a drag across the sheet lines went in steps of
- * a whole wrap instead of following the hand.
- */
-export function layerWhy(patch: Patch, w: number) {
-  const found = patch.why.get(Math.round(w));
-  return found === undefined ? new Uint8Array(patch.nu * patch.nv) : found.slice();
-}
-
 export function layerGrid(patch: Patch, w: number) {
   const { nu, nv, K, per, P, A } = patch;
   const count = nu * nv;

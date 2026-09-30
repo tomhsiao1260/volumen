@@ -12,12 +12,6 @@ export type { SurfacePlane };
  * card works out where a marked place falls in its frame, which is the same mapping the other way
  * round (`mapping` in `render.ts`).
  */
-/*
- * What held a node of a fitted wrap up.  Shared because both sides need it: the fit writes it and the
- * card washes itself with it.
- */
-export const WHY_NOTHING = 0, WHY_PREDICTION = 1, WHY_SCAN = 2, WHY_SAID = 3;
-
 export const SPAN = 2;
 
 /*
@@ -195,12 +189,6 @@ export interface SheetEvent {
   nu: number;
   nv: number;
   grid: ArrayBuffer;
-  /*
-   * What holds each point of it up — nothing, the prediction, the scan, or a person — and how far it
-   * ended from whatever that was.  It is the only honest answer to "why is the line here", which is
-   * the question somebody asks of a wrap that has gone somewhere they did not expect.
-   */
-  why: ArrayBuffer;
   // The way w grows, and how many voxels a sheet is from the next: enough to turn a drag across the
   // line on a slice card into sheets.
   normal: [number, number, number];

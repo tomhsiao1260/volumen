@@ -13,8 +13,7 @@ import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
 import { chunksFor, LasagnaField } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
-import { buildPatch, coverageAt, layerGrid, layerWhy, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
-import { WHY_NOTHING } from "./types";
+import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
 import type { SurfacePlane } from "./render";
 import { drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
@@ -513,7 +512,6 @@ class Card {
         if (this.sent !== line) {
           this.sent = line;
           const grid = layerGrid(patch, sheet);
-          const why = layerWhy(patch, sheet);
           this.post(
             {
               type: "sheet",
@@ -522,23 +520,25 @@ class Card {
               nu: patch.nu,
               nv: patch.nv,
               grid: grid.buffer,
-              why: why.buffer,
               normal: patch.normal,
               spacing: this.spacing,
             },
-            [grid.buffer, why.buffer],
+            [grid.buffer],
           );
         }
         /*
-         * The line first and the picture second, and if another sheet has been asked for in the
-         * meantime the picture is skipped altogether.
+         * While a hand is dragging the line, the line is ALL that is drawn.
          *
-         * A drag on the sheet lines asks for a new sheet every frame of the hand's movement, and each
-         * one costs a line — which is a table lookup — and a picture, which is a hundred times that.
-         * Drawing the picture for a sheet nobody is looking at any more spends the whole budget on
-         * frames that are thrown away, and the line, which is the thing being dragged, then moves
-         * once per picture instead of once per frame: it steps.  So the picture waits for the hand.
+         * A drag asks for a new sheet every frame, and each one costs a line — a table lookup and a
+         * message — and a picture, which is fifteen milliseconds.  Every one of those pictures is for
+         * a sheet the hand has already left, and drawing them is what put the line at half the rate
+         * of the hand.  So while the hand holds on it gets the line at its own speed, and the picture
+         * the moment it lets go.
          */
+        if (!this.resting) {
+          await changed;
+          continue;
+        }
         if (this.wanted !== w || this.plane !== plane) continue;
         if (sketched !== asked) {
           send(2, preview);

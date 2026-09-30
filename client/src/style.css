@@ -956,60 +956,13 @@ button:focus-visible,
   background: #ffffff16;
 }
 
-/* What a piece made of a chain: on one sheet, or spread across several — which is either the jump
-   being corrected or a chain drawn across the sheets by mistake. */
-.rail-anno-kind,
-.rail-anno-heard {
+.rail-anno-kind {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.rail-anno-heard {
-  font-size: 11px;
-  color: #7f8896;
-}
-
-.rail-anno-heard.crossed {
-  color: #e0a34a;
-}
-
-/* Said when a surface card is resting between two wraps rather than on one, where the papyrus is
-   thin and the picture looks like a wrap full of pits. */
-.card-between {
-  flex: none;
-  color: #e0a34a;
-  font-size: 11px;
+/* The wrap the card is on keeps its own line rather than being squeezed. */
+.card-layer {
   white-space: nowrap;
-}
-
-/* The wrap and where the card is looking each keep their own line rather than being squeezed. */
-.card-layer,
-.card-between {
-  white-space: nowrap;
-}
-
-/*
- * What holds the wrap up, asked for.  It is off by default and says nothing while it is off: the
- * card is for reading the papyrus, and a card permanently washed in diagnosis is harder to read.
- */
-.card-why {
-  flex: none;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  padding: 0 4px;
-  background: none;
-  color: #7c8794;
-  font-size: 11px;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.card-why:hover {
-  color: #c3ccd6;
-}
-
-.card-why.on {
-  border-color: #ff4646;
-  color: #ff8a8a;
 }

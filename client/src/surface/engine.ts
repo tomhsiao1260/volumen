@@ -31,7 +31,6 @@ class SurfaceEngine {
             nu: event.nu,
             nv: event.nv,
             grid: new Float32Array(event.grid),
-            why: new Uint8Array(event.why),
             normal: event.normal,
             spacing: event.spacing,
           });

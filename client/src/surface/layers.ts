@@ -21,8 +21,6 @@ export interface Sheet {
   nu: number;
   nv: number;
   grid: Float32Array;
-  // What holds each point of it up: the answer to "why is the line here".
-  why: Uint8Array;
   // The way w grows (z, y, x), and how many voxels apart the sheets are: what turns a drag across
   // the line into sheets.
   normal: [number, number, number];
@@ -43,11 +41,6 @@ export function setSheet(sheet: Sheet) {
 
 export function forgetSheet(cardId: string) {
   if (sheets.delete(cardId)) changed();
-}
-
-// The one a card is showing, for the card itself to ask what holds its wrap up.
-export function sheetOf(cardId: string) {
-  return sheets.get(cardId);
 }
 
 // The sheets shown of one scan, which are the ones a slice card of that scan can draw.
