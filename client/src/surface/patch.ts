@@ -176,19 +176,12 @@ function baseSurface(field: LasagnaField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
 }
 
 /*
- * How far one step of the march may be.  Short enough that a curving normal is resampled often,
- * long enough that a wrap is tens of samples and not thousands.
- */
-const STEP_MOST = 3;
-const STEP_LEAST = 0.4;
-/*
- * And how much of a winding a step may cross, which is what actually sets the step.  There are `per`
- * samples to a winding, so a step of a twelfth crosses one sample every step and a half — enough for
- * the midpoint rule, which is second order, and no more.  Measured: at a twenty-fourth a piece took
- * 400 ms to build and a drag across the sheet lines froze for as long as that every third wrap.
+ * How far one step of the march may be, as a part of the space between two sheets.  There are `per`
+ * samples to a sheet, so a twelfth is a step and a half to each sample — enough for the midpoint
+ * rule, which is second order, and no more.
  */
 const STEP_OF_WRAP = 1 / 12;
-// A march that has taken this many steps without crossing the wraps asked of it has gone wrong.
+// A march that has taken this many steps without reaching the sheets asked of it has gone wrong.
 const STEP_LIMIT = 4000;
 
 /**
@@ -208,39 +201,39 @@ function march(
   reference: Vec3,
   K: number,
   per: number,
+  // How far one sheet is from the next, in voxels.  The one number this fit is TOLD rather than
+  // reading: the prediction's own answer to it is out by half (`field.ts`), so it is a constant here
+  // and a thing for a person to correct, which is what an annotation does.
+  spacing: number,
   P: Float32Array,
   A: Float32Array,
   count: number,
   node: number,
 ) {
   const wanted = K * per;
+  const ds = Math.max(0.4, (spacing * STEP_OF_WRAP) / 1);
   let p: Vec3 = [from[0], from[1], from[2]];
   let ref: Vec3 = [reference[0], reference[1], reference[2]];
-  let w = 0;
+  // How far along the normal the march has come, in sheets.
+  let gone = 0;
   let next = 1;
   for (let step = 0; next <= wanted && step < STEP_LIMIT; step++) {
     const n = normalAt(field, p, ref);
     if (n === null) break;
-    const rho = field.density(p[0], p[1], p[2]);
-    if (!(rho > 0)) break;
     ref = n;
     // Never past the sample being walked towards, so that no sample is missed by overshooting.
-    const ds = Math.min(STEP_MOST, Math.max(STEP_LEAST, STEP_OF_WRAP / rho), Math.max(STEP_LEAST, (next / per - w) / rho));
+    const take = Math.min(ds, Math.max(0.4, (next / per - gone) * spacing));
     // Taken at the middle of the step, so that a normal that turns does not walk the march off the
     // sheet — the same reason a curve is integrated by its midpoint and not by its start.
-    const half: Vec3 = [p[0] + (n[0] * dir * ds) / 2, p[1] + (n[1] * dir * ds) / 2, p[2] + (n[2] * dir * ds) / 2];
-    // The direction at the middle of the step, which is what the step is taken along; how much of a
-    // winding it is worth is taken from where the step began, since that changes far more slowly than
-    // the direction does and costs as much to ask.
+    const half: Vec3 = [p[0] + (n[0] * dir * take) / 2, p[1] + (n[1] * dir * take) / 2, p[2] + (n[2] * dir * take) / 2];
     const middle = normalAt(field, half, ref) ?? n;
-    const density = rho;
     const was: Vec3 = [p[0], p[1], p[2]];
-    const wWas = w;
-    p = [p[0] + middle[0] * dir * ds, p[1] + middle[1] * dir * ds, p[2] + middle[2] * dir * ds];
-    w += density * ds;
-    // Every sample this step went past, put where the winding says it belongs along the step.
-    while (next <= wanted && w >= next / per) {
-      const t = w === wWas ? 1 : (next / per - wWas) / (w - wWas);
+    const before = gone;
+    p = [p[0] + middle[0] * dir * take, p[1] + middle[1] * dir * take, p[2] + middle[2] * dir * take];
+    gone += take / spacing;
+    // Every sample this step went past, put where the distance says it belongs along the step.
+    while (next <= wanted && gone >= next / per) {
+      const t = gone === before ? 1 : (next / per - before) / (gone - before);
       const k = dir > 0 ? next : -next;
       const o = (k + K * per) * count + node;
       P[o * 3] = was[0] + (p[0] - was[0]) * t;
@@ -260,6 +253,174 @@ function march(
  * layers being built on top of this one, and the spacing is worked out from the field rather than
  * given.  They stay in the signature so that adding them back is a change to this file alone.
  */
+/*
+ * How far a place may be from the piece and still be taken as a thing said about it, as a part of the
+ * wrap spacing.  Further than this and the person was talking about somewhere else.
+ */
+const SAID_REACH = 1.5;
+// How many sweeps the correction is smoothed over, and how strongly it is held where nothing said.
+const BEND_SWEEPS = 400;
+const BEND_PULL = 0.004;
+
+/*
+ * The wraps a piece walks out, from a surface and the field: the base into layer 0 and a march either
+ * way from every node of it.
+ */
+function walk(
+  field: LasagnaField,
+  X: Float64Array,
+  n0: Vec3,
+  count: number,
+  K: number,
+  per: number,
+  spacing: number,
+) {
+  const layers = 2 * K * per + 1;
+  const P = new Float32Array(layers * count * 3).fill(NaN);
+  const A = new Float32Array(layers * count);
+  for (let node = 0; node < count; node++) {
+    const o = K * per * count + node;
+    if (Number.isNaN(X[node * 3])) continue;
+    P[o * 3] = X[node * 3];
+    P[o * 3 + 1] = X[node * 3 + 1];
+    P[o * 3 + 2] = X[node * 3 + 2];
+    A[o] = 1;
+    const start: Vec3 = [X[node * 3], X[node * 3 + 1], X[node * 3 + 2]];
+    for (const dir of [1, -1] as const) march(field, start, dir, n0, K, per, spacing, P, A, count, node);
+  }
+  return { P, A };
+}
+
+/**
+ * What a person has said, as a correction to the winding — in wraps, at the grid node each thing was
+ * said nearest to.
+ *
+ * This is the whole of how an annotation reaches this fit, and it is said in the fit's own terms.
+ * The piece is a winding field walked out from a surface: every place in it has a w, whole numbers
+ * being the sheets.  So
+ *
+ *   a SAME winding says its points are all one sheet — that is, they all have the same whole w, and
+ *     the correction at each is however far its w is from the one the chain sits on;
+ *   a RELATIVE winding says two places are NOT one sheet — that is, their w differ by at least one,
+ *     and where the piece has them within half a wrap of each other the further of the two is
+ *     corrected out to the next whole one.
+ *
+ * Nothing here looks for papyrus, and nothing snaps to anything.  A thing said is a statement about
+ * the winding, the fit is a winding, and the two meet in the same number.
+ */
+function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
+  const { nu, nv } = patch;
+  const reach = spacing * SAID_REACH;
+  const found = new Map<string, { node: number; w: number; away: number }[]>();
+  for (const chain of chains) {
+    const places = [];
+    for (const point of chain.points) {
+      const on = nearestOn(patch, point.at);
+      if (on === undefined || on.away > reach) continue;
+      const j = Math.min(nu - 1, Math.max(0, Math.round(on.gj)));
+      const i = Math.min(nv - 1, Math.max(0, Math.round(on.gi)));
+      places.push({ node: i * nu + j, w: on.w, away: on.away });
+    }
+    if (places.length > 0) found.set(chain.id, places);
+  }
+
+  const want = new Map<number, number>();
+  for (const chain of chains) {
+    const places = found.get(chain.id);
+    if (places === undefined || places.length < 2 || chain.kind !== "same") continue;
+    // Which sheet the chain is on: the one most of its points are nearest to.
+    const votes = new Map<number, number>();
+    for (const one of places) votes.set(Math.round(one.w), (votes.get(Math.round(one.w)) ?? 0) + 1);
+    let sheet = 0, best = -1;
+    for (const [which, count] of votes) if (count > best) { best = count; sheet = which; }
+    /*
+     * Moving the base OUT by one winding moves every wrap out with it, so a place measured against
+     * the piece reads one LESS than it did — the correction is the place's own w less the wrap its
+     * chain is on, not the other way about.
+     */
+    for (const one of places) want.set(one.node, one.w - sheet);
+  }
+  for (const chain of chains) {
+    if (chain.kind !== "step") continue;
+    const places = found.get(chain.id);
+    if (places === undefined || places.length < 2) continue;
+    for (let k = 0; k + 1 < places.length; k++) {
+      const [a, b] = [places[k], places[k + 1]];
+      const apart = Math.abs((a.w + (want.get(a.node) ?? 0)) - (b.w + (want.get(b.node) ?? 0)));
+      // Already different sheets: a thing already true asks for nothing.
+      if (apart >= 0.5) continue;
+      // The one the piece is less sure of — further from a whole wrap — is the one that moves.
+      const [stay, move] = Math.abs(a.w - Math.round(a.w)) <= Math.abs(b.w - Math.round(b.w)) ? [a, b] : [b, a];
+      const to = Math.round(stay.w + (want.get(stay.node) ?? 0)) + (move.w >= stay.w ? 1 : -1);
+      want.set(move.node, move.w - to);
+    }
+  }
+  return want;
+}
+
+/**
+ * Those corrections spread over the whole grid, smoothly: what was said held exactly where it was
+ * said, and everywhere else the smoothest thing that agrees with it, fading back to nothing far away.
+ */
+function bend(grid: PatchGrid, want: Map<number, number>) {
+  const { nu, nv } = grid;
+  const count = nu * nv;
+  const s = new Float64Array(count);
+  const fixed = new Uint8Array(count);
+  for (const [node, value] of want) {
+    s[node] = value;
+    fixed[node] = 1;
+  }
+  for (let sweep = 0; sweep < BEND_SWEEPS; sweep++)
+    for (let i = 0; i < nv; i++)
+      for (let j = 0; j < nu; j++) {
+        const k = i * nu + j;
+        if (fixed[k]) continue;
+        let sum = 0, n = 0;
+        if (j + 1 < nu) (sum += s[k + 1]), n++;
+        if (j > 0) (sum += s[k - 1]), n++;
+        if (i + 1 < nv) (sum += s[k + nu]), n++;
+        if (i > 0) (sum += s[k - nu]), n++;
+        // Screened rather than plain: without the pull towards nothing a correction said in one
+        // corner would tilt the whole piece, and what was said was about that corner.
+        s[k] += 1.7 * (sum / (n + BEND_PULL * n) - s[k]);
+      }
+  return s;
+}
+
+/**
+ * How far one sheet is from the next, in voxels — from what a person has said, where they have said
+ * anything.
+ *
+ * This is the one thing the fit needs that the normal field does not give it.  A direction says which
+ * way is across the sheets; it says nothing about how far across.  The prediction has a number for it
+ * — `grad_mag` — and measured on Scroll 1 it is out by half, steadily (`field.ts`), so a fit that
+ * walks it is a wrap and a half out by its third sheet.
+ *
+ * A relative winding is exactly this number said by hand: "these two places are different sheets",
+ * and how far apart they are along the normal is what one sheet is worth.  The middle of them is
+ * taken rather than the least or the most, so that one pair drawn across two sheets does not set the
+ * scale for the whole piece.  With nothing said, the fallback is a guess and is meant to look like
+ * one.
+ */
+function spacingSaid(field: LasagnaField, chains: ChainSaid[], n0: Vec3, fallback: number) {
+  const gaps: number[] = [];
+  for (const chain of chains) {
+    if (chain.kind !== "step") continue;
+    for (let k = 0; k + 1 < chain.points.length; k++) {
+      const [a, b] = [chain.points[k].at, chain.points[k + 1].at];
+      const middle: Vec3 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2];
+      const n = normalAt(field, middle, n0) ?? n0;
+      const gap = Math.abs((b[0] - a[0]) * n[0] + (b[1] - a[1]) * n[1] + (b[2] - a[2]) * n[2]);
+      // Two places closer than this along the normal are not two sheets, whatever was meant by them.
+      if (gap > 4) gaps.push(gap);
+    }
+  }
+  if (gaps.length === 0) return fallback;
+  gaps.sort((one, two) => one - two);
+  return gaps[gaps.length >> 1];
+}
+
 export function buildPatch(
   field: LasagnaField,
   seed: Vec3,
@@ -267,6 +428,10 @@ export function buildPatch(
   grid: PatchGrid,
   K = 3,
   per = 8,
+  // What one sheet is worth in voxels when nobody has said; a relative winding says it properly.
+  spacing = 40,
+  // What a person has said about the sheets here.
+  chains: ChainSaid[] = [],
   // The surface to start from, node by node, when there already is one — a piece built further out
   // starts from the wrap it is centred on rather than solving the tangent plane again.  NaN where
   // that wrap has nothing at a node, and the piece has nothing there either.
@@ -279,27 +444,38 @@ export function buildPatch(
 
   const { nu, nv } = grid;
   const count = nu * nv;
+  const apart = spacingSaid(field, chains, n0, spacing);
   const { X, right, down } =
     from !== undefined && from.length === count * 3
       ? { X: Float64Array.from(from), ...frame(n0) }
       : baseSurface(field, seed, n0, grid);
-  const layers = 2 * K * per + 1;
-  const P = new Float32Array(layers * count * 3).fill(NaN);
-  const A = new Float32Array(layers * count);
-  const at = (k: number, node: number) => (k + K * per) * count + node;
 
+  const first = walk(field, X, n0, count, K, per, apart);
+  const patch: Patch = { ...grid, K, per, ...first, right, down, normal: n0 };
+  if (chains.length === 0) return patch;
+
+  /*
+   * And again, holding what was said.  Twice because a thing said is about a place, and which wrap a
+   * place is on cannot be known until there are wraps to compare it with — so the first piece is
+   * what the saying is measured against, and the second is the piece that listens.
+   */
+  const want = saidAbout(patch, chains, apart);
+  if (want.size === 0) return patch;
+  const s = bend(grid, want);
+  const moved = X.slice();
   for (let node = 0; node < count; node++) {
-    const o = at(0, node);
-    if (Number.isNaN(X[node * 3])) continue;
-    P[o * 3] = X[node * 3];
-    P[o * 3 + 1] = X[node * 3 + 1];
-    P[o * 3 + 2] = X[node * 3 + 2];
-    A[o] = 1;
-    const start: Vec3 = [X[node * 3], X[node * 3 + 1], X[node * 3 + 2]];
-    for (const dir of [1, -1] as const) march(field, start, dir, n0, K, per, P, A, count, node);
+    const o = node * 3;
+    if (Number.isNaN(moved[o]) || s[node] === 0) continue;
+    const n = normalAt(field, [moved[o], moved[o + 1], moved[o + 2]], n0);
+    if (n === null) continue;
+    // The correction is in sheets, and a sheet is `apart` voxels.
+    const step = s[node] * apart;
+    moved[o] += n[0] * step;
+    moved[o + 1] += n[1] * step;
+    moved[o + 2] += n[2] * step;
   }
-
-  return { ...grid, K, per, P, A, right, down, normal: n0 };
+  const again = walk(field, moved, n0, count, K, per, apart);
+  return { ...grid, K, per, ...again, right, down, normal: n0 };
 }
 
 /**

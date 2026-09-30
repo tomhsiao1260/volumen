@@ -131,29 +131,15 @@ const NEAR = 96;
  * where that finds nothing, guessed from the density — which is only ever right to within a few
  * times, so it is a last resort.
  */
-/**
- * How far apart the sheets are here.  The prediction's own answer is taken in one small box at the
- * seed and was measured, over six places on Scroll 1, to be a fifth to a half wrong, and everything
- * else is scaled by it — so it is the number most worth improving, and the place to start when the
- * piece comes out with its wraps at the wrong spacing.
+/*
+ * What one sheet is worth in voxels while nobody has said.
  *
- * It used to be told: a relative winding counted wraps, and the distance between two of its points
- * divided by the wraps between them was a measured spacing.  Nobody counts wraps any more — saying
- * "these two places are different wraps" is what a person can see, and how many wraps lie between
- * them usually is not — so that reading has gone rather than being left to return NaN for ever.
+ * It is a guess and is meant to look like one.  The fit reads nothing but the normal, and a direction
+ * cannot say how far across the sheets anything is; the prediction's own answer to that is out by half
+ * (`field.ts`).  So the number that matters comes from a relative winding — "these two places are
+ * different sheets" — and this stands in until there is one (`spacingSaid` in `patch.ts`).
  */
-/**
- * How far apart the sheets are here, from the prediction's own magnitude: `density` is how much of a
- * winding one voxel along the normal is worth, so one over it is how many voxels a winding takes.
- *
- * It is not measured by looking for the sheets on either side any more.  The fit walks the winding
- * rather than stepping a distance, so this number no longer decides where a sheet is — it only sets
- * how large a box to read and how the card is scaled, and for that the field's own answer is enough.
- */
-function sheetSpacing(field: LasagnaField, p: Vec3, n: Vec3) {
-  void n;
-  return Math.min(300, Math.max(15, 1 / (field.density(p[0], p[1], p[2]) || 1 / 60)));
-}
+const SPACING = 40;
 
 function gridFor(width: number, height: number, zoom: number): PatchGrid {
   const spacing = Math.min(24, Math.max(6, zoom * 4));
@@ -169,7 +155,7 @@ class Card {
   private closed = false;
   private patch: Patch | undefined;
   private scan: ZarrLevel[] | undefined;
-  private channels: { cos: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel } | undefined;
+  private channels: { grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel } | undefined;
   // The sheet the piece was built on, counted from the one the card was opened on.
   private baseW = 0;
   private wanted: number;
@@ -268,7 +254,6 @@ class Card {
       const started = performance.now();
       const scan = scanLevels(scanSourceId);
       this.channels = {
-        cos: await channelLevel(lasagna.channels.cos.sourceId, lasagna.channels.cos.level),
         grad_mag: await channelLevel(lasagna.channels.grad_mag.sourceId, lasagna.channels.grad_mag.level),
         nx: await channelLevel(lasagna.channels.nx.sourceId, lasagna.channels.nx.level),
         ny: await channelLevel(lasagna.channels.ny.sourceId, lasagna.channels.ny.level),
@@ -368,7 +353,7 @@ class Card {
     const all = [channels.grad_mag, channels.nx, channels.ny];
     const load = async (lo: Vec3, hi: Vec3) => {
       await Promise.all(all.map((level) => level.loadAll(chunksFor(level, lo, hi))));
-      return new LasagnaField({ ...channels, cos: undefined }, lo, hi, undefined);
+      return new LasagnaField(channels, lo, hi);
     };
 
     /*
@@ -382,7 +367,7 @@ class Card {
       return undefined;
     }
     const n: Vec3 = [near.out[0], near.out[1], near.out[2]];
-    const spacing = sheetSpacing(near, seed, n);
+    const spacing = SPACING;
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
@@ -391,7 +376,7 @@ class Card {
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, from);
+    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains, from);
     const fitted = performance.now() - started - read;
     if (patch === undefined) return undefined;
     /*

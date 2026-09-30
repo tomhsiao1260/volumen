@@ -4,17 +4,25 @@
  *
  *   normal(z, y, x, ref)   the sheet normal, its sign chosen to agree with `ref` (the prediction is
  *                          unsigned), written to `out`
- *   density(z, y, x)       windings crossed per voxel along the normal, 0 where there is no prediction
  *
  * Copied out of the chunks into dense arrays once per patch, because building a patch samples it a
  * few million times.
  *
- * These two are the whole of what the flattening reads.  The phase and the surface prediction used to
- * be read here as well, and both are gone: measured on Scroll 1 (`scratchpad/pup/explain.cjs`), a
- * place on papyrus reads higher in the phase than a place in the gap between two sheets 51% of the
- * time — a coin — and 55% of the sheets the scan shows have no predicted face within 10 voxels of
- * them.  The normal is the part of the prediction that holds up: against the scan's own grain, half
- * of it is within 19 degrees.  So the fit is built on it alone (`patch.ts`).
+ * That is the whole of what the flattening reads: a direction, and whether there is one.
+ *
+ * Three other things used to be read here and all three are gone, each for a measured reason
+ * (`scratchpad/pup/explain.cjs`, on Scroll 1 at 19449, 7935, 38115):
+ *
+ *   the phase `cos`      a place on papyrus reads higher than a place in the gap between two sheets
+ *                        51% of the time.  A coin.
+ *   the surface mask     55% of the sheets the scan shows have no predicted face within 10 voxels.
+ *   `grad_mag`           it says a winding takes 30 voxels where the papyrus repeats every 46 — out
+ *                        by half, though very steadily (28 to 32).  Its zeros are still read, since
+ *                        they are where the network had nothing to say, but its numbers are not.
+ *
+ * The normal is the part of the prediction that holds up: against the scan's own grain, half of it is
+ * within 19 degrees.  So the fit is built on it alone (`patch.ts`), and how far apart the sheets are
+ * is a thing the fit is told rather than a thing it reads.
  */
 
 import type { ZarrLevel } from "./store";
@@ -27,6 +35,8 @@ export class LasagnaField {
   private d: number[];
   private nx: Float32Array;
   private ny: Float32Array;
+  // Not read as a number: `grad_mag` is zero exactly where the network had nothing to say, and that
+  // is the whole of what it is used for here — whether there IS a normal at a place.
   private gm: Float32Array;
   // Where `normal` writes its answer.
   readonly out = new Float64Array(3);
@@ -35,13 +45,7 @@ export class LasagnaField {
    * `lo` and `hi` bound the full-resolution box the field is needed in; the channels' chunks covering
    * it must be loaded (see `chunksFor`).
    */
-  constructor(
-    channels: { cos?: ZarrLevel; grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel },
-    lo: Vec3,
-    hi: Vec3,
-    unused?: unknown,
-  ) {
-    void unused;
+  constructor(channels: { grad_mag: ZarrLevel; nx: ZarrLevel; ny: ZarrLevel }, lo: Vec3, hi: Vec3) {
     const { nx, ny, grad_mag: gm } = channels;
     this.f = nx.factor;
     const box = fieldBox(nx, lo, hi);
@@ -90,26 +94,6 @@ export class LasagnaField {
     this.out[1] = ay / len;
     this.out[2] = ax / len;
     return true;
-  }
-
-  density(z: number, y: number, x: number) {
-    const f = this.f, d = this.d;
-    const lz = (z + 0.5) / f - 0.5 - this.o[0];
-    const ly = (y + 0.5) / f - 0.5 - this.o[1];
-    const lx = (x + 0.5) / f - 0.5 - this.o[2];
-    const z0 = Math.floor(lz), y0 = Math.floor(ly), x0 = Math.floor(lx);
-    if (z0 < 0 || y0 < 0 || x0 < 0 || z0 + 1 >= d[0] || y0 + 1 >= d[1] || x0 + 1 >= d[2]) return 0;
-    const tz = lz - z0, ty = ly - y0, tx = lx - x0;
-    let v = 0, ws = 0;
-    for (let c = 0; c < 8; c++) {
-      const cz = c >> 2, cy = (c >> 1) & 1, cx = c & 1;
-      const w = (cz ? tz : 1 - tz) * (cy ? ty : 1 - ty) * (cx ? tx : 1 - tx);
-      const g = this.gm[((z0 + cz) * d[1] + y0 + cy) * d[2] + x0 + cx];
-      if (w === 0 || g === 0) continue;
-      v += w * g;
-      ws += w;
-    }
-    return ws < 0.25 ? 0 : v / ws;
   }
 }
 
