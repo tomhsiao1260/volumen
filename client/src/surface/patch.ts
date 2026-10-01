@@ -6,32 +6,20 @@
  * w = k / per, where whole w are sheets and the rest lie evenly between them.  Drawing a layer is
  * then looking positions up in the table and sampling the scan there (`render.ts`).
  *
- * THIS FIT USES ONE THING AND NOTHING ELSE: the prediction's normal field.  Not the phase, not the
- * surface mask, not the scan, and it never looks around for a nearby sheet to snap to.
+ * Two things go into it and nothing else: the prediction's NORMAL field, which says which way is
+ * across the sheets, and what a PERSON has said about which places are the same sheet.  Not the
+ * phase, not the surface mask, not the winding density, and it never looks around for a nearby sheet
+ * to snap to.  That is a decision, not an omission: measured on Scroll 1 over a box of 340x240 voxels
+ * (`scratchpad/pup/explain.cjs`), the phase puts a sheet in the right place 51% of the time where 50%
+ * is a coin, 55% of sheets have no predicted face within 10 voxels, and the winding density is out by
+ * half; the normal is within 19° of the scan's own grain half the time, and is the only one worth
+ * walking.
  *
- * That is a decision and not an omission.  Measured on Scroll 1 at (19449, 7935, 38115), over a box
- * of 340x240 voxels (`scratchpad/pup/explain.cjs`):
- *
- *   the phase `cos`   the sheets repeat every 46 voxels and cos repeats every 48 — the PERIOD is
- *                     right — but where in that period it puts a sheet is not: read on a bright band
- *                     of the scan it is 139, read in the gap between two it is 143, and a place on
- *                     papyrus reads higher than a place in a gap 51% of the time.  50% is a coin.
- *   the surface mask  443 sheets in the scan, 379 faces marked, but 55% of the sheets have no face
- *                     within 10 voxels and 47% of the faces are more than 10 voxels from any sheet;
- *                     the faces repeat every 56 voxels against the sheets' 46.
- *   the normal        against the scan's own grain, where the scan has a grain to compare with: half
- *                     within 19 degrees, a quarter more than 35 out.  The best of the three by far.
- *
- * So the normal says which way is across the sheets, and `density` — the same field's magnitude —
- * says how much of a winding a voxel of that direction is worth.  Together they say where the next
- * sheet is without anyone having to look for it: walk along the normal, adding up the winding as you
- * go, and stop when a whole one has gone by.  Nothing in here searches, and nothing snaps.
- *
- * What this deliberately does NOT do, so that it can be built on rather than argued with:
- *   - it does not put the seed onto a sheet first; the piece starts where the person pressed
- *   - it does not pull the grid onto anything; there is no fitting, only integration
- *   - it does not read a person's annotations; that goes on top of this, next, on purpose
+ * So the piece is walked out of the normal field, and everything a person says is a correction to the
+ * WINDING it walked — never a pull on the surface.  How far apart the sheets are is the one number
+ * the normal cannot give, and it comes from a relative winding (`spacingSaid`).
  */
+
 
 import type { LasagnaField, Vec3 } from "./field";
 import type { ChainSaid } from "./types";
@@ -192,18 +180,11 @@ const STEP_OF_WRAP = 1 / 12;
 /*
  * And how much of the way each node is moved towards the middle of its neighbours after every sample.
  *
- * The nodes walk the same field but each walks its own path, and two that start a few voxels apart
- * drift apart a little more with every step — measured on Scroll 1, a node sat 0.02 voxels off the
- * line between its neighbours on the base, 0.10 one sheet out and 0.15 two sheets out.  That is a
- * sheet slowly turning into a rumpled one, and it shows up magnified: where a sheet lies nearly along
- * the plane of a slice card — here the normal's z is 0.09 — a fifth of a voxel of rumple is two
- * voxels of sideways wobble in the line, and the line comes out as a saw.
- *
- * So the grid is held together as it walks.  It is a plain Laplacian and it pulls towards the MIDDLE
- * of the neighbours, so a sheet that is genuinely curved keeps its curve: over a cell and a half, the
- * span this reaches, a sheet bending on a radius of five hundred voxels departs from the straight
- * line between its neighbours by two hundredths of a voxel.  What it takes out is what is not a
- * sheet's shape at all.
+ * Each node walks its own path through the same field, and two that start a few voxels apart drift
+ * apart a little more with every step: a sheet slowly turning into a rumpled one.  A plain Laplacian
+ * takes that out and leaves a real curve alone — over the cell and a half it reaches, a sheet bending
+ * on a radius of five hundred voxels departs from the line between its neighbours by two hundredths
+ * of a voxel.
  */
 const HOLD = 0.25;
 /*
@@ -214,115 +195,73 @@ const SAID_REACH = 1.5;
 // How much further than the piece needs each node walks, in sheets: the room a correction slides into.
 const MARGIN = 1;
 /*
- * How far a thing said reaches, as a multiple of how close together the things said are, and the
- * least it may be in voxels.
- *
- * Decided by the annotations rather than fixed, and that is what makes drawing more of them work:
- * drawn close together they reach a short way, and the correction can then say something fine; drawn
- * far apart they reach further and the correction is broad and gentle.  A number fixed here would be
- * a ceiling on how fine a thing a person is allowed to say.
- *
- * It is the CLOSEST pair that sets it, not the middle one, and that matters twice over.  A bump much
- * wider than the gap between two places that say different things makes a system of two nearly equal
- * rows, whose answer is two huge heights that all but cancel — and away from the places, where they
- * stop cancelling, the field rings away to nothing like it.  Measured: two chains eighteen voxels
- * apart with a reach of forty moved the piece so far that not one of their own points was on it any
- * more.  And it is the shape a person asks for anyway: with the bump about as wide as the gap, the
- * field between two places said is as near a straight line between them as makes no difference.
- */
-/*
  * How far one thing said reaches ACROSS the sheets, in sheets.
  *
- * The correction is a field over the piece in three directions, not two: where you are on the sheet,
- * and which sheet you are on.  This is the length of the third.  At nothing, every wrap would be
- * corrected on its own and a thing said about one would say nothing about its neighbour; at infinity,
- * every wrap moves together and two chains closer than a wrap could never be told apart.  Two sheets
- * leaves the next wrap most of what was said and the one after it half.
+ * The correction is a field in three directions, not two: where you are on the sheet, and which sheet
+ * you are on.  This is the length of the third.  At nothing, a thing said about one wrap would say
+ * nothing about its neighbour; at infinity, every wrap moves together and two chains closer than a
+ * wrap could never be told apart.  Two sheets leaves the next wrap most of what was said and the one
+ * after it half.
  *
- * It replaces a correction that was a straight line in the sheet number — one field for how far the
- * whole stack slid and one for how much a sheet was worth, which is to say two numbers to describe
- * every wrap at a place.  Two wraps fix a straight line exactly, so it looked right while there were
- * two chains; a third and a fourth have no reason to lie on it.  Measured, laying four chains along
- * the fit's OWN wraps and pushing them out by 0, 10, 0 and 10 voxels — a thing no straight line can
- * say — left them 1.5, 6.3, 3.2 and 5.9 voxels off, dragged the wrap spacing from 40 voxels down to
- * 27, and leaned the sheet up to 87° off its own normal, which a slice card draws as lassos.  The
- * same four chains pushed out all by the same amount, which IS a straight line, came out exact.
+ * Nothing is assumed about the shape it takes from sheet to sheet.  A correction that was a straight
+ * line in the sheet number is exact for two wraps and has no reason to fit a third: measured, four
+ * chains asking for 0, 10, 0 and 10 voxels came out 1.5, 6.3, 3.2 and 5.9 voxels off, dragged the
+ * wrap spacing from 40 voxels to 27, and leaned the sheet 87° off its own normal.
  */
 const ACROSS_SHEETS = 2;
 /*
- * And the one thing a person may not say: that two wraps are in the same place.  `worth` crushes the
- * space between the sheets wherever it is negative, and at minus one the sheets are on top of one
- * another — further still and they come out in the wrong order, the piece folded back through itself.
- *
- * So the space between two wraps is floored, in voxels, because that is the unit the thing being
- * prevented happens in.  Low: papyrus really does come to within a voxel or two of itself, and the
- * floor is a rail against the impossible, not an opinion about how close the sheets may get.  It
- * gives way softly — a hard clamp would leave a crease along the line where it started biting.
- *
- * The Vesuvius Challenge's own spiral fit carries the same rail (`model_gap_expander_min_gap`), for
- * the same reason: its gap is a field too, and a field that may go negative will.
+ * And the one thing a person may not say: that two wraps are in the same place.  The floor is in
+ * voxels, because that is the unit the thing being prevented happens in, and it is low — papyrus
+ * really does come to within a voxel or two of itself, so this is a rail against the impossible and
+ * not an opinion about how close the sheets may get.  The Vesuvius Challenge's spiral fit carries the
+ * same rail (`model_gap_expander_min_gap`).
  */
 const GAP_LEAST = 2;
 /*
  * How far apart two places a person clicked one after another may be and still be taken as a line
  * drawn between them, as a multiple of how far apart that chain's clicks usually are.
  *
- * A chain is an ordered list of places, and a run of them a few voxels apart is somebody tracing one
- * stretch of sheet: they mean the sheet between the clicks as much as they mean the clicks, and the
- * dashed line already drawn between them says so.  A jump ten times the usual is them going to look
- * somewhere else, and joining those two with a straight line would be asserting a shape across a
- * stretch nobody has looked at.
+ * A run of clicks a few voxels apart is somebody tracing one stretch of sheet: they mean the sheet
+ * between the clicks as much as the clicks, and the dashed line already drawn between them says so.
+ * A jump ten times the usual is them going to look somewhere else, and a straight line across that
+ * would assert a shape nobody has looked at.
  */
 const JOIN_FAR = 3;
 /*
  * And how well a click is believed, in voxels.
  *
- * A hand placing a point on a slice is good to about a voxel and no better, so a fit held to pass
- * through every click exactly is being made to reproduce a shake.  Said as a tolerance instead, the
- * run of clicks along one stretch of sheet averages its own jitter down — which is why every point is
- * kept rather than thinned — and what is left is the undulation they all agree on.
- *
- * It is also what makes a line's worth of places solvable at all: a hundred of them a few voxels
- * apart ask very nearly the same question, and a system of very nearly equal rows has an answer of
- * enormous numbers that cancel, and rings between them where they stop cancelling.
+ * A hand placing a point on a slice is good to about a voxel, so a fit held to pass through every
+ * click exactly is being made to reproduce a shake.  Said as a tolerance, a run of clicks along one
+ * stretch averages its own jitter down — which is why every point is kept rather than thinned.  It is
+ * also what makes a line's worth of places solvable at all: a hundred of them a few voxels apart ask
+ * very nearly the same question, and very nearly equal rows have an answer of enormous numbers that
+ * cancel, and ring between them where they stop cancelling.
  */
 const HAND = 1;
+/*
+ * And how far apart the things said have to spread, as a fraction of the reach, before the plane is
+ * allowed a tilt that way.  A quarter: closer together than that they are a line, not a patch, and a
+ * line has no opinion about which way the ground slopes across it.
+ */
+const PLANE_SPREAD = 0.25;
 /*
  * How far one thing said reaches sideways, off the line it was said on, as a multiple of the space
  * between two wraps.
  *
- * One number, from the papyrus itself, and not from how the annotations happen to be arranged — which
- * is the mistake this replaces.  Taking it from the closest pair of places said by different chains
- * read well on paper and was wrong on a real board, for a reason worth writing down: a person draws
- * a chain on ONE slice card, so all its points lie in one plane, and two chains drawn that way on two
- * different wraps lie on top of each other in the grid — a few voxels apart, since they are stacked
- * along the normal and not across the sheet.  Joining each chain's clicks into a line then puts a
- * place of one within six voxels of a place of the other, and the reach collapsed to the width of one
- * grid cell.  What came out was a sheet with a sharp ridge along every line drawn: measured, the
- * sheet leaned more than 58° off its own normal over a tenth of itself, and the curve it cut on a
- * slice card broke into lassos — 117 grid squares in two blotches where a sheet square to the cut
- * gives one band of about 55.
+ * One number, from the papyrus itself, and not from how the annotations happen to be arranged.  That
+ * was tried: a person draws a chain on ONE slice card, so two chains on two different wraps lie on
+ * top of each other in the grid, and a reach taken from the closest pair of different chains
+ * collapsed to the width of a grid cell — a sheet with a sharp ridge along every line drawn, leaning
+ * 58° off its own normal, which a slice card draws as lassos.
  *
- * It does not need to come from the annotations, because nothing is left for it to decide.  Along a
- * line, every grid cell of it is said, so no reach is needed; across to another wrap, `worth` holds
- * the two apart, not the kernel.  All that is left is how far a line's say carries into the parts
- * nobody has looked at, and the only length the piece has from the papyrus is how far apart its wraps
- * are.  Swept against both a real board and the synthetic pair: a sixth of a wrap gave the lassos
- * above; half a wrap fixed them; a whole wrap was better again on every measure (the far chain of the
- * synthetic pair 2.06 voxels off, then 1.07, then 0.42); and one and a half was no better than one.
+ * It does not need to come from the annotations, because nothing is left for it to decide: along a
+ * line every grid cell of it is said, and across to another wrap `ACROSS_SHEETS` holds the two apart.
+ * All that is left is how far a line's say carries into the parts nobody has looked at, and the only
+ * length the piece has from the papyrus is how far apart its wraps are.
  */
 const REACH_OF_WRAP = 1;
-/*
- * And how far apart two places have to be ACROSS the sheet to count as two places at all: one grid
- * cell, since a field held on the grid cannot tell apart anything closer.
- *
- * Two on the same line through the sheets — one on this wrap, one on the next — are the same place to
- * it, and they are not exactly on top of one another: walking eighteen voxels along a normal that is
- * not quite square to the grid moves a place a voxel across it.  Counted as neighbours they set the
- * reach to that voxel, the field is then finer than the grid it is held on, and what the grid makes
- * of it is noise — measured, a reach of 4 voxels where it should have been 23, the correction left
- * half undone and the sheet crumpled by 38 voxels.
- */
+// And how far apart two places have to be ACROSS the sheet to count as two places at all: one grid
+// cell, since a field held on the grid cannot tell apart anything closer.
 const sameplace = (grid: PatchGrid) => Math.min(grid.hu, grid.hv);
 /*
  * The Matérn of five halves, at a distance already divided by how far it is meant to reach:
@@ -330,9 +269,9 @@ const sameplace = (grid: PatchGrid) => Math.min(grid.hu, grid.hv);
  *     φ(r) = (1 + √5 r + 5r²/3) · e^(−√5 r)
  *
  * One at nothing, falling smoothly to nothing by about twice its reach.  Twice differentiable, which
- * is why a place said comes out as a rise and not as a spike — a first-order energy, which is what a
- * field smoothed on the grid would be, has a cusp at every point constraint, and a row of cusps is a
- * saw.  Positive definite, so the system it makes always has one answer.
+ * is why a place said comes out as a rise and not a spike — a field smoothed on the grid is a
+ * first-order energy, which has a cusp at every point constraint, and a row of cusps is a saw.
+ * Positive definite, so the system it makes always has one answer.
  */
 const bump = (r: number) => {
   const q = Math.sqrt(5) * Math.abs(r);
@@ -474,6 +413,8 @@ function hold(at: Float64Array, alive: Uint8Array, nu: number, nv: number) {
 interface Shift {
   on: number[];
   field: Float64Array[];
+  // The plane under the bumps, which is the same on every sheet (see `bend`).
+  flatAt: Float64Array;
 }
 
 interface Said {
@@ -495,20 +436,13 @@ function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
       const on = nearestOn(patch, point.at);
       if (on === undefined || on.away > reach) continue;
       /*
-       * Kept where it really is, between the grid points, and never rounded to one of them.  Rounding
-       * puts two places a few voxels apart on one node, where they fight over its one value and the
-       * last one wins; and it puts two that are meant to say the same thing on NEIGHBOURING nodes,
-       * where holding each exactly leaves a step between them — and a step in the correction is a
-       * crease in the sheet.  Between the nodes they ask for a slope instead, which a sheet can be.
-       */
-      /*
-       * And a place that is off the edge of the piece is dropped, not pulled onto it.
+       * Kept where it really is, between the grid points, and never rounded to one — two places
+       * rounded onto one node fight over its single value, and two rounded onto neighbouring nodes
+       * leave a step between them, which is a crease in the sheet.
        *
-       * The nearest place ON the piece to a click past its edge is the edge, so holding it to the
-       * grid puts every such click on the last row — several of them, a voxel or two apart, each
-       * asking for something different.  That is a row of near-identical rows in the system and a
-       * steep correction along the one edge, where there is nothing beyond to balance it.  Half a
-       * grid cell of slack, because a click a hair outside is a click on the edge.
+       * And a place off the EDGE of the piece is dropped rather than pulled onto it: the nearest
+       * place on the piece to a click past its edge is the edge, so holding them would pile every
+       * such click onto the last row, each asking for something different.
        */
       const gi = Math.min(nv - 1, Math.max(0, on.gi));
       const gj = Math.min(nu - 1, Math.max(0, on.gj));
@@ -516,20 +450,11 @@ function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
       places.push({ gi, gj, w: on.w, at: point.at });
     }
     /*
-     * Every point kept.  Not thinned, and that is the point of this tool.
-     *
-     * Thinning a chain to one point every twenty voxels is what the Vesuvius Challenge does, and for
-     * a spiral across a whole scroll it is right; here it would throw away the thing being looked at.
-     * What this is for is the small undulations in one small piece, and those live at exactly the
-     * scale a thinning would remove.
-     *
-     * The jitter of a hand is dealt with instead of thrown away, and the difference is everything: a
-     * hand is wrong by a few voxels in a way that is NOT the same from one click to the next, so a
-     * run of points over one stretch of sheet averages it down by the square root of how many there
-     * are, while a real undulation is the same in all of them and survives.  So more points make the
-     * answer better rather than noisier, which is what a person drawing carefully has a right to
-     * expect.  What limits how fine a thing can be said is the control field (`bend`), and nothing
-     * else.
+     * Every point kept, never thinned.  Thinning to one point every twenty voxels is what the
+     * Vesuvius Challenge does and is right for a spiral across a whole scroll; here it would throw
+     * away the small undulations this tool exists to show.  A hand's jitter is dealt with instead of
+     * thrown away — it is not the same from one click to the next, so a run of them averages it down
+     * while a real undulation survives (see HAND).
      */
     if (places.length > 0) found.set(chain.id, places);
   }
@@ -542,14 +467,12 @@ function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
    * one after another in the order it crosses them; and then, of the chains nobody has said anything
    * about, no two are left on one sheet.
    *
-   * That last step is the default, and it is this way round on purpose.  One chain is a person saying
-   * "these places are one sheet", and drawing a same winding through a place that is already on one
-   * joins the two into a single chain — so the app already HAS a way of saying that two runs of
-   * clicks are the same wrap, and it is not "draw them separately and hope".  Two chains are
-   * therefore two sheets until somebody says otherwise, and the fit no longer merges a chain drawn on
-   * one slice card with a chain drawn on another just because they happen to pass within half a wrap
-   * of each other.  Asked to go through both, it could only weave up and down between them, which is
-   * not the fit disobeying — it is the fit obeying two things that cannot both be true.
+   * That last step is the default, and it is this way round on purpose: drawing a same winding
+   * through a place already on one joins the two chains into one, so the app already has a way of
+   * saying "these two runs of clicks are the same wrap".  Two chains are therefore two sheets until
+   * somebody says otherwise, and a chain drawn on one slice card is no longer merged with one drawn
+   * on another just because they pass within half a wrap.  Asked to go through both, the fit could
+   * only weave between them — not disobeying, but obeying two things that cannot both be true.
    */
   const onSheet = new Map<string, number>();
   for (const chain of chains) {
@@ -682,31 +605,41 @@ function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
 }
 
 /**
- * Those corrections spread over the grid: the smoothest field that passes EXACTLY through every place
- * said, and fades back to nothing away from them.
+ * Those corrections spread over the grid: the smoothest field that passes through every place said.
  *
- * Exactly through every one, because a line that does not go through the place a person put their
- * finger is the one thing an annotation must never be, and because this is a tool for looking rather
- * than a thing that guesses: what it is for is that a person can say something, see what it does, and
- * say the next thing.  Every point is adopted whole.
+ * Through every one, because a line that misses the place a person put their finger is the one thing
+ * an annotation must never be: this is a tool for saying something, seeing what it does, and saying
+ * the next thing.  That does not have to be bought with a sheet shaped like a saw — the saw was never
+ * the price of exactness but of asking for the FLATTEST field rather than the least bent one, which
+ * on a grid means a Laplacian, whose answer to a point held at a value is a spike (its Green's
+ * function is log r, which has no bottom).
  *
- * And that does NOT have to be bought with a sheet shaped like a saw — which is what came out of
- * solving this on the grid with a plain Laplacian.  The Laplacian's own answer to a point held at a
- * value is a spike: in two dimensions its Green's function is log r, which has no bottom, so the
- * field dives at every place said and climbs back between them.  The saw was never the price of
- * exactness; it was the price of asking for the flattest field rather than the least BENT one.
+ * So the field is not solved on the grid at all.  It is a sum of one smooth `bump` per place said,
+ * with the heights chosen so the sum reads what was said at every one — plus a PLANE under them.
  *
- * So the field is built the other way round: not solved on the grid at all, but written as a sum of
- * one smooth bump per place said, with the heights chosen so that the sum reads exactly what was said
- * at every one of them.  The bump is the Matérn of five halves,
+ * The field has three directions, not two: where you are on the sheet, and WHICH sheet.  Two places
+ * at one spot on different sheets are then simply two places, far apart in the third direction, and
+ * the field can give them different answers — which is what lets a relative winding separate two
+ * chains closer together than one wrap.  So the bump is a product, φ(d / reach) · φ(Δsheet /
+ * ACROSS_SHEETS): positive definite in each direction and so in the product, so the heights always
+ * exist and are unique.
  *
- *     φ(r) = (1 + √5 r/ℓ + 5r²/3ℓ²) · e^(−√5 r/ℓ)
+ * The plane is a constant and a tilt across the sheet, held by the usual side conditions that the
+ * bumps sum to nothing against each of them, so it takes whatever the places said agree about and
+ * the bumps are left with the rest.  It is there because the bumps alone fall away to nothing, and
+ * nothing is the WRONG answer far from what was said: a person working on the cut planes of a card
+ * draws along one row and down one column, and every click may be saying the same simple thing —
+ * this whole wrap is twelve voxels out.  Held on the cross and forgotten off it, that draws a cross
+ * of right answer on a ground of wrong one; measured, the sheet moved 11.9 voxels on the cross, 6.2
+ * a few cells away and 0.2 at the corners.  A plane is also the mildest thing that can carry: it
+ * says "and more of the same, gently", where a thin plate spline's r² log r would tip the whole card
+ * over.  What it cannot do is invent a shape nobody has described.
  *
- * which is twice differentiable — so a place said is a smooth rise and not a spike — positive
- * definite, so the heights always exist and are unique, and falling away to nothing, so that where
- * nobody has said anything the sheet is the prediction's own and not an extrapolation of somebody's
- * hand.  A thin plate spline interpolates exactly too, but its bump grows as r² log r: a few places
- * said in the middle of a card would tip the whole of it, including the parts nobody has looked at.
+ * Across the sheet only, and never between sheets.  A term in the sheet number is the same straight
+ * line in k this fit was built to be rid of, and the side conditions would stop the bumps taking it
+ * back: four chains asking for 0, 10, 0 and 10 voxels put a slope through themselves that dragged
+ * the wrap spacing from 42 voxels to 52.  A constant moves every wrap alike, which changes no
+ * spacing, and is the one thing a place said on one sheet can honestly carry to another.
  */
 function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
   const { nu, nv, hu, hv } = grid;
@@ -715,50 +648,67 @@ function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
   const where = want.map((one) => [one.gj * hu, one.gi * hv]);
   const far = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
+  const middle = [0, 1].map((c) => where.reduce((sum, one) => sum + one[c], 0) / (n || 1));
   /*
-   * One field, over the piece in three directions: where you are on the sheet, and WHICH sheet.
+   * The plane's parts, scaled by the reach so that a tilt is about as big as the constant — and a
+   * tilt only where the things said actually spread out that way.
    *
-   * A place said is a place on a sheet, and what it asks for is how far the winding there is out.
-   * Two places at one spot on different sheets are then simply two places, far apart in the third
-   * direction, and the field can give them different answers — which is what lets a relative winding
-   * separate two chains closer together than one wrap.  Nothing is assumed about how the correction
-   * runs from one sheet to the next except that it is smooth over ACROSS_SHEETS of them.
-   *
-   * The bump is the Matérn of five halves in each direction, multiplied:
-   *
-   *     φ(r) = (1 + √5 r + 5r²/3) · e^(−√5 r),   K = φ(d / reach) · φ(Δsheet / ACROSS_SHEETS)
-   *
-   * which is twice differentiable, so a place said is a smooth rise and not a spike; positive
-   * definite in each direction and so in the product, so the heights always exist and are unique; and
-   * falling away to nothing in both, so that where nobody has said anything the sheet is the
-   * prediction's own and not an extrapolation of somebody's hand.
+   * A chain drawn on one cut plane lies along a single row of the grid, so what it says about how the
+   * correction should tilt ACROSS that row is nothing at all.  Left in, that column of the system is
+   * near zero but not zero, its coefficient comes out enormous, and the tilt it stands for — tiny
+   * where it was fitted, large everywhere else — runs away across the card.
    */
+  const ways = [
+    () => 1,
+    (at: number[]) => (at[0] - middle[0]) / reach,
+    (at: number[]) => (at[1] - middle[1]) / reach,
+  ];
+  const spread = (way: (at: number[]) => number) => {
+    const vs = where.map(way);
+    return Math.max(...vs) - Math.min(...vs);
+  };
+  const used = ways.filter((way, c) => c === 0 || spread(way) > PLANE_SPREAD);
+  const flat = (at: number[]) => used.map((way) => way(at));
+  const WIDE = used.length;
+
   const M: number[][] = [];
   for (let i = 0; i < n; i++) {
-    const row = new Array<number>(n + 1);
+    const row = new Array<number>(n + WIDE + 1).fill(0);
     for (let j = 0; j < n; j++)
       row[j] = bump(far(where[i], where[j]) / reach) * bump((want[i].k - want[j].k) / ACROSS_SHEETS);
     // How well a click is believed, as a tolerance on the diagonal: see HAND.  It is also what makes a
     // line's worth of places — each all but repeating its neighbour — a system with a sane answer.
     row[i] += (HAND / spacing) ** 2;
-    row[n] = want[i].value;
+    const p = flat(where[i]);
+    for (let c = 0; c < WIDE; c++) row[n + c] = p[c];
+    row[n + WIDE] = want[i].value;
     M.push(row);
   }
-  for (let c = 0; c < n; c++) {
+  // And the side conditions: the bumps say nothing that the plane could have said.
+  for (let c = 0; c < WIDE; c++) {
+    const row = new Array<number>(n + WIDE + 1).fill(0);
+    for (let i = 0; i < n; i++) row[i] = flat(where[i])[c];
+    M.push(row);
+  }
+
+  const size = n + WIDE;
+  for (let c = 0; c < size; c++) {
     let best = c;
-    for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[best][c])) best = r;
+    for (let r = c + 1; r < size; r++) if (Math.abs(M[r][c]) > Math.abs(M[best][c])) best = r;
     [M[c], M[best]] = [M[best], M[c]];
     const pivot = M[c][c];
     if (Math.abs(pivot) < 1e-12) continue;
-    for (let r = 0; r < n; r++) {
+    for (let r = 0; r < size; r++) {
       if (r === c) continue;
       const factor = M[r][c] / pivot;
       if (factor === 0) continue;
-      for (let k = c; k <= n; k++) M[r][k] -= factor * M[c][k];
+      for (let k = c; k <= size; k++) M[r][k] -= factor * M[c][k];
     }
   }
-  const height = new Float64Array(n);
-  for (let c = 0; c < n; c++) height[c] = Math.abs(M[c][c]) < 1e-12 ? 0 : M[c][n] / M[c][c];
+  const answer = new Float64Array(size);
+  for (let c = 0; c < size; c++) answer[c] = Math.abs(M[c][c]) < 1e-12 ? 0 : M[c][size] / M[c][c];
+  const height = answer.subarray(0, n);
+  const plane = Array.from(answer.subarray(n));
 
   /*
    * Kept as one field over the grid per sheet anything was said about, rather than evaluated afresh
@@ -770,12 +720,18 @@ function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
   const on = [...new Set(want.map((one) => one.k))].sort((a, b) => a - b);
   const slot = want.map((one) => on.indexOf(one.k));
   const field = on.map(() => new Float64Array(nu * nv));
+  // The plane over the grid: the same on every sheet, so one number a node holds it.
+  const flatAt = new Float64Array(nu * nv);
   for (let i = 0; i < nv; i++)
     for (let j = 0; j < nu; j++) {
       const at = [j * hu, i * hv], node = i * nu + j;
       for (let c = 0; c < n; c++) field[slot[c]][node] += height[c] * bump(far(at, where[c]) / reach);
+      const p = flat(at);
+      let sum = 0;
+      for (let c = 0; c < WIDE; c++) sum += plane[c] * p[c];
+      flatAt[node] = sum;
     }
-  return { on, field };
+  return { on, field, flatAt };
 }
 
 /**
@@ -861,19 +817,14 @@ export function buildPatch(
       }
       const near = shift.on.map((sheet) => bump((k / per - sheet) / ACROSS_SHEETS));
       for (let node = 0; node < count; node++) {
-        let c = 0;
+        let c = shift.flatAt[node];
         for (let s = 0; s < near.length; s++) c += shift.field[s][node] * near[s];
         read[layer + node] = k + c * per;
       }
     }
-    /*
-     * And the floor, in the one place it can honestly be put: two wraps may come to GAP_LEAST voxels
-     * of each other and no closer.  Held outward from the piece's own sheet so that the wrap a person
-     * is looking at does not move when a wrap three out is the one being held apart.
-     *
-     * The Vesuvius Challenge's spiral fit carries the same rail — `model_gap_expander_min_gap` — for
-     * the same reason: its gap between windings is a field too, and a field that may go negative will.
-     */
+    // And the floor, in the one place it can honestly be put: two wraps may come to GAP_LEAST voxels
+    // of each other and no closer.  Held outward from the piece's own sheet, so the wrap a person is
+    // looking at does not move when a wrap three out is the one being held apart.
     const least = GAP_LEAST / apart;
     for (let node = 0; node < count; node++) {
       for (let k = 1; k <= K * per; k++) {
@@ -905,21 +856,14 @@ export function buildPatch(
   if (chains.length === 0) return plain;
 
   /*
-   * And what a person has said, held EXACTLY — by sliding the winding rather than by bending the
-   * sheet into place.
+   * And what a person has said, held EXACTLY — by sliding the WINDING, never by bending the sheet.
    *
-   * This is the shape of the Vesuvius Challenge's own spiral fit, in the small.  There, a sheet is not
-   * a surface that is moved about: it is an integer level set of one winding function defined
-   * everywhere, and an annotation is a statement about that function, solved together with everything
-   * else.  Here the winding function is already in hand — every node has walked its own path, and how
-   * far along the path a place is IS its winding — so a thing said is met by resampling each node's
-   * path at a shifted winding, which is exact and linear and done once.
-   *
-   * It replaces an iteration that moved the base, walked again and measured again, hoping to creep up
-   * on the answer.  Measured, that hoping did not work: twenty points said to be one sheet were left
-   * 17 voxels off it, and taking the whole correction each round made it worse round by round — 26
-   * voxels out became 17, then 18, 21, 24, 30.  Nothing creeps here; the places said are where the
-   * sheet is because that is what the table was built from.
+   * This is the shape of the Vesuvius Challenge's spiral fit in the small: there a sheet is an integer
+   * level set of one winding function and an annotation is a statement about that function.  Here the
+   * winding function is already in hand — how far along its own path a node is IS its winding — so a
+   * thing said is met by resampling each path at a shifted winding, which is exact and done once.
+   * Moving the base and walking again instead only creeps: measured, 26 voxels out became 17, then
+   * 18, 21, 24, 30.
    */
   const want = saidAbout(plain, chains, apart);
   if (want.length === 0) return plain;
@@ -933,13 +877,8 @@ export function buildPatch(
  * How far apart this piece's wraps actually came out, in voxels: the middle of the distances from
  * each node of wrap 0 to the same node of wrap 1.
  *
- * Asked of the piece rather than of the prediction on purpose.  The number is what sets the card's
- * scale, and for that it has to describe the wraps that are drawn — not what the prediction said
- * before they were walked.  Measured on Scroll 1
- * the two differ by half: `grad_mag` says a winding takes 30 voxels there and the wraps come out 34
- * apart, while the papyrus itself repeats every 46.  That last gap is a fault of the prediction's
- * winding scale and is for the layer above this one to correct; this only stops the card telling the
- * hand one thing and the eye another.
+ * Asked of the piece rather than of the prediction on purpose: it sets the card's scale, so it has to
+ * describe the wraps that are drawn.  Measured on Scroll 1 the two differ by half.
  */
 export function wrapGap(patch: Patch) {
   const { nu, nv, K, per, P } = patch;

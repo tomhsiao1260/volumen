@@ -217,6 +217,14 @@ export function App() {
         sheets: (sourceId: string) => sheetsOf(sourceId),
         // Where each winding point falls on a card's piece, as the card itself has it.
         spots: (cardId: string) => Object.fromEntries(spotsOf(cardId)),
+        /*
+         * And the winding store itself, which is how a harness lays a case out: through the same door
+         * the drawing goes through, and without a page reload.  That is the whole cost of a test — a
+         * harness trying five cases was five page loads and five waits for the scan to arrive.
+         */
+        chainsOf,
+        setChain,
+        forgetChain,
         // And which of them it drew, the last time it drew.
         drawnDots: (cardId: string) => drawnDotsOf(cardId),
         dispatch,
