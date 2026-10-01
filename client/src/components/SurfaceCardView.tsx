@@ -103,6 +103,7 @@ function describe(facts: SurfaceFacts) {
     `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
     `grid ${facts.across} × ${facts.down}, ${facts.step} voxels apart · ` +
     `prediction read in ${facts.read} ms · piece built in ${facts.built} ms\n` +
+    `   ${facts.said} places said, each reaching ${facts.reach.toFixed(0)} voxels\n` +
     `   wraps ${facts.apart} voxels apart · holes ${facts.holes}` +
     ` · torn ${facts.torn} · stretch ×${facts.stretch}`
   );

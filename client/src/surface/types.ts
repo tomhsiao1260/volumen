@@ -133,6 +133,10 @@ export interface SurfaceFacts {
   // How long it took to read the prediction, and to walk the piece out of it.
   read: number;
   built: number;
+  // How many places the annotations came to once each chain's clicks were joined into a line, and how
+  // far one of them reached sideways, in voxels.
+  said: number;
+  reach: number;
   // Per wrap: how much of it the prediction ran out on, how much of the grid is stretched past the
   // shape it was laid out in, how far apart one wrap and the next are, and the spread of the
   // stretching.  All of it the piece describing itself.
