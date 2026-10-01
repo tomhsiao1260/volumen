@@ -206,16 +206,34 @@ const SAID_REACH = 1.5;
 // How much further than the piece needs each node walks, in sheets: the room a correction slides into.
 const MARGIN = 1;
 /*
- * How far a thing said reaches, as a multiple of how far apart the things said are, and the least and
- * most it may be in voxels.
+ * How far a thing said reaches, as a multiple of how close together the things said are, and the
+ * least it may be in voxels.
  *
  * Decided by the annotations rather than fixed, and that is what makes drawing more of them work:
  * drawn close together they reach a short way, and the correction can then say something fine; drawn
- * far apart they reach further and the correction is broad and gentle.  A number fixed here instead
- * would be a ceiling on how fine a thing a person is allowed to say.
+ * far apart they reach further and the correction is broad and gentle.  A number fixed here would be
+ * a ceiling on how fine a thing a person is allowed to say.
+ *
+ * It is the CLOSEST pair that sets it, not the middle one, and that matters twice over.  A bump much
+ * wider than the gap between two places that say different things makes a system of two nearly equal
+ * rows, whose answer is two huge heights that all but cancel — and away from the places, where they
+ * stop cancelling, the field rings away to nothing like it.  Measured: two chains eighteen voxels
+ * apart with a reach of forty moved the piece so far that not one of their own points was on it any
+ * more.  And it is the shape a person asks for anyway: with the bump about as wide as the gap, the
+ * field between two places said is as near a straight line between them as makes no difference.
  */
-const REACH_OF_GAP = 2;
+const REACH_OF_GAP = 1;
 const REACH_LEAST = 4;
+/*
+ * And how far apart two places have to be ACROSS the sheet to count as two places at all.
+ *
+ * Two on the same line through the sheets — one on this wrap, one on the next — are the same place to
+ * a field that says how far the whole stack moves at a place.  Counted as neighbours, the closest
+ * pair is zero apart, the reach falls to its floor, and the field becomes a row of spikes: measured,
+ * a reach of 4 voxels where it should have been 25, and a correction asking for a sixth of a sheet
+ * made peaks of one and two thirds of one.
+ */
+const SAME_PLACE = 1;
 
 /**
  * The wraps a piece walks out from a surface: the base into layer 0, then every node together, one
@@ -399,44 +417,97 @@ function saidAbout(
     if (places.length > 0) found.set(chain.id, places);
   }
 
-  const want: { gi: number; gj: number; value: number }[] = [];
+  /*
+   * Which sheet each chain is on.
+   *
+   * Two steps, and the second is the one that matters: a chain is first given the sheet most of its
+   * own points are nearest to, and then every relative winding is read as what it says — that the
+   * chains it runs through are DIFFERENT sheets, one after another in the order it crosses them.
+   *
+   * Without that second step the first one puts two chains that happen to lie less than half a sheet
+   * apart on the same sheet, and the fit, being told to pass through both, does the only thing it can
+   * and weaves up and down between them.  That is not the fit disobeying: it is the fit obeying two
+   * things that cannot both be true, and only the relative winding knows which.
+   */
+  const onSheet = new Map<string, number>();
   for (const chain of chains) {
     const places = found.get(chain.id);
     if (places === undefined || places.length < 2 || chain.kind !== "same") continue;
-    // The one most of its points are nearest to, the first time it is asked.
-    let sheet = sheets.get(chain.id);
-    if (sheet === undefined) {
-      const votes = new Map<number, number>();
-      for (const one of places) votes.set(Math.round(one.w), (votes.get(Math.round(one.w)) ?? 0) + 1);
-      let best = -1;
-      sheet = 0;
-      for (const [which, count] of votes) if (count > best) { best = count; sheet = which; }
-      sheets.set(chain.id, sheet);
+    const settled = sheets.get(chain.id);
+    if (settled !== undefined) {
+      onSheet.set(chain.id, settled);
+      continue;
     }
-    /*
-     * Moving the base OUT by one winding moves every wrap out with it, so a place measured against
-     * the piece reads one LESS than it did — the correction is the place's own w less the wrap its
-     * chain is on, not the other way about.
-     */
-    for (const one of places) want.push({ gi: one.gi, gj: one.gj, value: one.w - sheet });
+    const votes = new Map<number, number>();
+    for (const one of places) votes.set(Math.round(one.w), (votes.get(Math.round(one.w)) ?? 0) + 1);
+    let best = -1, sheet = 0;
+    for (const [which, count] of votes) if (count > best) { best = count; sheet = which; }
+    onSheet.set(chain.id, sheet);
   }
+
+  // The chain a place of a relative winding is nearest to, where it is near one at all.
+  const nearestChain = (one: { at: Vec3 }) => {
+    let best: string | undefined, away = spacing * SAID_REACH;
+    for (const [id, places] of found) {
+      if (chains.find((each) => each.id === id)?.kind !== "same") continue;
+      for (const place of places) {
+        const d = Math.hypot(one.at[0] - place.at[0], one.at[1] - place.at[1], one.at[2] - place.at[2]);
+        if (d < away) { away = d; best = id; }
+      }
+    }
+    return best;
+  };
+
+  const free: { gi: number; gj: number; value: number }[] = [];
   for (const chain of chains) {
     if (chain.kind !== "step") continue;
     const places = found.get(chain.id);
     if (places === undefined || places.length < 2) continue;
-    const already = (one: { gi: number; gj: number; w: number; at: Vec3 }) => {
-      const said = want.find((each) => each.gi === one.gi && each.gj === one.gj);
-      return one.w - (said?.value ?? 0);
-    };
-    for (let k = 0; k + 1 < places.length; k++) {
-      const [a, b] = [places[k], places[k + 1]];
-      // Already different sheets: a thing already true asks for nothing.
-      if (Math.abs(already(a) - already(b)) >= 0.5) continue;
-      // The one the piece is less sure of — further from a whole wrap — is the one that moves.
-      const [stay, move] = Math.abs(a.w - Math.round(a.w)) <= Math.abs(b.w - Math.round(b.w)) ? [a, b] : [b, a];
-      const to = Math.round(already(stay)) + (move.w >= stay.w ? 1 : -1);
-      want.push({ gi: move.gi, gj: move.gj, value: move.w - to });
+    // The chains it runs through, in the order it runs through them, each named once.
+    const through: { id: string | undefined; w: number; place: (typeof places)[0] }[] = [];
+    for (const place of places) {
+      const id = nearestChain(place);
+      if (id !== undefined && through.length > 0 && through[through.length - 1].id === id) continue;
+      through.push({ id, w: place.w, place });
     }
+    for (let k = 1; k < through.length; k++) {
+      const [before, here] = [through[k - 1], through[k]];
+      if (before.id === undefined || here.id === undefined) continue;
+      const was = onSheet.get(before.id);
+      if (was === undefined) continue;
+      // One sheet further out, the way the piece already has them ordered.  How many sheets apart
+      // they are is not something a relative winding says, and next door is what a person means by
+      // drawing one: these two, and nothing between them.
+      onSheet.set(here.id, was + (here.w >= before.w ? 1 : -1));
+    }
+    /*
+     * And a place of a relative winding that is near no chain at all — the inside of a pit, say — is
+     * still a thing said: it is not on the sheet the place before it is on.
+     */
+    for (let k = 0; k + 1 < through.length; k++) {
+      const [a, b] = [through[k], through[k + 1]];
+      if (a.id !== undefined && b.id !== undefined) continue;
+      const [stay, move] = a.id !== undefined ? [a, b] : [b, a];
+      const anchor = stay.id === undefined ? Math.round(stay.w) : (onSheet.get(stay.id) ?? Math.round(stay.w));
+      free.push({
+        gi: move.place.gi,
+        gj: move.place.gj,
+        value: move.w - (anchor + (move.w >= stay.w ? 1 : -1)),
+      });
+    }
+  }
+  for (const [id, sheet] of onSheet) sheets.set(id, sheet);
+
+  /*
+   * And what each place asks of the winding: its own w less the sheet its chain is on.  Moving the
+   * base OUT by one winding moves every wrap out with it, so a place measured against the piece reads
+   * one LESS than it did — the correction is that way round and not the other.
+   */
+  const want: { gi: number; gj: number; value: number }[] = [...free];
+  for (const [id, places] of found) {
+    const sheet = onSheet.get(id);
+    if (sheet === undefined) continue;
+    for (const one of places) want.push({ gi: one.gi, gj: one.gj, value: one.w - sheet });
   }
   return want;
 }
@@ -517,13 +588,11 @@ function bend(grid: PatchGrid, want: { gi: number; gj: number; value: number }[]
 }
 
 /**
- * How far one thing said should reach: twice the middle of the distances from each place said to the
- * nearest other one, held between a few voxels and the space between two sheets.
+ * How far one thing said should reach: the distance from the closest pair of places said to each
+ * other, held between a few voxels and the space between two sheets.
  *
- * Twice, so that the bumps of neighbours overlap and the field between them is theirs rather than a
- * row of separate hills; the middle rather than the least, so that one pair drawn close together does
- * not make the whole correction short-sighted.  Held under a sheet's spacing because nothing a person
- * says about one sheet should reach across to the next.
+ * Held under a sheet's spacing because nothing a person says about one sheet should reach across to
+ * the next; and over a few voxels because two places all but on top of one another are one place.
  */
 function reachOf(want: { gi: number; gj: number; value: number }[], grid: PatchGrid, spacing: number) {
   const { hu, hv } = grid;
@@ -533,13 +602,13 @@ function reachOf(want: { gi: number; gj: number; value: number }[], grid: PatchG
     let near = Infinity;
     for (let j = 0; j < where.length; j++) {
       if (i === j) continue;
-      near = Math.min(near, Math.hypot(where[i][0] - where[j][0], where[i][1] - where[j][1]));
+      const d = Math.hypot(where[i][0] - where[j][0], where[i][1] - where[j][1]);
+      if (d > SAME_PLACE) near = Math.min(near, d);
     }
     if (Number.isFinite(near)) gaps.push(near);
   }
   if (gaps.length === 0) return spacing;
-  gaps.sort((one, two) => one - two);
-  return Math.min(spacing, Math.max(REACH_LEAST, REACH_OF_GAP * gaps[gaps.length >> 1]));
+  return Math.min(spacing, Math.max(REACH_LEAST, REACH_OF_GAP * Math.min(...gaps)));
 }
 
 /**
