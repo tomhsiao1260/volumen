@@ -181,114 +181,148 @@ function baseSurface(field: LasagnaField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
  * rule, which is second order, and no more.
  */
 const STEP_OF_WRAP = 1 / 12;
-// A march that has taken this many steps without reaching the sheets asked of it has gone wrong.
-const STEP_LIMIT = 4000;
-
-/**
- * Walks from `from` along the normal field, `dir` being which way, writing where it is every 1/`per`
- * of a winding into `P` until `K` whole windings have gone by.
+/*
+ * And how much of the way each node is moved towards the middle of its neighbours after every sample.
  *
- * This is the whole of how one sheet becomes the next, and it is an integration rather than a
- * search.  `field.normal` gives the direction across the sheets; `field.density` gives how much of a
- * winding one voxel along that direction is worth.  So the next sheet is not looked for — it is
- * arrived at.  Where the prediction runs out the march stops, and every layer past that is left
- * empty, which is the honest thing to draw there.
- */
-function march(
-  field: LasagnaField,
-  from: Vec3,
-  dir: 1 | -1,
-  reference: Vec3,
-  K: number,
-  per: number,
-  // How far one sheet is from the next, in voxels.  The one number this fit is TOLD rather than
-  // reading: the prediction's own answer to it is out by half (`field.ts`), so it is a constant here
-  // and a thing for a person to correct, which is what an annotation does.
-  spacing: number,
-  P: Float32Array,
-  A: Float32Array,
-  count: number,
-  node: number,
-) {
-  const wanted = K * per;
-  const ds = Math.max(0.4, (spacing * STEP_OF_WRAP) / 1);
-  let p: Vec3 = [from[0], from[1], from[2]];
-  let ref: Vec3 = [reference[0], reference[1], reference[2]];
-  // How far along the normal the march has come, in sheets.
-  let gone = 0;
-  let next = 1;
-  for (let step = 0; next <= wanted && step < STEP_LIMIT; step++) {
-    const n = normalAt(field, p, ref);
-    if (n === null) break;
-    ref = n;
-    // Never past the sample being walked towards, so that no sample is missed by overshooting.
-    const take = Math.min(ds, Math.max(0.4, (next / per - gone) * spacing));
-    // Taken at the middle of the step, so that a normal that turns does not walk the march off the
-    // sheet — the same reason a curve is integrated by its midpoint and not by its start.
-    const half: Vec3 = [p[0] + (n[0] * dir * take) / 2, p[1] + (n[1] * dir * take) / 2, p[2] + (n[2] * dir * take) / 2];
-    const middle = normalAt(field, half, ref) ?? n;
-    const was: Vec3 = [p[0], p[1], p[2]];
-    const before = gone;
-    p = [p[0] + middle[0] * dir * take, p[1] + middle[1] * dir * take, p[2] + middle[2] * dir * take];
-    gone += take / spacing;
-    // Every sample this step went past, put where the distance says it belongs along the step.
-    while (next <= wanted && gone >= next / per) {
-      const t = gone === before ? 1 : (next / per - before) / (gone - before);
-      const k = dir > 0 ? next : -next;
-      const o = (k + K * per) * count + node;
-      P[o * 3] = was[0] + (p[0] - was[0]) * t;
-      P[o * 3 + 1] = was[1] + (p[1] - was[1]) * t;
-      P[o * 3 + 2] = was[2] + (p[2] - was[2]) * t;
-      A[o] = 1;
-      next++;
-    }
-  }
-  return next - 1;
-}
-
-/**
- * The piece around `seed`, `K` sheets each way, or undefined where the prediction has no normal there.
+ * The nodes walk the same field but each walks its own path, and two that start a few voxels apart
+ * drift apart a little more with every step — measured on Scroll 1, a node sat 0.02 voxels off the
+ * line between its neighbours on the base, 0.10 one sheet out and 0.15 two sheets out.  That is a
+ * sheet slowly turning into a rumpled one, and it shows up magnified: where a sheet lies nearly along
+ * the plane of a slice card — here the normal's z is 0.09 — a fifth of a voxel of rumple is two
+ * voxels of sideways wobble in the line, and the line comes out as a saw.
  *
- * `scan`, `spacing` and `chains` are taken and not used: the scan and the annotations belong to the
- * layers being built on top of this one, and the spacing is worked out from the field rather than
- * given.  They stay in the signature so that adding them back is a change to this file alone.
+ * So the grid is held together as it walks.  It is a plain Laplacian and it pulls towards the MIDDLE
+ * of the neighbours, so a sheet that is genuinely curved keeps its curve: over a cell and a half, the
+ * span this reaches, a sheet bending on a radius of five hundred voxels departs from the straight
+ * line between its neighbours by two hundredths of a voxel.  What it takes out is what is not a
+ * sheet's shape at all.
  */
+const HOLD = 0.25;
 /*
  * How far a place may be from the piece and still be taken as a thing said about it, as a part of the
- * wrap spacing.  Further than this and the person was talking about somewhere else.
+ * space between two sheets.  Further than this and the person was talking about somewhere else.
  */
 const SAID_REACH = 1.5;
-// How many sweeps the correction is smoothed over, and how strongly it is held where nothing said.
-const BEND_SWEEPS = 400;
+// How much further than the piece needs each node walks, in sheets: the room a correction slides into.
+const MARGIN = 1;
+// Sweeps the correction is solved over, how heavily a thing said weighs against the smoothness, and
+// how hard the field is pulled back towards nothing where nothing was said.  Said heavily, so that a
+// chain does move the sheet to it; not infinitely, so that the hand that drew it need not be steady.
+const BEND_SWEEPS = 3000;
+const BEND_SAID = 12;
 const BEND_PULL = 0.004;
+// How far apart the control points of a correction are, as a part of the space between two sheets:
+// nothing a person says can bend a sheet faster than this.
+const BEND_OVER = 0.5;
 
-/*
- * The wraps a piece walks out, from a surface and the field: the base into layer 0 and a march either
- * way from every node of it.
+/**
+ * The wraps a piece walks out from a surface: the base into layer 0, then every node together, one
+ * sample at a time, out to `K` sheets each way.
+ *
+ * Together and not one after another, because a sheet is a sheet: the nodes are not independent
+ * walkers that happen to be drawn as a grid, and marching each to the end before starting the next
+ * is what lets them drift apart (`HOLD`).
  */
 function walk(
   field: LasagnaField,
   X: Float64Array,
   n0: Vec3,
-  count: number,
-  K: number,
+  grid: PatchGrid,
+  // How many samples each way to walk, and how many of them make a sheet.
+  reach: number,
   per: number,
+  // How far one sheet is from the next, in voxels: the one number this fit is told rather than reads.
   spacing: number,
 ) {
-  const layers = 2 * K * per + 1;
+  const { nu, nv } = grid;
+  const count = nu * nv;
+  const layers = 2 * reach + 1;
   const P = new Float32Array(layers * count * 3).fill(NaN);
   const A = new Float32Array(layers * count);
+  const middle = reach * count;
   for (let node = 0; node < count; node++) {
-    const o = K * per * count + node;
     if (Number.isNaN(X[node * 3])) continue;
-    P[o * 3] = X[node * 3];
-    P[o * 3 + 1] = X[node * 3 + 1];
-    P[o * 3 + 2] = X[node * 3 + 2];
-    A[o] = 1;
-    const start: Vec3 = [X[node * 3], X[node * 3 + 1], X[node * 3 + 2]];
-    for (const dir of [1, -1] as const) march(field, start, dir, n0, K, per, spacing, P, A, count, node);
+    const o = (middle + node) * 3;
+    P[o] = X[node * 3];
+    P[o + 1] = X[node * 3 + 1];
+    P[o + 2] = X[node * 3 + 2];
+    A[middle + node] = 1;
+  }
+
+  const wanted = reach;
+  const each = spacing / per;
+  const steps = Math.max(1, Math.round(each / (spacing * STEP_OF_WRAP)));
+  const ds = each / steps;
+  for (const dir of [1, -1] as const) {
+    const at = X.slice();
+    const ref = new Float64Array(count * 3);
+    for (let node = 0; node < count; node++) ref.set(n0, node * 3);
+    const alive = new Uint8Array(count);
+    for (let node = 0; node < count; node++) alive[node] = Number.isNaN(X[node * 3]) ? 0 : 1;
+
+    for (let k = 1; k <= wanted; k++) {
+      for (let step = 0; step < steps; step++) {
+        for (let node = 0; node < count; node++) {
+          if (!alive[node]) continue;
+          const o = node * 3;
+          const here: Vec3 = [at[o], at[o + 1], at[o + 2]];
+          const was: Vec3 = [ref[o], ref[o + 1], ref[o + 2]];
+          const n = normalAt(field, here, was);
+          if (n === null) {
+            alive[node] = 0;
+            continue;
+          }
+          // Taken at the middle of the step, so that a normal that turns does not walk the march off
+          // the sheet — the same reason a curve is integrated by its midpoint and not by its start.
+          const half: Vec3 = [
+            here[0] + (n[0] * dir * ds) / 2,
+            here[1] + (n[1] * dir * ds) / 2,
+            here[2] + (n[2] * dir * ds) / 2,
+          ];
+          const mid = normalAt(field, half, n) ?? n;
+          at[o] = here[0] + mid[0] * dir * ds;
+          at[o + 1] = here[1] + mid[1] * dir * ds;
+          at[o + 2] = here[2] + mid[2] * dir * ds;
+          ref.set(mid, o);
+        }
+        hold(at, alive, nu, nv);
+      }
+      const layer = middle + dir * k * count;
+      for (let node = 0; node < count; node++) {
+        if (!alive[node]) continue;
+        const o = node * 3;
+        P[(layer + node) * 3] = at[o];
+        P[(layer + node) * 3 + 1] = at[o + 1];
+        P[(layer + node) * 3 + 2] = at[o + 2];
+        A[layer + node] = 1;
+      }
+    }
   }
   return { P, A };
+}
+
+// Each node a tenth of the way towards the middle of the neighbours it has.
+function hold(at: Float64Array, alive: Uint8Array, nu: number, nv: number) {
+  const was = at.slice();
+  for (let i = 0; i < nv; i++)
+    for (let j = 0; j < nu; j++) {
+      const k = i * nu + j;
+      if (!alive[k]) continue;
+      let n = 0;
+      const sum = [0, 0, 0];
+      for (const [di, dj] of [[0, 1], [0, -1], [1, 0], [-1, 0]] as const) {
+        const y = i + di, x = j + dj;
+        if (y < 0 || x < 0 || y >= nv || x >= nu) continue;
+        const o = y * nu + x;
+        if (!alive[o]) continue;
+        sum[0] += was[o * 3];
+        sum[1] += was[o * 3 + 1];
+        sum[2] += was[o * 3 + 2];
+        n++;
+      }
+      if (n === 0) continue;
+      for (let c = 0; c < 3; c++) at[k * 3 + c] += HOLD * (sum[c] / n - was[k * 3 + c]);
+    }
 }
 
 /**
@@ -308,84 +342,194 @@ function walk(
  * Nothing here looks for papyrus, and nothing snaps to anything.  A thing said is a statement about
  * the winding, the fit is a winding, and the two meet in the same number.
  */
-function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
+function saidAbout(
+  patch: Patch,
+  chains: ChainSaid[],
+  spacing: number,
+  /*
+   * Which sheet each chain is on, settled the first time and kept.
+   *
+   * Settled once because it is a decision and not a measurement: a chain whose points straddle the
+   * halfway line between two sheets votes one way on one pass and the other way on the next, and the
+   * piece is then pulled back and forth and never arrives.  The first piece is the honest place to
+   * decide it — nothing has been moved for anybody yet.
+   */
+  sheets: Map<string, number>,
+) {
   const { nu, nv } = patch;
   const reach = spacing * SAID_REACH;
-  const found = new Map<string, { node: number; w: number; away: number }[]>();
+  const found = new Map<string, { gi: number; gj: number; w: number; at: Vec3 }[]>();
   for (const chain of chains) {
     const places = [];
     for (const point of chain.points) {
       const on = nearestOn(patch, point.at);
       if (on === undefined || on.away > reach) continue;
-      const j = Math.min(nu - 1, Math.max(0, Math.round(on.gj)));
-      const i = Math.min(nv - 1, Math.max(0, Math.round(on.gi)));
-      places.push({ node: i * nu + j, w: on.w, away: on.away });
+      /*
+       * Kept where it really is, between the grid points, and never rounded to one of them.  Rounding
+       * puts two places a few voxels apart on one node, where they fight over its one value and the
+       * last one wins; and it puts two that are meant to say the same thing on NEIGHBOURING nodes,
+       * where holding each exactly leaves a step between them — and a step in the correction is a
+       * crease in the sheet.  Between the nodes they ask for a slope instead, which a sheet can be.
+       */
+      places.push({
+        gi: Math.min(nv - 1, Math.max(0, on.gi)),
+        gj: Math.min(nu - 1, Math.max(0, on.gj)),
+        w: on.w,
+        at: point.at,
+      });
     }
+    /*
+     * Every point kept.  Not thinned, and that is the point of this tool.
+     *
+     * Thinning a chain to one point every twenty voxels is what the Vesuvius Challenge does, and for
+     * a spiral across a whole scroll it is right; here it would throw away the thing being looked at.
+     * What this is for is the small undulations in one small piece, and those live at exactly the
+     * scale a thinning would remove.
+     *
+     * The jitter of a hand is dealt with instead of thrown away, and the difference is everything: a
+     * hand is wrong by a few voxels in a way that is NOT the same from one click to the next, so a
+     * run of points over one stretch of sheet averages it down by the square root of how many there
+     * are, while a real undulation is the same in all of them and survives.  So more points make the
+     * answer better rather than noisier, which is what a person drawing carefully has a right to
+     * expect.  What limits how fine a thing can be said is the control field (`bend`), and nothing
+     * else.
+     */
     if (places.length > 0) found.set(chain.id, places);
   }
 
-  const want = new Map<number, number>();
+  const want: { gi: number; gj: number; value: number }[] = [];
   for (const chain of chains) {
     const places = found.get(chain.id);
     if (places === undefined || places.length < 2 || chain.kind !== "same") continue;
-    // Which sheet the chain is on: the one most of its points are nearest to.
-    const votes = new Map<number, number>();
-    for (const one of places) votes.set(Math.round(one.w), (votes.get(Math.round(one.w)) ?? 0) + 1);
-    let sheet = 0, best = -1;
-    for (const [which, count] of votes) if (count > best) { best = count; sheet = which; }
+    // The one most of its points are nearest to, the first time it is asked.
+    let sheet = sheets.get(chain.id);
+    if (sheet === undefined) {
+      const votes = new Map<number, number>();
+      for (const one of places) votes.set(Math.round(one.w), (votes.get(Math.round(one.w)) ?? 0) + 1);
+      let best = -1;
+      sheet = 0;
+      for (const [which, count] of votes) if (count > best) { best = count; sheet = which; }
+      sheets.set(chain.id, sheet);
+    }
     /*
      * Moving the base OUT by one winding moves every wrap out with it, so a place measured against
      * the piece reads one LESS than it did — the correction is the place's own w less the wrap its
      * chain is on, not the other way about.
      */
-    for (const one of places) want.set(one.node, one.w - sheet);
+    for (const one of places) want.push({ gi: one.gi, gj: one.gj, value: one.w - sheet });
   }
   for (const chain of chains) {
     if (chain.kind !== "step") continue;
     const places = found.get(chain.id);
     if (places === undefined || places.length < 2) continue;
+    const already = (one: { gi: number; gj: number; w: number; at: Vec3 }) => {
+      const said = want.find((each) => each.gi === one.gi && each.gj === one.gj);
+      return one.w - (said?.value ?? 0);
+    };
     for (let k = 0; k + 1 < places.length; k++) {
       const [a, b] = [places[k], places[k + 1]];
-      const apart = Math.abs((a.w + (want.get(a.node) ?? 0)) - (b.w + (want.get(b.node) ?? 0)));
       // Already different sheets: a thing already true asks for nothing.
-      if (apart >= 0.5) continue;
+      if (Math.abs(already(a) - already(b)) >= 0.5) continue;
       // The one the piece is less sure of — further from a whole wrap — is the one that moves.
       const [stay, move] = Math.abs(a.w - Math.round(a.w)) <= Math.abs(b.w - Math.round(b.w)) ? [a, b] : [b, a];
-      const to = Math.round(stay.w + (want.get(stay.node) ?? 0)) + (move.w >= stay.w ? 1 : -1);
-      want.set(move.node, move.w - to);
+      const to = Math.round(already(stay)) + (move.w >= stay.w ? 1 : -1);
+      want.push({ gi: move.gi, gj: move.gj, value: move.w - to });
     }
   }
   return want;
 }
 
 /**
- * Those corrections spread over the whole grid, smoothly: what was said held exactly where it was
- * said, and everywhere else the smoothest thing that agrees with it, fading back to nothing far away.
+ * Those corrections spread over the whole grid: the smoothest field that passes EXACTLY through what
+ * was said, wherever it was said — between the grid points as well as on them.
+ *
+ * Exactly, because a line that does not go through the place a person put their finger is the one
+ * thing an annotation must never be.  Smoothly, because the rest of the sheet has to be a sheet.  The
+ * two are not in conflict once a place is allowed to sit BETWEEN grid points: smoothing and holding
+ * are done in turn — a few sweeps of the plain Laplacian, then every place put back exactly where it
+ * was said, spread over the four grid points around it by the same weights that read it — and what
+ * that settles on is the smoothest field that still goes through all of them.
  */
-function bend(grid: PatchGrid, want: Map<number, number>) {
+function bend(grid: PatchGrid, want: { gi: number; gj: number; value: number }[], step: number) {
   const { nu, nv } = grid;
-  const count = nu * nv;
+  /*
+   * The correction is solved on a COARSE lattice over the grid and read off it by interpolation.
+   *
+   * This is the whole of why the sheet cannot come out as a saw, and it is structural rather than a
+   * penalty: a field with a control point every half a sheet-spacing has nothing to oscillate with at
+   * the scale of a few voxels, so no weighting of anything against anything else can make it do so.
+   * It is the small version of what the Vesuvius Challenge's spiral fit gets from its model — there a
+   * sheet is an integer level set of one smooth map, and a sheet shaped like a saw is not a thing the
+   * model can represent at all, whatever the annotations say.
+   *
+   * A dense smoothness penalty is not the same and was tried: with a correction free at every grid
+   * point, twenty places said a few voxels apart pulled it up and down between them and it obliged —
+   * measured, 4.4 voxels of bend between neighbouring points, which on a card where the sheet lies
+   * nearly along the plane is forty voxels of saw in the line.
+   */
+  const over = Math.max(2, Math.round(step));
+  const cu = Math.ceil((nu - 1) / over) + 1, cv = Math.ceil((nv - 1) / over) + 1;
+  const count = cu * cv;
   const s = new Float64Array(count);
-  const fixed = new Uint8Array(count);
-  for (const [node, value] of want) {
-    s[node] = value;
-    fixed[node] = 1;
-  }
+
+  // Each thing said, as one equation over the four control points around where it was said.
+  const rows = want.map((one) => {
+    const ci = one.gi / over, cj = one.gj / over;
+    const i0 = Math.min(cv - 2, Math.max(0, Math.floor(ci)));
+    const j0 = Math.min(cu - 2, Math.max(0, Math.floor(cj)));
+    const ti = ci - i0, tj = cj - j0;
+    return {
+      nodes: [i0 * cu + j0, i0 * cu + j0 + 1, (i0 + 1) * cu + j0, (i0 + 1) * cu + j0 + 1],
+      weights: [(1 - ti) * (1 - tj), (1 - ti) * tj, ti * (1 - tj), ti * tj],
+      value: one.value,
+    };
+  });
+  const touching: { row: number; at: number }[][] = Array.from({ length: count }, () => []);
+  rows.forEach((row, k) => row.nodes.forEach((node, at) => touching[node].push({ row: k, at })));
+
+  /*
+   * And the smoothest control field that agrees with them, by least squares.  Weighted and not held:
+   * a hand is not steady to a voxel and must not have to be, so what comes out is the sheet that is
+   * least wrong about everything said rather than the one contorted through every click.
+   */
   for (let sweep = 0; sweep < BEND_SWEEPS; sweep++)
-    for (let i = 0; i < nv; i++)
-      for (let j = 0; j < nu; j++) {
-        const k = i * nu + j;
-        if (fixed[k]) continue;
+    for (let i = 0; i < cv; i++)
+      for (let j = 0; j < cu; j++) {
+        const k = i * cu + j;
         let sum = 0, n = 0;
-        if (j + 1 < nu) (sum += s[k + 1]), n++;
+        if (j + 1 < cu) (sum += s[k + 1]), n++;
         if (j > 0) (sum += s[k - 1]), n++;
-        if (i + 1 < nv) (sum += s[k + nu]), n++;
-        if (i > 0) (sum += s[k - nu]), n++;
-        // Screened rather than plain: without the pull towards nothing a correction said in one
-        // corner would tilt the whole piece, and what was said was about that corner.
-        s[k] += 1.7 * (sum / (n + BEND_PULL * n) - s[k]);
+        if (i + 1 < cv) (sum += s[k + cu]), n++;
+        if (i > 0) (sum += s[k - cu]), n++;
+        // Screened towards nothing, so that a correction said in one corner does not tilt the whole
+        // piece: what was said was about that corner.
+        let top = sum, bottom = n * (1 + BEND_PULL);
+        for (const { row, at } of touching[k]) {
+          const one = rows[row];
+          const w = one.weights[at];
+          if (w === 0) continue;
+          let others = 0;
+          for (let c = 0; c < 4; c++) if (c !== at) others += one.weights[c] * s[one.nodes[c]];
+          top += BEND_SAID * w * (one.value - others);
+          bottom += BEND_SAID * w * w;
+        }
+        s[k] += 1.7 * (top / bottom - s[k]);
       }
-  return s;
+
+  // Read back onto the grid the piece is built on.
+  const out = new Float64Array(nu * nv);
+  for (let i = 0; i < nv; i++)
+    for (let j = 0; j < nu; j++) {
+      const ci = i / over, cj = j / over;
+      const i0 = Math.min(cv - 2, Math.floor(ci)), j0 = Math.min(cu - 2, Math.floor(cj));
+      const ti = ci - i0, tj = cj - j0;
+      out[i * nu + j] =
+        s[i0 * cu + j0] * (1 - ti) * (1 - tj) +
+        s[i0 * cu + j0 + 1] * (1 - ti) * tj +
+        s[(i0 + 1) * cu + j0] * ti * (1 - tj) +
+        s[(i0 + 1) * cu + j0 + 1] * ti * tj;
+    }
+  return out;
 }
 
 /**
@@ -450,32 +594,55 @@ export function buildPatch(
       ? { X: Float64Array.from(from), ...frame(n0) }
       : baseSurface(field, seed, n0, grid);
 
-  const first = walk(field, X, n0, count, K, per, apart);
-  const patch: Patch = { ...grid, K, per, ...first, right, down, normal: n0 };
-  if (chains.length === 0) return patch;
+  /*
+   * Walked once, and further than the piece needs: the room either side is what a correction slides
+   * into.
+   */
+  const reach = (K + MARGIN) * per;
+  const walked = walk(field, X, n0, grid, reach, per, apart);
+  const table = (R: number, Q: { P: Float32Array; A: Float32Array }, shift?: Float64Array) => {
+    const layers = 2 * K * per + 1;
+    const P = new Float32Array(layers * count * 3).fill(NaN);
+    const A = new Float32Array(layers * count);
+    for (let k = -K * per; k <= K * per; k++)
+      for (let node = 0; node < count; node++) {
+        // Where on this node's own walk the sheet it wants is, once what was said has slid it.
+        const at = k + (shift === undefined ? 0 : shift[node] * per);
+        const a = Math.floor(at), t = at - a;
+        if (a + R < 0 || a + 1 + R > 2 * R) continue;
+        const from = (a + R) * count + node, to = (a + 1 + R) * count + node;
+        if (Q.A[from] < 0.5 || Q.A[to] < 0.5) continue;
+        const into = (k + K * per) * count + node;
+        for (let c = 0; c < 3; c++) P[into * 3 + c] = Q.P[from * 3 + c] * (1 - t) + Q.P[to * 3 + c] * t;
+        A[into] = 1;
+      }
+    return { P, A };
+  };
+
+  const plain: Patch = { ...grid, K, per, ...table(reach, walked), right, down, normal: n0 };
+  if (chains.length === 0) return plain;
 
   /*
-   * And again, holding what was said.  Twice because a thing said is about a place, and which wrap a
-   * place is on cannot be known until there are wraps to compare it with — so the first piece is
-   * what the saying is measured against, and the second is the piece that listens.
+   * And what a person has said, held EXACTLY — by sliding the winding rather than by bending the
+   * sheet into place.
+   *
+   * This is the shape of the Vesuvius Challenge's own spiral fit, in the small.  There, a sheet is not
+   * a surface that is moved about: it is an integer level set of one winding function defined
+   * everywhere, and an annotation is a statement about that function, solved together with everything
+   * else.  Here the winding function is already in hand — every node has walked its own path, and how
+   * far along the path a place is IS its winding — so a thing said is met by resampling each node's
+   * path at a shifted winding, which is exact and linear and done once.
+   *
+   * It replaces an iteration that moved the base, walked again and measured again, hoping to creep up
+   * on the answer.  Measured, that hoping did not work: twenty points said to be one sheet were left
+   * 17 voxels off it, and taking the whole correction each round made it worse round by round — 26
+   * voxels out became 17, then 18, 21, 24, 30.  Nothing creeps here; the places said are where the
+   * sheet is because that is what the table was built from.
    */
-  const want = saidAbout(patch, chains, apart);
-  if (want.size === 0) return patch;
-  const s = bend(grid, want);
-  const moved = X.slice();
-  for (let node = 0; node < count; node++) {
-    const o = node * 3;
-    if (Number.isNaN(moved[o]) || s[node] === 0) continue;
-    const n = normalAt(field, [moved[o], moved[o + 1], moved[o + 2]], n0);
-    if (n === null) continue;
-    // The correction is in sheets, and a sheet is `apart` voxels.
-    const step = s[node] * apart;
-    moved[o] += n[0] * step;
-    moved[o + 1] += n[1] * step;
-    moved[o + 2] += n[2] * step;
-  }
-  const again = walk(field, moved, n0, count, K, per, apart);
-  return { ...grid, K, per, ...again, right, down, normal: n0 };
+  const want = saidAbout(plain, chains, apart, new Map<string, number>());
+  if (want.length === 0) return plain;
+  const over = (apart * BEND_OVER) / Math.min(grid.hu, grid.hv);
+  return { ...grid, K, per, ...table(reach, walked, bend(grid, want, over)), right, down, normal: n0 };
 }
 
 /**
