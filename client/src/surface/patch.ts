@@ -80,7 +80,7 @@ export function outward(
  * scroll stands), and `right` such that the screen looks along +n, from the inside of the sheet
  * outward — the papyrus was rolled with the writing inside, so this is the side it was read from.
  */
-export function frame(n: Vec3) {
+function frame(n: Vec3) {
   let down: Vec3 = add([1, 0, 0], mul(n, -n[0]));
   if (Math.hypot(...down) < 0.2) down = add([0, 1, 0], mul(n, -n[1]));
   down = unit(down);
@@ -205,15 +205,17 @@ const HOLD = 0.25;
 const SAID_REACH = 1.5;
 // How much further than the piece needs each node walks, in sheets: the room a correction slides into.
 const MARGIN = 1;
-// Sweeps the correction is solved over, how heavily a thing said weighs against the smoothness, and
-// how hard the field is pulled back towards nothing where nothing was said.  Said heavily, so that a
-// chain does move the sheet to it; not infinitely, so that the hand that drew it need not be steady.
-const BEND_SWEEPS = 3000;
-const BEND_SAID = 12;
-const BEND_PULL = 0.004;
-// How far apart the control points of a correction are, as a part of the space between two sheets:
-// nothing a person says can bend a sheet faster than this.
-const BEND_OVER = 0.5;
+/*
+ * How far a thing said reaches, as a multiple of how far apart the things said are, and the least and
+ * most it may be in voxels.
+ *
+ * Decided by the annotations rather than fixed, and that is what makes drawing more of them work:
+ * drawn close together they reach a short way, and the correction can then say something fine; drawn
+ * far apart they reach further and the correction is broad and gentle.  A number fixed here instead
+ * would be a ceiling on how fine a thing a person is allowed to say.
+ */
+const REACH_OF_GAP = 2;
+const REACH_LEAST = 4;
 
 /**
  * The wraps a piece walks out from a surface: the base into layer 0, then every node together, one
@@ -440,96 +442,104 @@ function saidAbout(
 }
 
 /**
- * Those corrections spread over the whole grid: the smoothest field that passes EXACTLY through what
- * was said, wherever it was said — between the grid points as well as on them.
+ * Those corrections spread over the grid: the smoothest field that passes EXACTLY through every place
+ * said, and fades back to nothing away from them.
  *
- * Exactly, because a line that does not go through the place a person put their finger is the one
- * thing an annotation must never be.  Smoothly, because the rest of the sheet has to be a sheet.  The
- * two are not in conflict once a place is allowed to sit BETWEEN grid points: smoothing and holding
- * are done in turn — a few sweeps of the plain Laplacian, then every place put back exactly where it
- * was said, spread over the four grid points around it by the same weights that read it — and what
- * that settles on is the smoothest field that still goes through all of them.
+ * Exactly through every one, because a line that does not go through the place a person put their
+ * finger is the one thing an annotation must never be, and because this is a tool for looking rather
+ * than a thing that guesses: what it is for is that a person can say something, see what it does, and
+ * say the next thing.  Every point is adopted whole.
+ *
+ * And that does NOT have to be bought with a sheet shaped like a saw — which is what came out of
+ * solving this on the grid with a plain Laplacian.  The Laplacian's own answer to a point held at a
+ * value is a spike: in two dimensions its Green's function is log r, which has no bottom, so the
+ * field dives at every place said and climbs back between them.  The saw was never the price of
+ * exactness; it was the price of asking for the flattest field rather than the least BENT one.
+ *
+ * So the field is built the other way round: not solved on the grid at all, but written as a sum of
+ * one smooth bump per place said, with the heights chosen so that the sum reads exactly what was said
+ * at every one of them.  The bump is the Matérn of five halves,
+ *
+ *     φ(r) = (1 + √5 r/ℓ + 5r²/3ℓ²) · e^(−√5 r/ℓ)
+ *
+ * which is twice differentiable — so a place said is a smooth rise and not a spike — positive
+ * definite, so the heights always exist and are unique, and falling away to nothing, so that where
+ * nobody has said anything the sheet is the prediction's own and not an extrapolation of somebody's
+ * hand.  A thin plate spline interpolates exactly too, but its bump grows as r² log r: a few places
+ * said in the middle of a card would tip the whole of it, including the parts nobody has looked at.
  */
-function bend(grid: PatchGrid, want: { gi: number; gj: number; value: number }[], step: number) {
-  const { nu, nv } = grid;
-  /*
-   * The correction is solved on a COARSE lattice over the grid and read off it by interpolation.
-   *
-   * This is the whole of why the sheet cannot come out as a saw, and it is structural rather than a
-   * penalty: a field with a control point every half a sheet-spacing has nothing to oscillate with at
-   * the scale of a few voxels, so no weighting of anything against anything else can make it do so.
-   * It is the small version of what the Vesuvius Challenge's spiral fit gets from its model — there a
-   * sheet is an integer level set of one smooth map, and a sheet shaped like a saw is not a thing the
-   * model can represent at all, whatever the annotations say.
-   *
-   * A dense smoothness penalty is not the same and was tried: with a correction free at every grid
-   * point, twenty places said a few voxels apart pulled it up and down between them and it obliged —
-   * measured, 4.4 voxels of bend between neighbouring points, which on a card where the sheet lies
-   * nearly along the plane is forty voxels of saw in the line.
-   */
-  const over = Math.max(2, Math.round(step));
-  const cu = Math.ceil((nu - 1) / over) + 1, cv = Math.ceil((nv - 1) / over) + 1;
-  const count = cu * cv;
-  const s = new Float64Array(count);
+function bend(grid: PatchGrid, want: { gi: number; gj: number; value: number }[], reach: number) {
+  const { nu, nv, hu, hv } = grid;
+  const n = want.length;
+  // In voxels, so that one reach means the same thing across and down a grid that is not square.
+  const where = want.map((one) => [one.gj * hu, one.gi * hv]);
+  const bump = (a: number[], b: number[]) => {
+    const r = (Math.hypot(a[0] - b[0], a[1] - b[1]) * Math.sqrt(5)) / reach;
+    return (1 + r + (r * r) / 3) * Math.exp(-r);
+  };
 
-  // Each thing said, as one equation over the four control points around where it was said.
-  const rows = want.map((one) => {
-    const ci = one.gi / over, cj = one.gj / over;
-    const i0 = Math.min(cv - 2, Math.max(0, Math.floor(ci)));
-    const j0 = Math.min(cu - 2, Math.max(0, Math.floor(cj)));
-    const ti = ci - i0, tj = cj - j0;
-    return {
-      nodes: [i0 * cu + j0, i0 * cu + j0 + 1, (i0 + 1) * cu + j0, (i0 + 1) * cu + j0 + 1],
-      weights: [(1 - ti) * (1 - tj), (1 - ti) * tj, ti * (1 - tj), ti * tj],
-      value: one.value,
-    };
-  });
-  const touching: { row: number; at: number }[][] = Array.from({ length: count }, () => []);
-  rows.forEach((row, k) => row.nodes.forEach((node, at) => touching[node].push({ row: k, at })));
+  // The heights, from the one small dense system this needs: K h = v.
+  const K: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const row = new Array<number>(n + 1);
+    for (let j = 0; j < n; j++) row[j] = bump(where[i], where[j]);
+    // Two places said all but on top of one another leave the system all but singular; a touch on the
+    // diagonal makes it solvable, and what comes out is the two of them met halfway.
+    row[i] += 1e-6;
+    row[n] = want[i].value;
+    K.push(row);
+  }
+  for (let c = 0; c < n; c++) {
+    let best = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(K[r][c]) > Math.abs(K[best][c])) best = r;
+    [K[c], K[best]] = [K[best], K[c]];
+    const pivot = K[c][c];
+    if (Math.abs(pivot) < 1e-12) continue;
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const factor = K[r][c] / pivot;
+      if (factor === 0) continue;
+      for (let k = c; k <= n; k++) K[r][k] -= factor * K[c][k];
+    }
+  }
+  const height = new Float64Array(n);
+  for (let c = 0; c < n; c++) height[c] = Math.abs(K[c][c]) < 1e-12 ? 0 : K[c][n] / K[c][c];
 
-  /*
-   * And the smoothest control field that agrees with them, by least squares.  Weighted and not held:
-   * a hand is not steady to a voxel and must not have to be, so what comes out is the sheet that is
-   * least wrong about everything said rather than the one contorted through every click.
-   */
-  for (let sweep = 0; sweep < BEND_SWEEPS; sweep++)
-    for (let i = 0; i < cv; i++)
-      for (let j = 0; j < cu; j++) {
-        const k = i * cu + j;
-        let sum = 0, n = 0;
-        if (j + 1 < cu) (sum += s[k + 1]), n++;
-        if (j > 0) (sum += s[k - 1]), n++;
-        if (i + 1 < cv) (sum += s[k + cu]), n++;
-        if (i > 0) (sum += s[k - cu]), n++;
-        // Screened towards nothing, so that a correction said in one corner does not tilt the whole
-        // piece: what was said was about that corner.
-        let top = sum, bottom = n * (1 + BEND_PULL);
-        for (const { row, at } of touching[k]) {
-          const one = rows[row];
-          const w = one.weights[at];
-          if (w === 0) continue;
-          let others = 0;
-          for (let c = 0; c < 4; c++) if (c !== at) others += one.weights[c] * s[one.nodes[c]];
-          top += BEND_SAID * w * (one.value - others);
-          bottom += BEND_SAID * w * w;
-        }
-        s[k] += 1.7 * (top / bottom - s[k]);
-      }
-
-  // Read back onto the grid the piece is built on.
   const out = new Float64Array(nu * nv);
   for (let i = 0; i < nv; i++)
     for (let j = 0; j < nu; j++) {
-      const ci = i / over, cj = j / over;
-      const i0 = Math.min(cv - 2, Math.floor(ci)), j0 = Math.min(cu - 2, Math.floor(cj));
-      const ti = ci - i0, tj = cj - j0;
-      out[i * nu + j] =
-        s[i0 * cu + j0] * (1 - ti) * (1 - tj) +
-        s[i0 * cu + j0 + 1] * (1 - ti) * tj +
-        s[(i0 + 1) * cu + j0] * ti * (1 - tj) +
-        s[(i0 + 1) * cu + j0 + 1] * ti * tj;
+      const at = [j * hu, i * hv];
+      let sum = 0;
+      for (let k = 0; k < n; k++) sum += height[k] * bump(at, where[k]);
+      out[i * nu + j] = sum;
     }
   return out;
+}
+
+/**
+ * How far one thing said should reach: twice the middle of the distances from each place said to the
+ * nearest other one, held between a few voxels and the space between two sheets.
+ *
+ * Twice, so that the bumps of neighbours overlap and the field between them is theirs rather than a
+ * row of separate hills; the middle rather than the least, so that one pair drawn close together does
+ * not make the whole correction short-sighted.  Held under a sheet's spacing because nothing a person
+ * says about one sheet should reach across to the next.
+ */
+function reachOf(want: { gi: number; gj: number; value: number }[], grid: PatchGrid, spacing: number) {
+  const { hu, hv } = grid;
+  const where = want.map((one) => [one.gj * hu, one.gi * hv]);
+  const gaps: number[] = [];
+  for (let i = 0; i < where.length; i++) {
+    let near = Infinity;
+    for (let j = 0; j < where.length; j++) {
+      if (i === j) continue;
+      near = Math.min(near, Math.hypot(where[i][0] - where[j][0], where[i][1] - where[j][1]));
+    }
+    if (Number.isFinite(near)) gaps.push(near);
+  }
+  if (gaps.length === 0) return spacing;
+  gaps.sort((one, two) => one - two);
+  return Math.min(spacing, Math.max(REACH_LEAST, REACH_OF_GAP * gaps[gaps.length >> 1]));
 }
 
 /**
@@ -641,8 +651,7 @@ export function buildPatch(
    */
   const want = saidAbout(plain, chains, apart, new Map<string, number>());
   if (want.length === 0) return plain;
-  const over = (apart * BEND_OVER) / Math.min(grid.hu, grid.hv);
-  return { ...grid, K, per, ...table(reach, walked, bend(grid, want, over)), right, down, normal: n0 };
+  return { ...grid, K, per, ...table(reach, walked, bend(grid, want, reachOf(want, grid, apart))), right, down, normal: n0 };
 }
 
 /**
