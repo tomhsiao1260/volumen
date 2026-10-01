@@ -12,7 +12,7 @@ class SurfaceEngine {
   });
   private listeners = new Map<string, (event: SurfaceEvent) => void>();
   // The scan each card is on, which the sheet it shows is drawn on, and the plane it is showing, so
-  // that something other than the card itself — a drag on a slice card's line — can ask for a sheet.
+  // that the other cards of one piece can be turned to a sheet without each being told separately.
   private scans = new Map<string, string>();
   private planes = new Map<string, SurfacePlane>();
   // The piece each card shows, so that the cards showing one piece turn together.
@@ -62,29 +62,9 @@ class SurfaceEngine {
   }
 
   /*
-   * Asks a card where a voxel is on its piece, or which voxel a point of its frame is; the answer
-   * comes back to the card's own listener as a `place`.
-   */
-  point(id: string, at: [number, number, number], token?: string) {
-    this.post({ type: "point", id, at, token });
-  }
-
-  where(id: string, fx: number, fy: number, token?: string, loose?: boolean) {
-    this.post({ type: "where", id, fx, fy, token, loose });
-  }
-
-  // Another sheet of a card, without saying which plane: whatever it is showing.
-  showLayer(id: string, w: number, resting = true) {
-    const plane = this.planes.get(id);
-    if (plane === undefined) return;
-    this.post({ type: "show", id, w, plane, resting });
-    this.alongWith(id, w);
-  }
-
-  /*
-   * The other cards of the same piece, moved to the same sheet at once.  The board hears where a
-   * card came to rest a moment after the hand stops, and waiting for that would leave the other
-   * cards of a pair frozen for as long as the turning lasts.
+   * The other cards of the same piece, moved to the same sheet at once.  The board hears where a card
+   * came to rest a moment after the hand stops, and waiting for that would leave the other cards of a
+   * pair frozen for as long as the turning lasts.
    */
   private alongWith(id: string, w: number) {
     const piece = this.pieces.get(id);
@@ -94,6 +74,18 @@ class SurfaceEngine {
       const plane = this.planes.get(other);
       if (plane !== undefined) this.post({ type: "show", id: other, w, plane });
     }
+  }
+
+  /*
+   * Asks a card where a voxel is on its piece, or which voxel a point of its frame is; the answer
+   * comes back to the card's own listener as a `place`.
+   */
+  point(id: string, at: [number, number, number], token?: string) {
+    this.post({ type: "point", id, at, token });
+  }
+
+  where(id: string, fx: number, fy: number, token?: string, loose?: boolean) {
+    this.post({ type: "where", id, fx, fy, token, loose });
   }
 
   close(id: string) {

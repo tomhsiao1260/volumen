@@ -164,15 +164,6 @@ class Card {
   // Resolves the wait of the drawing in progress when another sheet is asked for.
   private changed: (() => void) | undefined;
   private stale = false;
-  /*
-   * Whether the hand that asked for this sheet has let go.
-   *
-   * It is said by the hand rather than worked out from the time of the last ask.  Building a piece is
-   * synchronous, so while it happens the asks pile up unread in the queue, and the last one read
-   * looks old the moment the build ends — so the fit decided the hand had stopped and started
-   * another build, and another, right through a drag that never paused once.
-   */
-  private resting = true;
   // The sheet whose line the page has, so that it is sent once rather than with every frame.
   private sent: string | undefined;
   // When a sheet was last asked for, which says whether the hand has come to rest.
@@ -187,10 +178,9 @@ class Card {
     request.height = Math.max(1, Math.round(request.height));
   }
 
-  show(w: number, plane: SurfacePlane, resting = true) {
+  show(w: number, plane: SurfacePlane) {
     this.wanted = w;
     this.plane = plane;
-    this.resting = resting;
     this.askedAt = performance.now();
     this.changed?.();
     if (!this.drawing) this.run().catch((error) => this.fail(error));
@@ -295,7 +285,7 @@ class Card {
    * Reads the prediction around `seed` and builds the piece of sheet there, w growing along the
    * normal that agrees with `towards` — away from the scroll's axis, or the way the last piece went.
    */
-  private async build(seed: Vec3, towards: Vec3 | undefined, from?: Float32Array) {
+  private async build(seed: Vec3, towards: Vec3 | undefined) {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
@@ -311,14 +301,13 @@ class Card {
       // What was said about the sheets here is part of what the piece is: two cards told the same
       // thing share one, and a piece built before a chain was drawn is not that piece any more.
       this.request.chains.map((chain) => `${chain.id}.${chain.rev}`).join(","),
-      from === undefined ? "" : "from",
     ].join("|");
     let shared = pieces.get(key);
     const fresh = shared === undefined;
     if (shared === undefined) {
       // Behind whatever is already reading, so that two boxes of prediction are never in the store
       // at once, and kept before it finishes so that the cards asking meanwhile wait for this one.
-      shared = building.then(() => this.make(seed, towards, grid, from));
+      shared = building.then(() => this.make(seed, towards, grid));
       building = shared.catch(() => undefined);
       pieces.set(key, shared);
       for (const old of pieces.keys()) {
@@ -338,7 +327,7 @@ class Card {
   }
 
   // Reads what the piece needs and fits it; `build` is what says whether it has to be done at all.
-  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid, from?: Float32Array): Promise<Piece | undefined> {
+  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid): Promise<Piece | undefined> {
     const { zoom, density, width, height } = this.request;
     const across = width / density, down = height / density;
     const channels = this.channels!;
@@ -376,14 +365,11 @@ class Card {
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains, from);
+    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains);
     const fitted = performance.now() - started - read;
     if (patch === undefined) return undefined;
-    /*
-     * The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
-     * would be.  A drag across the sheet lines is measured in this number, and a card whose lines are
-     * 34 voxels apart while it is told 24 moves nearly half again as fast as the lines it is moving.
-     */
+    // The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
+    // would be: it is what sets the card's scale, and what a point on a slice is faded by.
     const gap = wrapGap(patch);
     return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted };
   }
@@ -391,15 +377,13 @@ class Card {
   /**
    * The sheet this piece can show of the one asked for, building further out first where it has to.
    *
-   * Building is synchronous work on this thread, so while it happens nothing else here runs — no
-   * line is sent and no frame is drawn.  That is why it is not done while a hand is still dragging
-   * (`ShowRequest.resting`): measured, a build is 250 to 450 ms, and a line that stops dead for that
-   * long under the hand and then moves a whole wrap is what a drag felt like.  Once the hand lets go
-   * there is nothing to interrupt, and waiting for it is the simplest thing that can work.
+   * Building is synchronous work on this thread, so while it happens nothing else here runs — no line
+   * is sent and no frame is drawn.  Measured, a build is 650 to 870 ms, which is why nothing should
+   * ask for a sheet many wraps away once per frame.
    */
   private async reach(w: number) {
     let left = 4;
-    while (this.resting && this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
+    while (this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
       const patch: Patch = this.patch;
       const step = Math.max(-K, Math.min(K, Math.round(w - this.baseW)));
       // The centre of that sheet, or of the nearest one back towards this piece's own.
@@ -411,13 +395,22 @@ class Card {
       }
       if (found === undefined) break;
       /*
-       * Signed like the piece it continues, so that w keeps growing the same way — and started from
-       * the wrap itself rather than from a fresh solve of the tangent plane.  That wrap is already in
-       * the table, it is the very surface the new piece is to be centred on, and re-deriving it costs
-       * a third of the build and can only come out slightly different, which shows as the piece
-       * shifting the moment it is rebuilt.
+       * Signed like the piece it continues, so that w keeps growing the same way — and solved afresh
+       * from the tangent plane at that wrap's centre, NOT started from the wrap itself.
+       *
+       * Starting from the wrap is the obvious thing and it was wrong.  That wrap is already in the
+       * table, so it costs nothing and the piece does not shift the moment it is rebuilt — but its
+       * grid is not a grid any more.  Streamlines of a normal field converge where the sheet is
+       * concave, and `hold` pulls each node a little towards its neighbours twelve times a wrap, so
+       * the nodes come out of a walk closer together than they went in; carry that into the next
+       * piece and the next and it compounds.  Measured, dragging the line out to the eighteenth wrap
+       * left the closest pair of neighbouring nodes 0.7 voxels apart where the grid was laid out at
+       * 6 — that patch of the sheet drawn eight times over, which is the smear a long drag ended in.
+       * Solved afresh each time there is nothing to carry: at the eighteenth wrap the nodes come out
+       * 5.8 to 5.9 apart and the sheet leans 1° off its own normal, against 10° and falling apart.
+       * It is also no slower — a build from the plane took 870 ms against 1900 from a crumpled grid.
        */
-      const next = await this.build(found.at, patch.normal, layerGrid(patch, found.k));
+      const next = await this.build(found.at, patch.normal);
       if (this.closed || next === undefined) break;
       this.patch = next.patch;
       this.spacing = next.spacing;
@@ -438,7 +431,7 @@ class Card {
     this.drawing = true;
     try {
       let drawn: string | undefined;
-      // The sheet the quick look is already showing, so that resting does not draw it twice.
+      // The sheet the quick look is already showing, so that the sharp frame does not draw it twice.
       let sketched: string | undefined;
       while (!this.closed && (this.stale || drawn !== `${this.wanted} ${this.plane}`)) {
         this.stale = false;
@@ -511,19 +504,6 @@ class Card {
             [grid.buffer],
           );
         }
-        /*
-         * While a hand is dragging the line, the line is ALL that is drawn.
-         *
-         * A drag asks for a new sheet every frame, and each one costs a line — a table lookup and a
-         * message — and a picture, which is fifteen milliseconds.  Every one of those pictures is for
-         * a sheet the hand has already left, and drawing them is what put the line at half the rate
-         * of the hand.  So while the hand holds on it gets the line at its own speed, and the picture
-         * the moment it lets go.
-         */
-        if (!this.resting) {
-          await changed;
-          continue;
-        }
         if (this.wanted !== w || this.plane !== plane) continue;
         if (sketched !== asked) {
           send(2, preview);
@@ -589,7 +569,7 @@ worker.onmessage = ({ data: request }) => {
       break;
     }
     case "show":
-      cards.get(request.id)?.show(request.w, request.plane, request.resting);
+      cards.get(request.id)?.show(request.w, request.plane);
       break;
     case "point":
       cards.get(request.id)?.point(request.at, request.token);

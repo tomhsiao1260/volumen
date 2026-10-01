@@ -409,25 +409,14 @@ export function App() {
   };
 
   /**
-   * Taking hold of a winding point takes the cards to it.
+   * Taking hold of a winding point, which is what Delete then acts on.
    *
-   * A place annotated is a place worth looking at, and looking at it means all of it: the slices move
-   * to the slice it is on, and every flattened card turns to the wrap it is on — where the rest of its
-   * chain is then drawn, which is the whole of what "are these really one wrap?" looks like.  The
-   * flattened cards are asked where the point is rather than told: their own answers are what decides
-   * where its dot is drawn, so what a card turns to and what it then shows cannot disagree.
+   * Taking hold and nothing else.  It used to take every card to the point as well — the slices to
+   * the slice it is on, the flattened cards to the wrap it is on — which reads well written down and
+   * badly in the hand: a press meant to pick one thing up moved the whole board out from under it.
    */
-  const pick = (card: CardState, held: PickedPoint | undefined) => {
+  const pick = (held: PickedPoint | undefined) => {
     dispatch({ type: "pick", picked: held });
-    if (held === undefined) return;
-    const place = chain(held.chain)?.points.find((point) => point.id === held.point);
-    if (place === undefined) return;
-    sessionRef.current?.group(card.groupId).navigation?.setPosition(place.at);
-    for (const one of latest.current.cards) {
-      if (one.kind !== "surface") continue;
-      const w = spotsOf(one.id).get(held.point)?.w;
-      if (w !== undefined) dispatch({ type: "setSurfaceLayer", id: one.id, w: Math.round(w) });
-    }
   };
 
   /*
@@ -558,7 +547,7 @@ export function App() {
                 onUnlink={() => unlink(card)}
                 onPlace={(at) => place(card, at)}
                 onJoin={(at) => join(card, at)}
-                onPick={(held) => pick(card, held)}
+                onPick={pick}
               />
             ) : (
               <CardView
@@ -579,7 +568,7 @@ export function App() {
                 lit={lit}
                 onPlace={(at) => place(card, at)}
                 onJoin={(at) => join(card, at)}
-                onPick={(held) => pick(card, held)}
+                onPick={pick}
                 onOpenSurface={(seed) =>
                   dispatch({
                     type: "addSurfaceCard",

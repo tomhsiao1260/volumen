@@ -485,20 +485,7 @@ interface Said {
   k: number;
 }
 
-function saidAbout(
-  patch: Patch,
-  chains: ChainSaid[],
-  spacing: number,
-  /*
-   * Which sheet each chain is on, settled the first time and kept.
-   *
-   * Settled once because it is a decision and not a measurement: a chain whose points straddle the
-   * halfway line between two sheets votes one way on one pass and the other way on the next, and the
-   * piece is then pulled back and forth and never arrives.  The first piece is the honest place to
-   * decide it — nothing has been moved for anybody yet.
-   */
-  sheets: Map<string, number>,
-) {
+function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
   const { nu, nv } = patch;
   const reach = spacing * SAID_REACH;
   const found = new Map<string, { gi: number; gj: number; w: number; at: Vec3 }[]>();
@@ -514,12 +501,19 @@ function saidAbout(
        * where holding each exactly leaves a step between them — and a step in the correction is a
        * crease in the sheet.  Between the nodes they ask for a slope instead, which a sheet can be.
        */
-      places.push({
-        gi: Math.min(nv - 1, Math.max(0, on.gi)),
-        gj: Math.min(nu - 1, Math.max(0, on.gj)),
-        w: on.w,
-        at: point.at,
-      });
+      /*
+       * And a place that is off the edge of the piece is dropped, not pulled onto it.
+       *
+       * The nearest place ON the piece to a click past its edge is the edge, so holding it to the
+       * grid puts every such click on the last row — several of them, a voxel or two apart, each
+       * asking for something different.  That is a row of near-identical rows in the system and a
+       * steep correction along the one edge, where there is nothing beyond to balance it.  Half a
+       * grid cell of slack, because a click a hair outside is a click on the edge.
+       */
+      const gi = Math.min(nv - 1, Math.max(0, on.gi));
+      const gj = Math.min(nu - 1, Math.max(0, on.gj));
+      if (Math.abs(gi - on.gi) > 0.5 || Math.abs(gj - on.gj) > 0.5) continue;
+      places.push({ gi, gj, w: on.w, at: point.at });
     }
     /*
      * Every point kept.  Not thinned, and that is the point of this tool.
@@ -543,30 +537,32 @@ function saidAbout(
   /*
    * Which sheet each chain is on.
    *
-   * Two steps, and the second is the one that matters: a chain is first given the sheet most of its
-   * own points are nearest to, and then every relative winding is read as what it says — that the
-   * chains it runs through are DIFFERENT sheets, one after another in the order it crosses them.
+   * Three steps.  A chain is first given the sheet most of its own points are nearest to; then every
+   * relative winding is read as what it says — that the chains it runs through are DIFFERENT sheets,
+   * one after another in the order it crosses them; and then, of the chains nobody has said anything
+   * about, no two are left on one sheet.
    *
-   * Without that second step the first one puts two chains that happen to lie less than half a sheet
-   * apart on the same sheet, and the fit, being told to pass through both, does the only thing it can
-   * and weaves up and down between them.  That is not the fit disobeying: it is the fit obeying two
-   * things that cannot both be true, and only the relative winding knows which.
+   * That last step is the default, and it is this way round on purpose.  One chain is a person saying
+   * "these places are one sheet", and drawing a same winding through a place that is already on one
+   * joins the two into a single chain — so the app already HAS a way of saying that two runs of
+   * clicks are the same wrap, and it is not "draw them separately and hope".  Two chains are
+   * therefore two sheets until somebody says otherwise, and the fit no longer merges a chain drawn on
+   * one slice card with a chain drawn on another just because they happen to pass within half a wrap
+   * of each other.  Asked to go through both, it could only weave up and down between them, which is
+   * not the fit disobeying — it is the fit obeying two things that cannot both be true.
    */
   const onSheet = new Map<string, number>();
   for (const chain of chains) {
     const places = found.get(chain.id);
     if (places === undefined || places.length < 2 || chain.kind !== "same") continue;
-    const settled = sheets.get(chain.id);
-    if (settled !== undefined) {
-      onSheet.set(chain.id, settled);
-      continue;
-    }
     const votes = new Map<number, number>();
     for (const one of places) votes.set(Math.round(one.w), (votes.get(Math.round(one.w)) ?? 0) + 1);
     let best = -1, sheet = 0;
     for (const [which, count] of votes) if (count > best) { best = count; sheet = which; }
     onSheet.set(chain.id, sheet);
   }
+  // The chains a relative winding has spoken about, which the default below leaves alone.
+  const told = new Set<string>();
 
   // The chain a place of a relative winding is nearest to, where it is near one at all.
   const nearestChain = (one: { at: Vec3 }) => {
@@ -602,6 +598,8 @@ function saidAbout(
       // they are is not something a relative winding says, and next door is what a person means by
       // drawing one: these two, and nothing between them.
       onSheet.set(here.id, was + (here.w >= before.w ? 1 : -1));
+      told.add(before.id);
+      told.add(here.id);
     }
     /*
      * And a place of a relative winding that is near no chain at all — the inside of a pit, say — is
@@ -616,7 +614,23 @@ function saidAbout(
       free.push({ chain: chain.id, gi: move.place.gi, gj: move.place.gj, value: move.w - sheet, k: sheet });
     }
   }
-  for (const [id, sheet] of onSheet) sheets.set(id, sheet);
+  /*
+   * And no two chains left on one sheet, taken in the order the piece itself has them: a chain that
+   * would land on a sheet already spoken for is moved out to the next one.  A chain a relative winding
+   * placed keeps its sheet whatever happens — that was said, and this is only what happens when
+   * nothing was.
+   */
+  const middleOf = (id: string) => {
+    const ws = (found.get(id) ?? []).map((one) => one.w).sort((a, b) => a - b);
+    return ws.length === 0 ? 0 : ws[ws.length >> 1];
+  };
+  let last = -Infinity;
+  for (const id of [...onSheet.keys()].sort((a, b) => middleOf(a) - middleOf(b))) {
+    const sheet = onSheet.get(id) ?? 0;
+    const next = told.has(id) || sheet > last ? sheet : last + 1;
+    onSheet.set(id, next);
+    last = Math.max(last, next);
+  }
 
   /*
    * And what each place asks of the winding: its own w less the sheet its chain is on.  Moving the
@@ -808,10 +822,6 @@ export function buildPatch(
   spacing = 40,
   // What a person has said about the sheets here.
   chains: ChainSaid[] = [],
-  // The surface to start from, node by node, when there already is one — a piece built further out
-  // starts from the wrap it is centred on rather than solving the tangent plane again.  NaN where
-  // that wrap has nothing at a node, and the piece has nothing there either.
-  from?: Float32Array,
 ): Patch | undefined {
   // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
   // about which sheet they meant, and this fit makes no such decisions.
@@ -821,10 +831,7 @@ export function buildPatch(
   const { nu, nv } = grid;
   const count = nu * nv;
   const apart = spacingSaid(field, chains, n0, spacing);
-  const { X, right, down } =
-    from !== undefined && from.length === count * 3
-      ? { X: Float64Array.from(from), ...frame(n0) }
-      : baseSurface(field, seed, n0, grid);
+  const { X, right, down } = baseSurface(field, seed, n0, grid);
 
   /*
    * Walked once, and further than the piece needs: the room either side is what a correction slides
@@ -914,7 +921,7 @@ export function buildPatch(
    * voxels out became 17, then 18, 21, 24, 30.  Nothing creeps here; the places said are where the
    * sheet is because that is what the table was built from.
    */
-  const want = saidAbout(plain, chains, apart, new Map<string, number>());
+  const want = saidAbout(plain, chains, apart);
   if (want.length === 0) return plain;
   said.places = want.length;
   said.reach = apart * REACH_OF_WRAP;
@@ -926,9 +933,9 @@ export function buildPatch(
  * How far apart this piece's wraps actually came out, in voxels: the middle of the distances from
  * each node of wrap 0 to the same node of wrap 1.
  *
- * Asked of the piece rather than of the prediction on purpose.  The number is what a drag across the
- * sheet lines is measured in and what sets the card's scale, and for that it has to describe the
- * wraps that are drawn — not what the prediction said before they were walked.  Measured on Scroll 1
+ * Asked of the piece rather than of the prediction on purpose.  The number is what sets the card's
+ * scale, and for that it has to describe the wraps that are drawn — not what the prediction said
+ * before they were walked.  Measured on Scroll 1
  * the two differ by half: `grad_mag` says a winding takes 30 voxels there and the wraps come out 34
  * apart, while the papyrus itself repeats every 46.  That last gap is a fault of the prediction's
  * winding scale and is for the layer above this one to correct; this only stops the card telling the

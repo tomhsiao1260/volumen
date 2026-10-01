@@ -21,8 +21,9 @@ export interface Sheet {
   nu: number;
   nv: number;
   grid: Float32Array;
-  // The way w grows (z, y, x), and how many voxels apart the sheets are: what turns a drag across
-  // the line into sheets.
+  // The way w grows (z, y, x), and how many voxels apart the sheets came out.  The spacing is what
+  // fades an annotation point by how far it is from the slice; the normal is read by the harnesses
+  // that measure whether the piece is still a sheet, and by nothing in the page.
   normal: [number, number, number];
   spacing: number;
 }
