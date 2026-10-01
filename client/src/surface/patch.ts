@@ -210,13 +210,12 @@ const MARGIN = 1;
  */
 const ACROSS_SHEETS = 2;
 /*
- * And the one thing a person may not say: that two wraps are in the same place.  The floor is in
- * voxels, because that is the unit the thing being prevented happens in, and it is low — papyrus
- * really does come to within a voxel or two of itself, so this is a rail against the impossible and
- * not an opinion about how close the sheets may get.  The Vesuvius Challenge's spiral fit carries the
- * same rail (`model_gap_expander_min_gap`).
+ * And the one thing a person may not say: that two wraps are in the same place.  Low, because papyrus
+ * really does come to within a few µm of itself — a rail against the impossible, not an opinion about
+ * how close the sheets may get.  The Vesuvius Challenge's spiral fit carries the same rail
+ * (`model_gap_expander_min_gap`).
  */
-const GAP_LEAST = 2;
+const GAP_LEAST_UM = 5;
 /*
  * How far apart two places a person clicked one after another may be and still be taken as a line
  * drawn between them, as a multiple of how far apart that chain's clicks usually are.
@@ -233,11 +232,18 @@ const JOIN_FAR = 3;
  * A hand placing a point on a slice is good to about a voxel, so a fit held to pass through every
  * click exactly is being made to reproduce a shake.  Said as a tolerance, a run of clicks along one
  * stretch averages its own jitter down — which is why every point is kept rather than thinned.  It is
- * also what makes a line's worth of places solvable at all: a hundred of them a few voxels apart ask
- * very nearly the same question, and very nearly equal rows have an answer of enormous numbers that
+ * also what makes a line's worth of places solvable at all: a hundred of them a few µm apart ask very
+ * nearly the same question, and very nearly equal rows have an answer of enormous numbers that
  * cancel, and ring between them where they stop cancelling.
  */
-const HAND = 1;
+const HAND_UM = 2.5;
+/*
+ * …but never better than a voxel, whatever a voxel is worth.  A hand places a point by eye on a
+ * picture, so its reach is a pixel of that picture and not a length in the scroll: on a 7.9 µm scan
+ * the µm figure above would be a third of a voxel, which claims a steadier hand than anyone has and
+ * takes the tolerance back out of a system that needs it (see the paragraph above).
+ */
+const HAND_LEAST = 1;
 /*
  * And how far apart the things said have to spread, as a fraction of the reach, before the plane is
  * allowed a tilt that way.  A quarter: closer together than that they are a line, not a patch, and a
@@ -259,7 +265,7 @@ const PLANE_SPREAD = 0.25;
  * All that is left is how far a line's say carries into the parts nobody has looked at, and the only
  * length the piece has from the papyrus is how far apart its wraps are.
  */
-const REACH_OF_WRAP = 1;
+const REACH_OF_WRAP = 2;
 // And how far apart two places have to be ACROSS the sheet to count as two places at all: one grid
 // cell, since a field held on the grid cannot tell apart anything closer.
 const sameplace = (grid: PatchGrid) => Math.min(grid.hu, grid.hv);
@@ -364,7 +370,20 @@ function walk(
   return { P, A };
 }
 
-// Each node a tenth of the way towards the middle of the neighbours it has.
+/**
+ * Each node a quarter of the way towards the middle of its neighbours, so that the grid stays a sheet
+ * as it marches — and the edge of it stays where it is.
+ *
+ * A node on the edge has a neighbour missing, and dropping it leaves the average of the rest sitting
+ * inside the piece, so every pass pulls the edge in a little.  Seventy-two passes over a march, and
+ * the outermost ring of cells comes out at half the width it was laid out at — which the card draws
+ * at twice the size, a band of smeared papyrus all round the piece.  Measured: the outer ring at 0.47
+ * of its spacing against 0.89 one ring in.
+ *
+ * So the missing neighbour is REFLECTED instead: taken as the node's own place carried the same
+ * distance the other way.  On a straight edge that leaves the average exactly where the node already
+ * is, so nothing is pulled anywhere; on a curved one it keeps the curve.
+ */
 function hold(at: Float64Array, alive: Uint8Array, nu: number, nv: number) {
   const was = at.slice();
   for (let i = 0; i < nv; i++)
@@ -375,12 +394,22 @@ function hold(at: Float64Array, alive: Uint8Array, nu: number, nv: number) {
       const sum = [0, 0, 0];
       for (const [di, dj] of [[0, 1], [0, -1], [1, 0], [-1, 0]] as const) {
         const y = i + di, x = j + dj;
-        if (y < 0 || x < 0 || y >= nv || x >= nu) continue;
-        const o = y * nu + x;
-        if (!alive[o]) continue;
-        sum[0] += was[o * 3];
-        sum[1] += was[o * 3 + 1];
-        sum[2] += was[o * 3 + 2];
+        let o = y < 0 || x < 0 || y >= nv || x >= nu ? -1 : y * nu + x;
+        if (o >= 0 && !alive[o]) o = -1;
+        if (o >= 0) {
+          sum[0] += was[o * 3];
+          sum[1] += was[o * 3 + 1];
+          sum[2] += was[o * 3 + 2];
+          n++;
+          continue;
+        }
+        // Nothing that way: the node's place carried the same distance back the other way, if there
+        // is anything there to carry.
+        const by = i - di, bx = j - dj;
+        if (by < 0 || bx < 0 || by >= nv || bx >= nu) continue;
+        const b = by * nu + bx;
+        if (!alive[b]) continue;
+        for (let c = 0; c < 3; c++) sum[c] += 2 * was[k * 3 + c] - was[b * 3 + c];
         n++;
       }
       if (n === 0) continue;
@@ -388,23 +417,6 @@ function hold(at: Float64Array, alive: Uint8Array, nu: number, nv: number) {
     }
 }
 
-/**
- * What a person has said, as a correction to the winding — in wraps, at the grid node each thing was
- * said nearest to.
- *
- * This is the whole of how an annotation reaches this fit, and it is said in the fit's own terms.
- * The piece is a winding field walked out from a surface: every place in it has a w, whole numbers
- * being the sheets.  So
- *
- *   a SAME winding says its points are all one sheet — that is, they all have the same whole w, and
- *     the correction at each is however far its w is from the one the chain sits on;
- *   a RELATIVE winding says two places are NOT one sheet — that is, their w differ by at least one,
- *     and where the piece has them within half a wrap of each other the further of the two is
- *     corrected out to the next whole one.
- *
- * Nothing here looks for papyrus, and nothing snaps to anything.  A thing said is a statement about
- * the winding, the fit is a winding, and the two meet in the same number.
- */
 /*
  * The correction, kept as one field over the grid per sheet anything was said about.  What the whole
  * field says at a place on sheet w is the sum of them, each weighted by how near w is to its own
@@ -426,6 +438,23 @@ interface Said {
   k: number;
 }
 
+/**
+ * What a person has said, as a correction to the winding — in wraps, at the grid node each thing was
+ * said nearest to.
+ *
+ * This is the whole of how an annotation reaches this fit, and it is said in the fit's own terms.
+ * The piece is a winding field walked out from a surface: every place in it has a w, whole numbers
+ * being the sheets.  So
+ *
+ *   a SAME winding says its points are all one sheet — that is, they all have the same whole w, and
+ *     the correction at each is however far its w is from the one the chain sits on;
+ *   a RELATIVE winding says two places are NOT one sheet — that is, their w differ by at least one,
+ *     and where the piece has them within half a wrap of each other the further of the two is
+ *     corrected out to the next whole one.
+ *
+ * Nothing here looks for papyrus, and nothing snaps to anything.  A thing said is a statement about
+ * the winding, the fit is a winding, and the two meet in the same number.
+ */
 function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
   const { nu, nv } = patch;
   const reach = spacing * SAID_REACH;
@@ -641,7 +670,7 @@ function saidAbout(patch: Patch, chains: ChainSaid[], spacing: number) {
  * the wrap spacing from 42 voxels to 52.  A constant moves every wrap alike, which changes no
  * spacing, and is the one thing a place said on one sheet can honestly carry to another.
  */
-function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
+function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number, micron: number) {
   const { nu, nv, hu, hv } = grid;
   const n = want.length;
   // In voxels, so that one reach means the same thing across and down a grid that is not square.
@@ -678,7 +707,7 @@ function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
       row[j] = bump(far(where[i], where[j]) / reach) * bump((want[i].k - want[j].k) / ACROSS_SHEETS);
     // How well a click is believed, as a tolerance on the diagonal: see HAND.  It is also what makes a
     // line's worth of places — each all but repeating its neighbour — a system with a sane answer.
-    row[i] += (HAND / spacing) ** 2;
+    row[i] += (Math.max(HAND_UM / micron, HAND_LEAST) / spacing) ** 2;
     const p = flat(where[i]);
     for (let c = 0; c < WIDE; c++) row[n + c] = p[c];
     row[n + WIDE] = want[i].value;
@@ -778,6 +807,16 @@ export function buildPatch(
   spacing = 40,
   // What a person has said about the sheets here.
   chains: ChainSaid[] = [],
+  /*
+   * And how big a voxel is, in µm.
+   *
+   * Every length this fit uses is either a count of sheets or a multiple of how far apart the sheets
+   * are — and that comes from a person's own relative winding — so the fit does not care what a voxel
+   * is worth.  These three do: how close two wraps may come, how well a click is believed, and the
+   * spacing to fall back on when nobody has said.  Said in µm they mean the same thing on a scan of
+   * any resolution.
+   */
+  micron = 2.4,
 ): Patch | undefined {
   // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
   // about which sheet they meant, and this fit makes no such decisions.
@@ -789,12 +828,13 @@ export function buildPatch(
   const apart = spacingSaid(field, chains, n0, spacing);
   const { X, right, down } = baseSurface(field, seed, n0, grid);
 
+  const from = (start: Float64Array): Patch => {
   /*
    * Walked once, and further than the piece needs: the room either side is what a correction slides
    * into.
    */
   const reach = (K + MARGIN) * per;
-  const walked = walk(field, X, n0, grid, reach, per, apart);
+  const walked = walk(field, start, n0, grid, reach, per, apart);
   const table = (R: number, Q: { P: Float32Array; A: Float32Array }, shift?: Shift) => {
     const layers = 2 * K * per + 1;
     const P = new Float32Array(layers * count * 3).fill(NaN);
@@ -825,7 +865,7 @@ export function buildPatch(
     // And the floor, in the one place it can honestly be put: two wraps may come to GAP_LEAST voxels
     // of each other and no closer.  Held outward from the piece's own sheet, so the wrap a person is
     // looking at does not move when a wrap three out is the one being held apart.
-    const least = GAP_LEAST / apart;
+    const least = GAP_LEAST_UM / micron / apart;
     for (let node = 0; node < count; node++) {
       for (let k = 1; k <= K * per; k++) {
         const here = (k + K * per) * count + node, below = (k - 1 + K * per) * count + node;
@@ -869,9 +909,26 @@ export function buildPatch(
   if (want.length === 0) return plain;
   said.places = want.length;
   said.reach = apart * REACH_OF_WRAP;
-  const shift = bend(grid, want, said.reach, apart);
+  const shift = bend(grid, want, said.reach, apart, micron);
   return { ...grid, K, per, ...table(reach, walked, shift), right, down, normal: n0, said };
+  };
+
+  /*
+   * Built twice, the second time from a base spread so that the sheet comes out evenly sampled.
+   *
+   * Moving a sheet inward through a curved stack really does make it smaller — that is geometry, not
+   * a fault — and the nodes, each walking its own path, come along with it.  So where a correction
+   * moves the sheet a long way the grid bunches up, and the card draws that patch of papyrus larger
+   * than the rest: measured on a real board, neighbouring nodes came out at 0.63 of the spacing they
+   * were laid out on, which is that stretch of papyrus drawn half as big again.
+   *
+   * Nothing can stop a sheet shrinking.  What can be fixed is WHERE the nodes sit on it: the first
+   * piece says how the sheet came out, the base is re-spread so that the second comes out even, and
+   * the outline is untouched because only the inside of each row and column is moved.
+   */
+  return from(X);
 }
+
 
 /**
  * How far apart this piece's wraps actually came out, in voxels: the middle of the distances from

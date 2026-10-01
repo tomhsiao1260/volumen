@@ -139,7 +139,7 @@ const NEAR = 96;
  * (`field.ts`).  So the number that matters comes from a relative winding — "these two places are
  * different sheets" — and this stands in until there is one (`spacingSaid` in `patch.ts`).
  */
-const SPACING = 40;
+const SPACING_UM = 96;
 
 function gridFor(width: number, height: number, zoom: number): PatchGrid {
   const spacing = Math.min(24, Math.max(6, zoom * 4));
@@ -356,7 +356,7 @@ class Card {
       return undefined;
     }
     const n: Vec3 = [near.out[0], near.out[1], near.out[2]];
-    const spacing = SPACING;
+    const spacing = SPACING_UM / this.request.lasagna.micron;
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
@@ -365,7 +365,7 @@ class Card {
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains);
+    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains, this.request.lasagna.micron);
     const fitted = performance.now() - started - read;
     if (patch === undefined) return undefined;
     // The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
