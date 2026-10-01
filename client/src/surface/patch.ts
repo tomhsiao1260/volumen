@@ -231,12 +231,24 @@ const MARGIN = 1;
  * field between two places said is as near a straight line between them as makes no difference.
  */
 /*
- * How freely the space between two sheets may differ from the one the piece was walked with: nothing
- * where it is zero, and at one a sheet may be worth anything at all.  It is the weight of "a sheet is
- * as thick here as anywhere" against what a person has said, and it loses to anything said plainly —
- * what it decides is only what happens where nobody has said.
+ * How far one thing said reaches ACROSS the sheets, in sheets.
+ *
+ * The correction is a field over the piece in three directions, not two: where you are on the sheet,
+ * and which sheet you are on.  This is the length of the third.  At nothing, every wrap would be
+ * corrected on its own and a thing said about one would say nothing about its neighbour; at infinity,
+ * every wrap moves together and two chains closer than a wrap could never be told apart.  Two sheets
+ * leaves the next wrap most of what was said and the one after it half.
+ *
+ * It replaces a correction that was a straight line in the sheet number — one field for how far the
+ * whole stack slid and one for how much a sheet was worth, which is to say two numbers to describe
+ * every wrap at a place.  Two wraps fix a straight line exactly, so it looked right while there were
+ * two chains; a third and a fourth have no reason to lie on it.  Measured, laying four chains along
+ * the fit's OWN wraps and pushing them out by 0, 10, 0 and 10 voxels — a thing no straight line can
+ * say — left them 1.5, 6.3, 3.2 and 5.9 voxels off, dragged the wrap spacing from 40 voxels down to
+ * 27, and leaned the sheet up to 87° off its own normal, which a slice card draws as lassos.  The
+ * same four chains pushed out all by the same amount, which IS a straight line, came out exact.
  */
-const GAP_FREE = 0.5;
+const ACROSS_SHEETS = 2;
 /*
  * And the one thing a person may not say: that two wraps are in the same place.  `worth` crushes the
  * space between the sheets wherever it is negative, and at minus one the sheets are on top of one
@@ -251,7 +263,6 @@ const GAP_FREE = 0.5;
  * the same reason: its gap is a field too, and a field that may go negative will.
  */
 const GAP_LEAST = 2;
-const GAP_SOFT = 0.1;
 /*
  * How far apart two places a person clicked one after another may be and still be taken as a line
  * drawn between them, as a multiple of how far apart that chain's clicks usually are.
@@ -313,6 +324,20 @@ const REACH_OF_WRAP = 1;
  * half undone and the sheet crumpled by 38 voxels.
  */
 const sameplace = (grid: PatchGrid) => Math.min(grid.hu, grid.hv);
+/*
+ * The Matérn of five halves, at a distance already divided by how far it is meant to reach:
+ *
+ *     φ(r) = (1 + √5 r + 5r²/3) · e^(−√5 r)
+ *
+ * One at nothing, falling smoothly to nothing by about twice its reach.  Twice differentiable, which
+ * is why a place said comes out as a rise and not as a spike — a first-order energy, which is what a
+ * field smoothed on the grid would be, has a cusp at every point constraint, and a row of cusps is a
+ * saw.  Positive definite, so the system it makes always has one answer.
+ */
+const bump = (r: number) => {
+  const q = Math.sqrt(5) * Math.abs(r);
+  return (1 + q + (q * q) / 3) * Math.exp(-q);
+};
 
 /**
  * The wraps a piece walks out from a surface: the base into layer 0, then every node together, one
@@ -441,6 +466,16 @@ function hold(at: Float64Array, alive: Uint8Array, nu: number, nv: number) {
  * Nothing here looks for papyrus, and nothing snaps to anything.  A thing said is a statement about
  * the winding, the fit is a winding, and the two meet in the same number.
  */
+/*
+ * The correction, kept as one field over the grid per sheet anything was said about.  What the whole
+ * field says at a place on sheet w is the sum of them, each weighted by how near w is to its own
+ * sheet (`ACROSS_SHEETS`).
+ */
+interface Shift {
+  on: number[];
+  field: Float64Array[];
+}
+
 interface Said {
   // The chain it came from: two things said by one chain are one line, two by different chains are not.
   chain: string;
@@ -662,51 +697,33 @@ function saidAbout(
 function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
   const { nu, nv, hu, hv } = grid;
   const n = want.length;
-  /*
-   * Counted from the middle of the sheets anything was said about, so that a set of places all on one
-   * sheet says NOTHING about how far apart the sheets are.
-   *
-   * Counted from the piece's own sheet instead, every place said would carry an opinion about the
-   * spacing whether it meant to or not: a chain drawn along one sheet leaves "move" and "worth" free
-   * to trade against each other, the solve splits the correction between them because that is the
-   * smaller answer, and the other sheets — about which nothing was said at all — are moved for it.
-   * Measured: forty-four places along one sheet, which should have bent the piece by a voxel, bent it
-   * by ten.
-   */
-  const middle = want.reduce((sum, one) => sum + one.k, 0) / (n || 1);
-  const about = want.map((one) => one.k - middle);
   // In voxels, so that one reach means the same thing across and down a grid that is not square.
   const where = want.map((one) => [one.gj * hu, one.gi * hv]);
-  const bump = (a: number[], b: number[]) => {
-    const r = (Math.hypot(a[0] - b[0], a[1] - b[1]) * Math.sqrt(5)) / reach;
-    return (1 + r + (r * r) / 3) * Math.exp(-r);
-  };
+  const far = (a: number[], b: number[]) => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
   /*
-   * Two fields and not one, solved together: how far the whole stack of sheets moves at a place, and
-   * how much a sheet is WORTH there — one wrap's share of the way along the normal.
+   * One field, over the piece in three directions: where you are on the sheet, and WHICH sheet.
    *
-   * One is not enough, and the piece cannot be made to obey without the other.  Moving the stack
-   * moves every sheet of it by the same amount, so it can put one sheet where somebody said, but it
-   * can never bring two sheets closer together.  And that is the thing a person says most often where
-   * the papyrus is crushed: two chains eighteen voxels apart, and a relative winding between them
-   * saying they are not one sheet.  With one field that cannot be done at all — measured, the second
-   * chain stayed four tenths of a sheet from the first however hard it was asked, and the sheet
-   * crumpled by 38 voxels trying.
+   * A place said is a place on a sheet, and what it asks for is how far the winding there is out.
+   * Two places at one spot on different sheets are then simply two places, far apart in the third
+   * direction, and the field can give them different answers — which is what lets a relative winding
+   * separate two chains closer together than one wrap.  Nothing is assumed about how the correction
+   * runs from one sheet to the next except that it is smooth over ACROSS_SHEETS of them.
    *
-   * A place on sheet k, measured at w, wants the new sheet k to pass through it:
+   * The bump is the Matérn of five halves in each direction, multiplied:
    *
-   *     move + k · worth = w − k
+   *     φ(r) = (1 + √5 r + 5r²/3) · e^(−√5 r),   K = φ(d / reach) · φ(Δsheet / ACROSS_SHEETS)
    *
-   * which is one equation in the two, so two places at one spot on different sheets settle both.  The
-   * two are solved as one by giving the places a covariance of φ(1 + GAP_FREE · kᵢkⱼ): the answer is
-   * then exactly what a place said at every place said, and as little `worth` as will do it, since a
-   * sheet of even thickness is the thing to believe until somebody says otherwise.
+   * which is twice differentiable, so a place said is a smooth rise and not a spike; positive
+   * definite in each direction and so in the product, so the heights always exist and are unique; and
+   * falling away to nothing in both, so that where nobody has said anything the sheet is the
+   * prediction's own and not an extrapolation of somebody's hand.
    */
   const M: number[][] = [];
   for (let i = 0; i < n; i++) {
     const row = new Array<number>(n + 1);
-    for (let j = 0; j < n; j++) row[j] = bump(where[i], where[j]) * (1 + GAP_FREE * about[i] * about[j]);
+    for (let j = 0; j < n; j++)
+      row[j] = bump(far(where[i], where[j]) / reach) * bump((want[i].k - want[j].k) / ACROSS_SHEETS);
     // How well a click is believed, as a tolerance on the diagonal: see HAND.  It is also what makes a
     // line's worth of places — each all but repeating its neighbour — a system with a sane answer.
     row[i] += (HAND / spacing) ** 2;
@@ -729,43 +746,22 @@ function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number) {
   const height = new Float64Array(n);
   for (let c = 0; c < n; c++) height[c] = Math.abs(M[c][c]) < 1e-12 ? 0 : M[c][n] / M[c][c];
 
-  const move = new Float64Array(nu * nv);
-  const worth = new Float64Array(nu * nv);
+  /*
+   * Kept as one field over the grid per sheet anything was said about, rather than evaluated afresh
+   * at every layer of the table.  The bump is a product of one part across the sheet and one part
+   * across the sheets, so the first part can be summed once per sheet said and the second applied
+   * layer by layer — a few thousand multiplications instead of the tens of millions the same answer
+   * costs written out.
+   */
+  const on = [...new Set(want.map((one) => one.k))].sort((a, b) => a - b);
+  const slot = want.map((one) => on.indexOf(one.k));
+  const field = on.map(() => new Float64Array(nu * nv));
   for (let i = 0; i < nv; i++)
     for (let j = 0; j < nu; j++) {
-      const at = [j * hu, i * hv];
-      let a = 0, b = 0;
-      for (let k = 0; k < n; k++) {
-        const w = height[k] * bump(at, where[k]);
-        a += w;
-        b += w * about[k];
-      }
-      move[i * nu + j] = a;
-      worth[i * nu + j] = GAP_FREE * b;
+      const at = [j * hu, i * hv], node = i * nu + j;
+      for (let c = 0; c < n; c++) field[slot[c]][node] += height[c] * bump(far(at, where[c]) / reach);
     }
-  return { move, worth, middle };
-}
-
-/**
- * Stops the sheets crossing: `worth` is bent away from the value that would put one wrap on top of
- * the next, and never reaches it.
- *
- * A place's sheets are sampled `1 + worth` of a winding apart, so `worth` of minus one is two wraps in
- * one place and anything under it is the piece folded through itself.  Above the floor by a tenth of a
- * winding nothing is touched at all — which is to say everything a person is likely to say — and
- * below it the value is bent smoothly down onto the floor instead of being cut off at it, so that no
- * crease runs along the line where the rail starts to bite.
- */
-function nocross(shift: { move: Float64Array; worth: Float64Array; middle: number }, spacing: number) {
-  const floor = GAP_LEAST / spacing - 1;
-  if (floor >= 0) return shift;
-  const { worth } = shift;
-  for (let i = 0; i < worth.length; i++) {
-    const was = worth[i];
-    if (was >= floor + GAP_SOFT) continue;
-    worth[i] = floor + GAP_SOFT * Math.exp((was - floor - GAP_SOFT) / GAP_SOFT);
-  }
-  return shift;
+  return { on, field };
 }
 
 /**
@@ -836,26 +832,56 @@ export function buildPatch(
    */
   const reach = (K + MARGIN) * per;
   const walked = walk(field, X, n0, grid, reach, per, apart);
-  const table = (
-    R: number,
-    Q: { P: Float32Array; A: Float32Array },
-    shift?: { move: Float64Array; worth: Float64Array; middle: number },
-  ) => {
+  const table = (R: number, Q: { P: Float32Array; A: Float32Array }, shift?: Shift) => {
     const layers = 2 * K * per + 1;
     const P = new Float32Array(layers * count * 3).fill(NaN);
     const A = new Float32Array(layers * count);
+
+    /*
+     * Where each layer of each node's own walk is read from, once what was said has slid it.
+     *
+     * Worked out for the whole column of a node before any of it is read, because the one thing that
+     * must hold of the answer cannot be stated layer by layer: the places read have to go up as the
+     * layer does.  Where they do not, two wraps have swapped over and the piece is folded through
+     * itself — which is a thing no correction may ever buy, however plainly it was asked for.
+     */
+    const read = new Float64Array(layers * count);
+    for (let k = -K * per; k <= K * per; k++) {
+      const layer = (k + K * per) * count;
+      if (shift === undefined) {
+        for (let node = 0; node < count; node++) read[layer + node] = k;
+        continue;
+      }
+      const near = shift.on.map((sheet) => bump((k / per - sheet) / ACROSS_SHEETS));
+      for (let node = 0; node < count; node++) {
+        let c = 0;
+        for (let s = 0; s < near.length; s++) c += shift.field[s][node] * near[s];
+        read[layer + node] = k + c * per;
+      }
+    }
+    /*
+     * And the floor, in the one place it can honestly be put: two wraps may come to GAP_LEAST voxels
+     * of each other and no closer.  Held outward from the piece's own sheet so that the wrap a person
+     * is looking at does not move when a wrap three out is the one being held apart.
+     *
+     * The Vesuvius Challenge's spiral fit carries the same rail — `model_gap_expander_min_gap` — for
+     * the same reason: its gap between windings is a field too, and a field that may go negative will.
+     */
+    const least = GAP_LEAST / apart;
+    for (let node = 0; node < count; node++) {
+      for (let k = 1; k <= K * per; k++) {
+        const here = (k + K * per) * count + node, below = (k - 1 + K * per) * count + node;
+        if (read[here] - read[below] < least) read[here] = read[below] + least;
+      }
+      for (let k = -1; k >= -K * per; k--) {
+        const here = (k + K * per) * count + node, above = (k + 1 + K * per) * count + node;
+        if (read[above] - read[here] < least) read[here] = read[above] - least;
+      }
+    }
+
     for (let k = -K * per; k <= K * per; k++)
       for (let node = 0; node < count; node++) {
-        /*
-         * Where on this node's own walk the sheet it wants is, once what was said has slid it — and
-         * the slide is not the same for every sheet: `worth` is how much more or less of the way a
-         * sheet is worth here, so the sheets of a crushed place close up and those of an open one
-         * spread, which is the only way two chains closer together than a sheet can both be obeyed.
-         */
-        const at =
-          shift === undefined
-            ? k
-            : k + (shift.move[node] + (k / per - shift.middle) * shift.worth[node]) * per;
+        const at = read[(k + K * per) * count + node];
         const a = Math.floor(at), t = at - a;
         if (a + R < 0 || a + 1 + R > 2 * R) continue;
         const from = (a + R) * count + node, to = (a + 1 + R) * count + node;
@@ -892,7 +918,7 @@ export function buildPatch(
   if (want.length === 0) return plain;
   said.places = want.length;
   said.reach = apart * REACH_OF_WRAP;
-  const shift = nocross(bend(grid, want, said.reach, apart), apart);
+  const shift = bend(grid, want, said.reach, apart);
   return { ...grid, K, per, ...table(reach, walked, shift), right, down, normal: n0, said };
 }
 
