@@ -1,13 +1,35 @@
 /**
- * The scrolls of the Vesuvius Challenge, read from its open data bucket:
+ * The scrolls of the Vesuvius Challenge, read from the two places it keeps them.
  *
  *   s3://vesuvius-challenge-open-data/<sample>/volumes/<scan>.zarr/
+ *   https://dl.ash2txt.org/full-scrolls/<ScrollN>/<sample>.volpkg/volumes_zarr_…/<scan>.zarr/
  *
- * The bucket allows anonymous listing, so the page can offer what is actually there rather than a
- * list kept by hand.  Listings are cached for a while, because they are the same all day.
+ * Both, because neither holds all of it.  The bucket has the newest scans — 1.1 and 2.4 µm — and the
+ * full-scroll mirror, which is what the Challenge's own data browser reads, has the older 7.91 µm
+ * ones that are the whole of some scrolls: Scroll 5 is 7.91 µm and the bucket has no prediction for
+ * it at all.  A scan missing from one is simply not in the list, and nobody can open it.
+ *
+ * Neither allows a proper listing of the other's kind — the bucket answers S3's own listing, the
+ * mirror an HTML index — so there is a reader for each.  Listings are cached for a while, because
+ * they are the same all day, and the mirror is given a short deadline of its own so that a slow day
+ * there does not hold up the scans the bucket has.
  */
 
 const BUCKET_URL = "https://vesuvius-challenge-open-data.s3.amazonaws.com";
+const MIRROR_URL = "https://dl.ash2txt.org";
+const MIRROR_MS = 8000;
+/*
+ * Which folder of the mirror is which sample of the bucket.  Said here rather than worked out,
+ * because the two do not spell them the same: the bucket's `PHerc0332` is the mirror's
+ * `Scroll3/PHerc332.volpkg`, and `PHerc0172` is `Scroll5/PHerc172.volpkg`.
+ */
+const MIRROR_FOLDER: Record<string, string> = {
+  PHercParis4: "Scroll1",
+  PHercParis3: "Scroll2",
+  PHerc0332: "Scroll3",
+  PHerc1667: "Scroll4",
+  PHerc0172: "Scroll5",
+};
 
 const CACHE_MS = 10 * 60 * 1000;
 
@@ -87,15 +109,71 @@ export async function getScrolls(): Promise<Scroll[]> {
   return value;
 }
 
-// `20260411134726-2.400um-0.2m-78keV-masked.zarr` -> 2.4 µm, 78 keV, masked.
+/*
+ * `20260411134726-2.400um-0.2m-78keV-masked.zarr` -> 2.4 µm, 78 keV, masked, and the mirror's
+ * `54keV_7.91um_Scroll1A.zarr` just as well: it says the same things with underscores.
+ */
 function describe(path: string): Omit<ScrollVolume, "path" | "url"> {
-  const voxelSize = path.match(/-([\d.]+)um-/);
-  const energy = path.match(/-([\d.]+)keV/);
+  const voxelSize = path.match(/[-_]([\d.]+)um[-_]/);
+  // At the start of the name as well as inside it: the mirror writes `54keV_7.91um_Scroll1A.zarr`.
+  const energy = path.match(/(?:^|[-_])([\d.]+)keV/);
   return {
     voxelSize: voxelSize === null ? null : Number(voxelSize[1]),
     energy: energy === null ? null : Number(energy[1]),
     masked: path.includes("-masked"),
   };
+}
+
+// The folders directly under a path of the mirror, which answers an HTML index and not a listing.
+async function listMirror(path: string): Promise<string[]> {
+  const response = await fetch(`${MIRROR_URL}/${path}`, { signal: AbortSignal.timeout(MIRROR_MS) });
+  if (!response.ok) throw new Error(`Listing ${path} failed: ${response.status}`);
+  const html = await response.text();
+  return [...html.matchAll(/href="([^"]+)\/"/g)].map((match) => match[1]).filter((name) => name !== "..");
+}
+
+/*
+ * And what a scan of the mirror is, where its folder does not say.
+ *
+ * The standardised ones are named for what they are; the rest are named for when they were taken,
+ * and the volume package keeps a `meta.json` beside each with the voxel size written out.
+ */
+async function mirrorMeta(path: string) {
+  const response = await fetch(`${MIRROR_URL}/${path}`, { signal: AbortSignal.timeout(MIRROR_MS) });
+  if (!response.ok) return undefined;
+  const meta = (await response.json()) as { voxelsize?: number; name?: string };
+  if (typeof meta.voxelsize !== "number") return undefined;
+  const energy = (meta.name ?? "").match(/([\d.]+)\s*keV/);
+  return { voxelSize: meta.voxelsize, energy: energy === null ? null : Number(energy[1]), masked: false };
+}
+
+// The scans of one scroll the mirror has, or none at all where it is slow or has nothing.
+async function mirrorVolumes(scrollId: string): Promise<ScrollVolume[]> {
+  const folder = MIRROR_FOLDER[scrollId];
+  if (folder === undefined) return [];
+  try {
+    const pkg = (await listMirror(`full-scrolls/${folder}/`)).find((name) => name.endsWith(".volpkg"));
+    if (pkg === undefined) return [];
+    const out: ScrollVolume[] = [];
+    for (const held of ["volumes_zarr_standardized", "volumes_zarr"]) {
+      const base = `full-scrolls/${folder}/${pkg}/${held}/`;
+      const names = await listMirror(base).catch(() => []);
+      for (const name of names.filter((one) => one.endsWith(".zarr"))) {
+        const said = describe(name);
+        const known =
+          said.voxelSize !== null
+            ? said
+            : ((await mirrorMeta(
+                `full-scrolls/${folder}/${pkg}/volumes/${name.replace(/\.zarr$/, "")}/meta.json`,
+              ).catch(() => undefined)) ?? said);
+        out.push({ path: name, url: `${MIRROR_URL}/${base}${name}`, ...known });
+      }
+    }
+    return out;
+  } catch (error) {
+    console.error(`The full-scroll mirror did not answer for ${scrollId}:`, error);
+    return [];
+  }
 }
 
 export async function getVolumes(scrollId: string): Promise<ScrollVolume[]> {
@@ -107,15 +185,28 @@ export async function getVolumes(scrollId: string): Promise<ScrollVolume[]> {
     return cached.value;
   }
   const prefix = `${scrollId}/volumes/`;
-  const paths = (await listFolders(prefix)).filter((path) =>
-    path.endsWith(".zarr"),
-  );
+  const [paths, mirrored] = await Promise.all([
+    listFolders(prefix).then((all) => all.filter((path) => path.endsWith(".zarr"))),
+    mirrorVolumes(scrollId),
+  ]);
   const value = paths
     .map((path): ScrollVolume => ({
       path,
       url: `${BUCKET_URL}/${prefix}${path}`,
       ...describe(path),
     }))
+    /*
+     * And the mirror's, less any scan the bucket already has.  The two name the same scan differently
+     * — `20241024131838.zarr` there against `20241024131838-7.910um-53keV-masked.zarr` here — so they
+     * are told apart by the timestamp they both start with, and the bucket's is the one kept: it is
+     * the masked copy, which is a fraction of the size for the same papyrus.
+     */
+    .concat(
+      mirrored.filter((one) => {
+        const when = one.path.match(/^(\d{14})\b/);
+        return when === null || !paths.some((path) => path.startsWith(when[1]));
+      }),
+    )
     // The finest scan first: it is the one most people want.
     .sort((a, b) => (a.voxelSize ?? 1e9) - (b.voxelSize ?? 1e9));
   volumes.set(scrollId, { at: Date.now(), value });

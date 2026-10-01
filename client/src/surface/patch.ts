@@ -21,7 +21,7 @@
  */
 
 
-import type { LasagnaField, Vec3 } from "./field";
+import type { NormalField, Vec3 } from "./field";
 import type { ChainSaid } from "./types";
 // Positions and directions are full-resolution voxels in (z, y, x) order.
 const add = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
@@ -35,7 +35,7 @@ const cross = (a: Vec3, b: Vec3): Vec3 => [
   a[1] * b[0] - a[0] * b[1],
 ];
 
-function normalAt(field: LasagnaField, p: Vec3, ref: Vec3): Vec3 | null {
+function normalAt(field: NormalField, p: Vec3, ref: Vec3): Vec3 | null {
   if (!field.normal(p[0], p[1], p[2], ref[0], ref[1], ref[2])) return null;
   return [field.out[0], field.out[1], field.out[2]];
 }
@@ -112,7 +112,7 @@ export interface Patch extends PatchGrid {
  * field's normals in the least-squares sense (SOR), resampling the normals where the surface moved
  * to a few times over.
  */
-function baseSurface(field: LasagnaField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
+function baseSurface(field: NormalField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
   const { nu, nv, hu, hv } = grid;
   const { right, down } = frame(n0);
   const ci = (nv - 1) / 2, cj = (nu - 1) / 2;
@@ -293,7 +293,7 @@ const bump = (r: number) => {
  * is what lets them drift apart (`HOLD`).
  */
 function walk(
-  field: LasagnaField,
+  field: NormalField,
   X: Float64Array,
   n0: Vec3,
   grid: PatchGrid,
@@ -778,7 +778,7 @@ function bend(grid: PatchGrid, want: Said[], reach: number, spacing: number, mic
  * scale for the whole piece.  With nothing said, the fallback is a guess and is meant to look like
  * one.
  */
-function spacingSaid(field: LasagnaField, chains: ChainSaid[], n0: Vec3, fallback: number) {
+function spacingSaid(field: NormalField, chains: ChainSaid[], n0: Vec3, fallback: number) {
   const gaps: number[] = [];
   for (const chain of chains) {
     if (chain.kind !== "step") continue;
@@ -797,7 +797,7 @@ function spacingSaid(field: LasagnaField, chains: ChainSaid[], n0: Vec3, fallbac
 }
 
 export function buildPatch(
-  field: LasagnaField,
+  field: NormalField,
   seed: Vec3,
   towards: Vec3,
   grid: PatchGrid,

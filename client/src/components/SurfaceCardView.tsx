@@ -13,7 +13,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getLasagna } from "../api/lasagna";
 import type { Source } from "../api/sources";
-import { sourceLabel } from "../api/sources";
+import { sourceLabel, sourceMicron } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
@@ -94,6 +94,9 @@ const MESSAGES: Partial<Record<Status, string>> = {
   "no-prediction": "This scan has no surface prediction.",
   "no-source": "The scan this card showed is no longer known to the server.",
   "no-sheet": "No sheet was found here.",
+  "too-coarse":
+    "This scan's voxels are too big to see the sheets — a whole winding of papyrus is only a voxel or" +
+    " two across. Open a finer scan of the same scroll.",
   unknown: "Could not ask the server for the surface prediction.",
   failed: "Failed to find the sheet. See the browser console.",
 };
@@ -323,16 +326,31 @@ export function SurfaceCardView({
     getLasagna(sourceId).then(
       (lasagna) => {
         if (!current) return;
-        if (lasagna === null) {
+        /*
+         * How big a voxel is, which the fit needs whether or not there is a prediction: every length
+         * it uses is in µm or in sheets, so that it means the same thing on a 1.1 µm scan and on a
+         * 9.4 µm one.  The prediction says it where there is one; otherwise the scan's own name does.
+         */
+        const micron = lasagna?.micron ?? (source === undefined ? null : sourceMicron(source));
+        if (micron === null) {
           setStatus("no-prediction");
           return;
         }
+        /*
+         * And where the direction across the sheets comes from: the prediction where there is one,
+         * worked out of the scan where there is not — which is most scans, so this is what lets a
+         * card be opened on them at all.  `?normals=scan` asks for the scan even where there is a
+         * prediction, which is how the two are held against each other.
+         */
+        const asked = new URLSearchParams(window.location.search).get("normals");
         engine.open(
           {
             id,
             scanSourceId: sourceId,
+            micron,
             chains,
             lasagna,
+            normals: lasagna === null || asked === "scan" ? "scan" : "prediction",
             seed,
             w: wanted.current,
             plane,

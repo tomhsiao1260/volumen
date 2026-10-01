@@ -71,12 +71,16 @@ export function round(micrometres: number) {
   return String(Number(micrometres.toFixed(micrometres >= 10 ? 1 : 2)));
 }
 
-// `2.4 µm · 78 keV · masked`, from what the folder name says about a scan.
-export function describeVolume({ voxelSize, energy, masked }: ScrollVolume) {
+/*
+ * `2.4 µm · 78 keV`, from what the folder name says about a scan.
+ *
+ * Not whether the air around the scroll has been masked away, which nearly every scan has and which
+ * changes nothing about what is in it.
+ */
+export function describeVolume({ voxelSize, energy }: ScrollVolume) {
   const parts = [];
   if (voxelSize !== null) parts.push(`${round(voxelSize)} µm`);
   if (energy !== null) parts.push(`${energy} keV`);
-  if (masked) parts.push("masked");
   return parts.join(" · ");
 }
 

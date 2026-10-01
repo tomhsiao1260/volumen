@@ -10,7 +10,7 @@
  */
 
 import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
-import { chunksFor, LasagnaField } from "./field";
+import { chunksFor, LasagnaField, normalLevel, ScanField, scanChunksFor } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
@@ -44,7 +44,7 @@ const dataUrl = (sourceId: string) => `${SERVER_DATA_ENDPOINT}/api/data/${source
  * has copied them out — which leaves cards saying there is no sheet where there plainly is one.
  */
 type Piece = { patch: Patch; spacing: number; read: number; fitted: number };
-const pieces = new Map<string, Promise<Piece | undefined>>();
+const pieces = new Map<string, Promise<Piece | "too-coarse" | undefined>>();
 const PIECES_KEPT = 6;
 let building: Promise<unknown> = Promise.resolve();
 
@@ -125,6 +125,22 @@ const RESTING_MS = 110;
  */
 // Voxels either side of the seed read before the rest, to find the normal and the sheet spacing.
 const NEAR = 96;
+/*
+ * The least a sheet may be worth, in voxels, for there to be anything to flatten.
+ *
+ * A scan that cannot show the sheets cannot be flattened, however good the fit is: the 45.5 µm
+ * overviews of Scroll 1 put a whole winding inside two voxels, so the grid a piece is laid out on —
+ * six voxels to a cell — is three windings wide.  Said plainly rather than attempted, because what
+ * attempting it looks like is a box of prediction the size of the scroll and a browser out of memory.
+ */
+const SPACING_LEAST = 6;
+/*
+ * And how much of the scan the normal may be worked out over at once, in voxels of the level it is
+ * read at.  The structure tensor keeps six numbers a voxel, so this is about fifty megabytes; a card
+ * asking for more is read at a coarser level instead, which is always available and is the thing to
+ * give up first.
+ */
+const NORMAL_VOXELS = 2e6;
 
 /**
  * How far apart the sheets are at `p`, in voxels: measured along the normal from the prediction, and
@@ -243,19 +259,24 @@ class Card {
       this.post({ type: "status", id, status: "loading" });
       const started = performance.now();
       const scan = scanLevels(scanSourceId);
-      this.channels = {
-        grad_mag: await channelLevel(lasagna.channels.grad_mag.sourceId, lasagna.channels.grad_mag.level),
-        nx: await channelLevel(lasagna.channels.nx.sourceId, lasagna.channels.nx.level),
-        ny: await channelLevel(lasagna.channels.ny.sourceId, lasagna.channels.ny.level),
-      };
+      // The prediction's channels, where the fit is going to read them.  Nothing is downloaded for a
+      // card working the direction out of the scan, which is every card on a scan that has none.
+      this.channels =
+        lasagna === null || this.request.normals === "scan"
+          ? undefined
+          : {
+              grad_mag: await channelLevel(lasagna.channels.grad_mag.sourceId, lasagna.channels.grad_mag.level),
+              nx: await channelLevel(lasagna.channels.nx.sourceId, lasagna.channels.nx.level),
+              ny: await channelLevel(lasagna.channels.ny.sourceId, lasagna.channels.ny.level),
+            };
       const at: Vec3 = [seed.z, seed.y, seed.x];
       // Before the piece is built, not after: the fit reads the scan itself where the prediction has
       // nothing to say, and a scan it does not have yet is a fit that never asks.
       this.scan = await scan;
-      const built = await this.build(at, outward(lasagna.umbilicus, at));
+      const built = await this.build(at, outward(lasagna?.umbilicus ?? null, at));
       if (this.closed) return;
-      if (built === undefined) {
-        this.post({ type: "status", id, status: "no-sheet" });
+      if (built === undefined || built === "too-coarse") {
+        this.post({ type: "status", id, status: built ?? "no-sheet" });
         return;
       }
       this.patch = built.patch;
@@ -285,7 +306,7 @@ class Card {
    * Reads the prediction around `seed` and builds the piece of sheet there, w growing along the
    * normal that agrees with `towards` — away from the scroll's axis, or the way the last piece went.
    */
-  private async build(seed: Vec3, towards: Vec3 | undefined) {
+  private async build(seed: Vec3, towards: Vec3 | undefined): Promise<Piece | "too-coarse" | undefined> {
     const { width, height, zoom, density } = this.request;
     // What the card covers does not change with how many pixels it is drawn with.
     const across = width / density, down = height / density;
@@ -318,20 +339,19 @@ class Card {
     const made = await shared;
     // Somewhere with no sheet is not worth remembering: the reading is what costs, and a card
     // asking again later — at another zoom, after another card moved — should get a fresh answer.
-    if (made === undefined) {
+    if (made === undefined || made === "too-coarse") {
       if (pieces.get(key) === shared) pieces.delete(key);
-      return undefined;
+      return made;
     }
     // Only the card that started it did the work; the others were handed the answer.
     return fresh ? made : { ...made, read: 0, fitted: 0 };
   }
 
   // Reads what the piece needs and fits it; `build` is what says whether it has to be done at all.
-  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid): Promise<Piece | undefined> {
+  private async make(seed: Vec3, towards: Vec3 | undefined, grid: PatchGrid): Promise<Piece | "too-coarse" | undefined> {
     const { zoom, density, width, height } = this.request;
     const across = width / density, down = height / density;
-    const channels = this.channels!;
-    const lasagna = this.request.lasagna;
+    const micron = this.request.micron;
     const started = performance.now();
     /*
      * Only the normal field is read: `nx`, `ny` for the direction and `grad_mag` for how much of a
@@ -339,8 +359,22 @@ class Card {
      * measured on Scroll 1 neither says where a sheet is well enough to be worth the bytes, and the
      * fit no longer asks either of them (`patch.ts`).
      */
-    const all = [channels.grad_mag, channels.nx, channels.ny];
+    const channels = this.channels;
+    /*
+     * Or the scan itself, which is where this is going: of the twenty-three scans in the app, five
+     * have a Lasagna prediction and every one of them is a 2.4 µm scan, so a card cannot be opened on
+     * any of the others at all.  `?normals=scan` works the direction out of the scan instead
+     * (`ScanField`), which is the only way the same piece of papyrus can be read at 1.1 µm and at
+     * 9.4 µm.  Here while the two are held against each other on a scan that has both.
+     */
+    const scan = this.scan!;
+    let which = normalLevel(scan, micron);
     const load = async (lo: Vec3, hi: Vec3) => {
+      if (channels === undefined) {
+        await scan[which].loadAll(scanChunksFor(scan[which], lo, hi, micron));
+        return new ScanField(scan[which], lo, hi, micron);
+      }
+      const all = [channels.grad_mag, channels.nx, channels.ny];
       await Promise.all(all.map((level) => level.loadAll(chunksFor(level, lo, hi))));
       return new LasagnaField(channels, lo, hi);
     };
@@ -356,16 +390,20 @@ class Card {
       return undefined;
     }
     const n: Vec3 = [near.out[0], near.out[1], near.out[2]];
-    const spacing = SPACING_UM / this.request.lasagna.micron;
+    const spacing = SPACING_UM / micron;
+    if (spacing < SPACING_LEAST) return "too-coarse";
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
     const depth = (REACH_SHEETS + 0.5) * spacing;
     const tangent = Math.hypot(across, down) * zoom * 0.6;
     const half = n.map((c) => Math.abs(c) * depth + Math.sqrt(Math.max(0, 1 - c * c)) * tangent + 0.15 * depth + 48);
+    // A coarser level for the normal where the box is too big to hold at this one.
+    const fits = (f: number) => half.reduce((all, v) => all * ((2 * v) / f + 4), 1) <= NORMAL_VOXELS;
+    while (which + 1 < scan.length && !fits(scan[which].factor)) which++;
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains, this.request.lasagna.micron);
+    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains, micron);
     const fitted = performance.now() - started - read;
     if (patch === undefined) return undefined;
     // The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
@@ -411,7 +449,7 @@ class Card {
        * It is also no slower — a build from the plane took 870 ms against 1900 from a crumpled grid.
        */
       const next = await this.build(found.at, patch.normal);
-      if (this.closed || next === undefined) break;
+      if (this.closed || next === undefined || next === "too-coarse") break;
       this.patch = next.patch;
       this.spacing = next.spacing;
       this.baseW += found.k;

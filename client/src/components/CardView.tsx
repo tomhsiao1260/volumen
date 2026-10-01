@@ -16,7 +16,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { Point, ViewOrientation } from "viewer";
 import { getLasagna } from "../api/lasagna";
-import { sourceLabel } from "../api/sources";
+import { sourceLabel, sourceMicron } from "../api/sources";
 import type { Source } from "../api/sources";
 import type { Session } from "../board/session";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
@@ -200,7 +200,7 @@ interface CardMenu {
   x: number;
   y: number;
   point: Point;
-  surface: "asking" | "yes" | "no" | "unknown";
+  surface: "asking" | "yes" | "scan" | "no" | "unknown";
 }
 
 export function CardView({
@@ -668,8 +668,23 @@ export function CardView({
             point: pointer,
             surface: "asking",
           });
+          /*
+           * Whether a surface card can be opened here at all.
+           *
+           * With the prediction where there is one, and from the scan itself where there is not —
+           * which is most scans: of the twenty-three in the app five have a Lasagna prediction and
+           * every one of those is a 2.4 µm scan.  All the fit needs from the scan is how big a voxel
+           * is, which its own name says, so "no" is now only for a source that does not even say
+           * that.
+           */
           getLasagna(sourceId).then(
-            (lasagna) => setMenu((open) => open && { ...open, surface: lasagna === null ? "no" : "yes" }),
+            (lasagna) =>
+              setMenu((open) => {
+                if (!open) return open;
+                if (lasagna !== null) return { ...open, surface: "yes" };
+                const micron = source === undefined ? null : sourceMicron(source);
+                return { ...open, surface: micron === null ? "no" : "scan" };
+              }),
             (error) => {
               console.error("Failed to ask for the surface prediction:", error);
               setMenu((open) => open && { ...open, surface: "unknown" });
@@ -723,7 +738,7 @@ export function CardView({
           }}
         >
           <button
-            disabled={menu.surface !== "yes"}
+            disabled={menu.surface !== "yes" && menu.surface !== "scan"}
             onClick={() => {
               setMenu(undefined);
               onOpenSurface(menu.point);
@@ -735,9 +750,11 @@ export function CardView({
             <div className="card-menu-note">
               {menu.surface === "asking"
                 ? "Looking for a surface prediction…"
-                : menu.surface === "no"
-                  ? "This scan has no surface prediction."
-                  : "Could not ask the server. See the browser console."}
+                : menu.surface === "scan"
+                  ? "No surface prediction for this scan; the sheets will be found in the scan itself."
+                  : menu.surface === "no"
+                    ? "This source does not say how big a voxel is, which the flattening needs."
+                    : "Could not ask the server. See the browser console."}
             </div>
           )}
         </div>

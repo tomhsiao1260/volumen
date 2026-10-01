@@ -48,11 +48,22 @@ export interface PieceSpot {
 export interface OpenRequest {
   type: "open";
   id: string;
-  // The scan's source, and its Lasagna prediction.
+  // The scan's source, how big one of its voxels is in µm, and its Lasagna prediction where it has
+  // one — most scans have none (see `normals`).
   scanSourceId: string;
-  lasagna: Lasagna;
+  micron: number;
+  lasagna: Lasagna | null;
   // What a person has said about the sheets of this scan, which the fit is told before it guesses.
   chains: ChainSaid[];
+  /*
+   * Where the sheet normal comes from.
+   *
+   * The prediction where there is one — but of the twenty-three scans in the app only five have a
+   * Lasagna prediction, and every one of those is a 2.4 µm scan, so every 1.1 µm scan, every 7.9 to
+   * 9.4 µm one and every overview has none.  Worked out from the scan itself there is no such limit,
+   * and the page says which it wants rather than the worker guessing.
+   */
+  normals: "prediction" | "scan";
   // The voxel the card was opened on, in voxels of the full-resolution scan.
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.
@@ -113,7 +124,7 @@ export interface CloseRequest {
 
 export type SurfaceRequest = OpenRequest | ShowRequest | PointRequest | WhereRequest | CloseRequest;
 
-export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "failed";
+export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "too-coarse" | "failed";
 
 // What the card found, which is all it shows for now: nothing is drawn yet.
 export interface SurfaceFacts {
