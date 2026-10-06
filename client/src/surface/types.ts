@@ -192,6 +192,9 @@ export interface FrameEvent {
   // How many sheets either side of its own this frame shows, which the card needs to put a place in
   // it and to turn a pull into sheets (`spanFor`).
   span: number;
+  // And where each equal step across a cut falls, in sheets: the picture is spread by distance and
+  // not by winding (`acrossSheets`), so the card must use the same map to put a place in the frame.
+  spread: number[];
 }
 
 /**

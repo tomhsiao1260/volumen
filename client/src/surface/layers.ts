@@ -30,9 +30,23 @@ export interface Sheet {
 
 const sheets = new Map<string, Sheet>();
 const listeners = new Set<() => void>();
+let telling: number | undefined;
 
+/*
+ * Told at most once a frame, however many sheets arrive.
+ *
+ * Every card that draws a line redraws its whole overlay when one moves, and under a hand on a cut
+ * the worker sends a new sheet as fast as it can work one out — faster than the screen can show them.
+ * Told each time, the page spent all its time redrawing sheets nobody would ever see: measured, sixty
+ * asks a frame apart took five seconds to get through instead of one.  Coalesced, the page draws the
+ * newest sheet each frame and no more, which is all a screen can show anyway.
+ */
 function changed() {
-  for (const listener of listeners) listener();
+  if (telling !== undefined) return;
+  telling = requestAnimationFrame(() => {
+    telling = undefined;
+    for (const listener of listeners) listener();
+  });
 }
 
 export function setSheet(sheet: Sheet) {

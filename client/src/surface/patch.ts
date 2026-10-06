@@ -96,6 +96,8 @@ export interface Patch extends PatchGrid {
   down: Vec3;
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
+  // Every point of the table in a box of its own, built the first time one is looked for (`nearby`).
+  near?: Nearby;
   /*
    * How many places a person's annotations came to, once each chain's clicks were joined into a line,
    * and how far one of them reached.  Kept because they are the two numbers that say whether the fit
@@ -1072,25 +1074,100 @@ export function coverageAt(patch: Patch, w: number, gi: number, gj: number) {
  * slab, so a voxel inside it comes back a fraction of a voxel away, and one outside comes back as
  * far away as it is — which is what says the place is not on this piece at all.
  */
+/*
+ * Every point of the table dropped into a box of its own, so that the nearest one to a voxel can be
+ * found by looking in the boxes around it.
+ *
+ * Built once for a piece and kept on it.  Searched whole, the table is a quarter of a million points
+ * and a card asks about every winding annotation of the scan whenever any of them changes: a hundred
+ * and sixty points came to forty million distances and took a second and a third, which is a second
+ * and a third of dots not settling after a press.
+ */
+interface Nearby {
+  lo: Vec3;
+  side: number;
+  dims: [number, number, number];
+  // Where each box's run of points starts in `at`, and the points themselves, box by box.
+  start: Int32Array;
+  at: Int32Array;
+}
+
+function nearby(patch: Patch): Nearby {
+  const { nu, nv, K, per, P } = patch;
+  const layers = 2 * K * per + 1;
+  const n = layers * nu * nv;
+  const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+  let there = 0;
+  for (let k = 0; k < n; k++) {
+    if (Number.isNaN(P[k * 3])) continue;
+    there++;
+    for (let c = 0; c < 3; c++) {
+      lo[c] = Math.min(lo[c], P[k * 3 + c]);
+      hi[c] = Math.max(hi[c], P[k * 3 + c]);
+    }
+  }
+  if (there === 0) return { lo: [0, 0, 0], side: 1, dims: [1, 1, 1], start: new Int32Array(2), at: new Int32Array(0) };
+  // A box big enough to hold a few points, so that a search looks at a few and not at thousands.
+  const room = Math.max(1, (hi[0] - lo[0] + 1) * (hi[1] - lo[1] + 1) * (hi[2] - lo[2] + 1));
+  const side = Math.max(2, Math.cbrt((4 * room) / there));
+  const dims = [0, 1, 2].map((c) => Math.max(1, Math.floor((hi[c] - lo[c]) / side) + 1)) as [number, number, number];
+  const boxes = dims[0] * dims[1] * dims[2];
+  const which = (k: number) => {
+    const z = Math.min(dims[0] - 1, Math.floor((P[k * 3] - lo[0]) / side));
+    const y = Math.min(dims[1] - 1, Math.floor((P[k * 3 + 1] - lo[1]) / side));
+    const x = Math.min(dims[2] - 1, Math.floor((P[k * 3 + 2] - lo[2]) / side));
+    return (z * dims[1] + y) * dims[2] + x;
+  };
+  const start = new Int32Array(boxes + 1);
+  for (let k = 0; k < n; k++) if (!Number.isNaN(P[k * 3])) start[which(k) + 1]++;
+  for (let b = 0; b < boxes; b++) start[b + 1] += start[b];
+  const filled = start.slice();
+  const held = new Int32Array(there);
+  for (let k = 0; k < n; k++) if (!Number.isNaN(P[k * 3])) held[filled[which(k)]++] = k;
+  return { lo, side, dims, start, at: held };
+}
+
 export function nearestOn(patch: Patch, at: Vec3) {
   const { nu, nv, K, per, P } = patch;
   const count = nu * nv;
-  let best = Infinity, bk = -1, bi = 0, bj = 0;
-  for (let k = 0; k <= 2 * K * per; k++)
-    for (let i = 0; i < nv; i++)
-      for (let j = 0; j < nu; j++) {
-        const o = (k * count + i * nu + j) * 3;
-        if (Number.isNaN(P[o])) continue;
-        const dz = P[o] - at[0], dy = P[o + 1] - at[1], dx = P[o + 2] - at[2];
-        const away = dz * dz + dy * dy + dx * dx;
-        if (away < best) {
-          best = away;
-          bk = k;
-          bi = i;
-          bj = j;
+  if (patch.near === undefined) patch.near = nearby(patch);
+  const box = patch.near;
+  const home = [0, 1, 2].map((c) =>
+    Math.min(box.dims[c] - 1, Math.max(0, Math.floor((at[c] - box.lo[c]) / box.side))),
+  );
+  let best = Infinity, found = -1;
+  // Boxes further and further out, and no further than the nearest point already found: a point in a
+  // ring beyond that cannot be closer than one already in hand.
+  const most = Math.max(...box.dims);
+  for (let ring = 0; ring <= most; ring++) {
+    if (found >= 0 && (ring - 1) * box.side > Math.sqrt(best)) break;
+    for (let z = home[0] - ring; z <= home[0] + ring; z++) {
+      if (z < 0 || z >= box.dims[0]) continue;
+      for (let y = home[1] - ring; y <= home[1] + ring; y++) {
+        if (y < 0 || y >= box.dims[1]) continue;
+        for (let x = home[2] - ring; x <= home[2] + ring; x++) {
+          if (x < 0 || x >= box.dims[2]) continue;
+          // Only the shell of the ring: everything inside it was looked at already.
+          const edge = Math.abs(z - home[0]) === ring || Math.abs(y - home[1]) === ring || Math.abs(x - home[2]) === ring;
+          if (!edge) continue;
+          const b = (z * box.dims[1] + y) * box.dims[2] + x;
+          for (let t = box.start[b]; t < box.start[b + 1]; t++) {
+            const k = box.at[t], o = k * 3;
+            const dz = P[o] - at[0], dy = P[o + 1] - at[1], dx = P[o + 2] - at[2];
+            const away = dz * dz + dy * dy + dx * dx;
+            if (away < best) {
+              best = away;
+              found = k;
+            }
+          }
         }
       }
-  if (bk < 0) return undefined;
+    }
+  }
+  if (found < 0) return undefined;
+  const bk = Math.floor(found / count);
+  const bi = Math.floor((found - bk * count) / nu);
+  const bj = found - bk * count - bi * nu;
   const out = new Float64Array(3);
   const measure = (w: number, gi: number, gj: number) =>
     positionAt(patch, w, gi, gj, out)

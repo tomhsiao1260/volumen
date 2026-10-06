@@ -10,16 +10,18 @@
  * bands.  The badge changes it.
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { getLasagna } from "../api/lasagna";
 import type { Source } from "../api/sources";
 import { sourceLabel, sourceMicron } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
+import { acrossAt } from "../surface/render";
 import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 
+import type { WindChain } from "../surface/windings";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { drawDot, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
 
@@ -101,6 +103,13 @@ const MESSAGES: Partial<Record<Status, string>> = {
   failed: "Failed to find the sheet. See the browser console.",
 };
 
+// How many sheets one whole width of a cut is worth, about its middle: what a pull across it moves.
+function middleOf(spread: number[], span: number) {
+  if (spread.length < 3) return 2 * span;
+  const half = spread.length >> 1;
+  return (spread[half + 1] - spread[half - 1]) * ((spread.length - 1) / 2);
+}
+
 function describe(facts: SurfaceFacts) {
   return (
     `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
@@ -132,7 +141,7 @@ export interface SurfaceCardViewProps {
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
   // Puts a winding point down at this voxel, and takes hold of one already down.
-  onPlace: (at: Point) => void;
+  onPlace: (at: Point) => WindChain | undefined;
   // A press with a winding tool on a point already down: that place is on what is being drawn too,
   // so the chain it belongs to and the chain being drawn are one and the same winding.
   onJoin: (at: PickedPoint) => void;
@@ -184,6 +193,17 @@ export function SurfaceCardView({
    * and they fade as the card turns away from the sheet they are on.
    */
   const dots = useRef(new Map<string, PieceSpot>());
+  /*
+   * And the ones just put down, drawn where the hand was until the piece says where they are.
+   *
+   * On a slice card the voxel under the pointer is known before the press, so a point can be drawn
+   * and filed in the same breath.  Here it is not: only the worker knows which voxel a place of this
+   * piece is, so the press has to ask and the answer comes back a frame or two later.  That wait is
+   * the worker's business, not the person's — the one thing a press has to give back is that it
+   * landed, and where it landed is where their hand is.  So the dot goes down at once, and the real
+   * one is painted over it when the piece answers.
+   */
+  const justPut = useRef<{ x: number; y: number; colour: string; apart: boolean }[]>([]);
   // The winding point the pointer is on, drawn ringed to say it can be pressed.
   const [over, setOver] = useState<PickedPoint>();
   // Where each of them was drawn, in the card's own pixels: what a press looks through to find one.
@@ -214,6 +234,9 @@ export function SurfaceCardView({
    * that is not the one on screen.
    */
   const span = useRef(2);
+  // And where each equal step across a cut falls, in sheets: the cut is spread by distance, not by
+  // winding (`acrossSheets`), so a place is put in the frame with the map it was drawn with.
+  const spread = useRef<number[]>([]);
   const wantedPlane = useRef(plane);
   // Taken from the board only when the board itself moves the card — a sheet asked for by the wheel
   // is held here until the board hears about it, and a render in between must not undo it.
@@ -370,6 +393,7 @@ export function SurfaceCardView({
           (event) => {
             if (event.type === "frame") {
               span.current = event.span;
+              spread.current = event.spread;
               paint(event);
               // The sheets could not be followed as far as the wheel went.
               if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
@@ -384,14 +408,29 @@ export function SurfaceCardView({
                 if (event.token === "put") {
                   if (event.voxel !== null) {
                     const [z, y, x] = event.voxel;
-                    onPlaceRef.current({ x, y, z });
+                    const made = onPlaceRef.current({ x, y, z });
+                    /*
+                     * The card asked where this press was and has the answer in its hand, so the new
+                     * point is filed from it there and then.  Nothing is asked of the piece: it would
+                     * be answering a different question — the nearest place of the piece to a voxel,
+                     * which where a piece comes back round close to itself is a different wrap.
+                     */
+                    const point = made?.points[made.points.length - 1];
+                    if (point !== undefined && event.spot !== null) {
+                      dots.current.set(point.id, event.spot);
+                      setSpots(id, dots.current);
+                    }
                   }
-                } else if (event.spot === null) {
-                  dots.current.delete(event.token);
-                  setSpots(id, dots.current);
+                  /*
+                   * Either way the dot drawn under the hand has given way: to the point itself, or,
+                   * where the press was off the piece, to nothing.  Only a press retires one, and a
+                   * press is answered once, so the oldest is always this one.
+                   */
+                  justPut.current.shift();
                   setSpotted((count) => count + 1);
                 } else {
-                  dots.current.set(event.token, event.spot);
+                  if (event.spot === null) dots.current.delete(event.token);
+                  else dots.current.set(event.token, event.spot);
                   setSpots(id, dots.current);
                   setSpotted((count) => count + 1);
                 }
@@ -563,7 +602,10 @@ export function SurfaceCardView({
         for (const point of one.points) {
           const found = dots.current.get(point.id);
           if (found === undefined) continue;
-          const across = 0.5 + (found.w - sheet) / (2 * span.current);
+          const across =
+            spread.current.length > 1
+              ? acrossAt(spread.current, found.w)
+              : 0.5 + (found.w - sheet) / (2 * span.current);
           const at =
             wantedPlane.current === "uv"
               ? [found.fu, found.fv]
@@ -628,6 +670,9 @@ export function SurfaceCardView({
       }
       setDrawnDots(id, drawnDots.current);
     }
+    // Still waiting on the piece, so still drawn where the hand put them.
+    for (const one of justPut.current)
+      drawDot(context, one.x * density, one.y * density, density, 1, null, false, one.colour, one.apart);
     if (wantedPlane.current === "uv" || shown.current === undefined) return;
     /*
      * One line: where the card itself is in the stack, which is the middle of a cut.  Its neighbours
@@ -662,19 +707,39 @@ export function SurfaceCardView({
    * And where each winding point of this scan is on this piece.  Asked again whenever the points
    * change or the piece is rebuilt, since only the worker knows where the piece is; the answers are
    * kept by point, so one that has gone is forgotten and one the piece cannot reach is dropped.
+   *
+   * While a winding tool is in hand, only the points there is no answer for yet — which is the one
+   * just put down.  A press then costs a single lookup instead of a hundred and sixty, and the dot
+   * appears on the cuts at once; the piece itself is left alone until the tool is put down (`said` in
+   * `App.tsx`), so the rest of the answers are still good and there is nothing to ask again.
+   *
+   * With the arrow back, every point is asked about afresh: the piece has been rebuilt by then, and
+   * an answer about the piece before it is an answer about a different piece.
    */
-  useEffect(() => {
-    if (status !== "ready") return;
+  const askAbout = useCallback((onlyNew: boolean) => {
     const engine = surfaceEngine();
     const living = new Set<string>();
     for (const one of chainsOf(scan))
       for (const point of one.points) {
         living.add(point.id);
-        engine.point(id, [point.at.z, point.at.y, point.at.x], point.id);
+        if (!onlyNew || !dots.current.has(point.id)) {
+          engine.point(id, [point.at.z, point.at.y, point.at.x], point.id);
+        }
       }
     for (const was of [...dots.current.keys()]) if (!living.has(was)) dots.current.delete(was);
     setSpotted((count) => count + 1);
-  }, [id, scan, status, chainsMoved]);
+  }, [id, scan]);
+  // A new piece: every answer about the old one is about a different piece.
+  useEffect(() => {
+    if (status === "ready") {
+      justPut.current = [];
+      askAbout(false);
+    }
+  }, [status, askAbout]);
+  // And the points as they are put down.
+  useEffect(() => {
+    if (status === "ready") askAbout(tool !== "look");
+  }, [chainsMoved, tool, status, askAbout]);
 
   /*
    * Putting a winding point down on the papyrus, and pulling a sheet on a cut.  Both are a press on
@@ -714,6 +779,18 @@ export function SurfaceCardView({
         if (under !== undefined) onJoinRef.current(under);
         else {
           onPickRef.current(undefined);
+          // The dot first, where the press was, before anything is asked of anyone.
+          const context = element.getContext("2d");
+          const density = element.width / element.clientWidth;
+          const put = {
+            x: event.clientX - box.left,
+            y: event.clientY - box.top,
+            colour: toolRef.current === "same" ? SAME_DOT : STEP_DOT,
+            apart: toolRef.current === "step",
+          };
+          justPut.current.push(put);
+          if (context !== null)
+            drawDot(context, put.x * density, put.y * density, density, 1, null, false, put.colour, put.apart);
           // Asked loosely: the places most worth saying something about are the ones the fit itself
           // has given up on.
           surfaceEngine().where(
@@ -743,7 +820,13 @@ export function SurfaceCardView({
         from: down ? event.clientY : event.clientX,
         w: wanted.current,
         // Pulling one way brings the sheets on the other side into view, so w falls as the hand goes.
-        perPixel: -(2 * span.current) / across,
+        /*
+         * How much of a sheet one pixel of the pull is worth.  Taken from the middle of the map the
+         * cut was drawn with rather than from the span, since the two are no longer the same thing:
+         * the sheets are spread by distance, so a pixel at the middle is worth less of a sheet where
+         * the papyrus is thick there and more where it is thin.
+         */
+        perPixel: -(middleOf(spread.current, span.current)) / across,
       };
       let waiting = false;
       const move = (moved: PointerEvent) => {

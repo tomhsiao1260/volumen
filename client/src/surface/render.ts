@@ -10,14 +10,14 @@
  *   UW  across the sheets along u: each sheet a band, straight where the flattening is right
  *   VW  across the sheets along v
  *
- * In UW and VW, w runs in sheets rather than voxels and the sheet the card is on is in the middle,
- * so a correct piece shows its sheets as level bands however the papyrus curves.
+ * In UW and VW the sheet the card is on is in the middle, so a correct piece shows its sheets as
+ * level bands however the papyrus curves — and the way across them is spread by DISTANCE and not by
+ * winding (`acrossSheets`), so that the papyrus is drawn at one scale all the way across.
  */
 
 import type { Patch } from "./patch";
 import { coverageAt, positionAt } from "./patch";
 import type { ZarrLevel } from "./store";
-import { SPAN_LEAST } from "./types";
 
 export type SurfacePlane = "uv" | "uw" | "vw";
 
@@ -31,18 +31,128 @@ function mapping(
   patch: Patch,
   plane: SurfacePlane,
   w: number,
-  span: number,
   width: number,
   height: number,
+  // Where each equal step across the picture falls, in sheets (`acrossSheets`).
+  spread: number[],
 ) {
   const lastU = patch.nu - 1, lastV = patch.nv - 1;
   const alongU = (c: number) => ((c + 0.5) / width) * lastU;
   const alongV = (r: number) => ((r + 0.5) / height) * lastV;
-  const acrossRow = (r: number) => w + ((r + 0.5) / height - 0.5) * 2 * span;
-  const acrossColumn = (c: number) => w + ((c + 0.5) / width - 0.5) * 2 * span;
+  const sheetAt = (f: number) => {
+    if (spread.length < 2) return w;
+    const at = Math.min(spread.length - 1, Math.max(0, f * (spread.length - 1)));
+    const i = Math.min(spread.length - 2, Math.floor(at));
+    return spread[i] + (at - i) * (spread[i + 1] - spread[i]);
+  };
+  const acrossRow = (r: number) => sheetAt((r + 0.5) / height);
+  const acrossColumn = (c: number) => sheetAt((c + 0.5) / width);
   if (plane === "uw") return (r: number, c: number) => [acrossRow(r), lastV / 2, alongU(c)];
   if (plane === "vw") return (r: number, c: number) => [acrossColumn(c), alongV(r), lastU / 2];
   return (r: number, c: number) => [w, alongV(r), alongU(c)];
+}
+
+// How many steps the across-the-sheets map is held at.  Two a sheet over ten sheets is finer than the
+// table it is measured from, and the map between them is smooth.
+const ACROSS_STEPS = 64;
+
+/**
+ * The whole table walked once, down the middle of the piece: how far through the papyrus each sheet
+ * is, from one end of the table to the other.
+ *
+ * A cut gives every sheet the same width of card, and a sheet is not the same thickness everywhere:
+ * the march converges where the papyrus is concave, so measured down the middle of one real piece a
+ * half-wrap ran from 8.7 voxels to 31.3, three and a half times over.  Drawn by winding, the thin
+ * part is magnified three and a half times against the thick part — one band of the picture pulled
+ * wide and smeared while the rest is sharp, which is what this is for.
+ *
+ * Measured once down the middle of the piece rather than per pixel, so the map is the same for every
+ * row of the card: a sheet stays a straight band, and only the spacing between bands changes.
+ */
+export function acrossWalk(patch: Patch) {
+  const gi = (patch.nv - 1) / 2, gj = (patch.nu - 1) / 2;
+  const out = new Float64Array(3);
+  const sheets: number[] = [], walked: number[] = [];
+  let last: number[] | undefined;
+  let total = 0;
+  for (let k = -patch.K * ACROSS_STEPS; k <= patch.K * ACROSS_STEPS; k++) {
+    const sheet = k / ACROSS_STEPS;
+    const here = positionAt(patch, sheet, gi, gj, out) ? [out[0], out[1], out[2]] : undefined;
+    if (sheets.length > 0)
+      // Where the piece has nothing the winding's own step stands in, so the walk keeps going.
+      total +=
+        here === undefined || last === undefined
+          ? 30 / ACROSS_STEPS
+          : Math.hypot(here[0] - last[0], here[1] - last[1], here[2] - last[2]);
+    if (here !== undefined) last = here;
+    sheets.push(sheet);
+    walked.push(total);
+  }
+  return { sheets, walked };
+}
+
+/**
+ * And the map for one card: where each equal step across the cut falls, in sheets, reaching `wanted`
+ * voxels of papyrus either side of the sheet shown.
+ *
+ * A lookup in the walk and nothing else.  It used to walk the table afresh every time it was asked,
+ * which is every frame of a slide and — worse — once for every annotation point the card is asked
+ * about: a hundred points came to sixty thousand lookups into the table on every change.
+ */
+export function acrossSheets(walk: { sheets: number[]; walked: number[] }, w: number, wanted: number) {
+  const { sheets, walked } = walk;
+  const n = sheets.length;
+  if (n < 2) return [w];
+  // How far along the walk a sheet is, and the sheet at a distance along it.
+  const farOf = (sheet: number) => {
+    const at = Math.min(n - 1, Math.max(0, (sheet - sheets[0]) * ACROSS_STEPS));
+    const i = Math.min(n - 2, Math.floor(at));
+    return walked[i] + (at - i) * (walked[i + 1] - walked[i]);
+  };
+  const sheetOf = (far: number) => {
+    /*
+     * Past the ends the walk is carried on at the rate it finished at, rather than held at the last
+     * sheet.  Held, the picture would repeat that sheet down the rest of the card — a smeared band
+     * exactly where the point is to have none; carried on, those places are off the piece and draw
+     * as nothing, which says plainly that the table does not reach that far.
+     */
+    const edge = (lo: number, hi: number) => {
+      const run = walked[hi] - walked[lo];
+      return sheets[hi] + (run > 0 ? (far - walked[hi]) / run : 0) * (sheets[hi] - sheets[lo]);
+    };
+    if (far <= walked[0]) return edge(1, 0);
+    if (far >= walked[n - 1]) return edge(n - 2, n - 1);
+    let lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (walked[mid] <= far) lo = mid;
+      else hi = mid;
+    }
+    const run = walked[hi] - walked[lo];
+    return sheets[lo] + (run > 0 ? (far - walked[lo]) / run : 0) * (sheets[hi] - sheets[lo]);
+  };
+  const here = farOf(w);
+  const reach = Math.min(wanted, Math.max(here - walked[0], walked[n - 1] - here));
+  if (!(reach > 0)) return [w];
+  const even: number[] = [];
+  for (let t = 0; t <= ACROSS_STEPS; t++) even.push(sheetOf(here + ((2 * reach * t) / ACROSS_STEPS - reach)));
+  return even;
+}
+
+/**
+ * And the other way: where a sheet falls across a cut, 0 to 1.  The card needs it to put a place in
+ * the frame, and it has to be the same map the picture was drawn with.
+ */
+export function acrossAt(spread: number[], w: number) {
+  if (spread.length < 2) return 0.5;
+  if (w <= spread[0]) return 0;
+  if (w >= spread[spread.length - 1]) return 1;
+  for (let i = 0; i + 1 < spread.length; i++) {
+    if (w > spread[i + 1]) continue;
+    const run = spread[i + 1] - spread[i];
+    return (i + (run > 0 ? (w - spread[i]) / run : 0)) / (spread.length - 1);
+  }
+  return 1;
 }
 
 /**
@@ -55,19 +165,11 @@ function mapping(
  * under what the table actually holds, so that a cut never asks for a sheet that was never walked;
  * where that bites, the picture is still stretched, and the only cure for that is a deeper table.
  */
-export function spanFor(
-  patch: Patch,
-  plane: SurfacePlane,
-  // How far apart the wraps came out, in voxels.
-  spacing: number,
-  width: number,
-  height: number,
-) {
-  if (plane === "uv" || !(spacing > 0) || !(width > 0) || !(height > 0)) return patch.K;
+export function acrossWanted(patch: Patch, plane: SurfacePlane, width: number, height: number) {
+  if (plane === "uv" || !(width > 0) || !(height > 0)) return Infinity;
   // The voxels one pixel of the along-the-sheet axis is worth, and the pixels the other axis has.
   const along = plane === "uw" ? ((patch.nu - 1) * patch.hu) / width : ((patch.nv - 1) * patch.hv) / height;
-  const across = plane === "uw" ? height : width;
-  return Math.max(SPAN_LEAST, Math.min(patch.K, (across * along) / spacing / 2));
+  return ((plane === "uw" ? height : width) * along) / 2;
 }
 
 /**
@@ -81,10 +183,10 @@ export function pieceAt(
   w: number,
   fx: number,
   fy: number,
-  // The same span the frame was drawn with, or the answer is about a different picture.
-  span: number,
+  // The same map the frame was drawn with, or the answer is about another picture.
+  spread: number[],
 ) {
-  const [sheet, gi, gj] = mapping(patch, plane, w, span, 1, 1)(fy - 0.5, fx - 0.5);
+  const [sheet, gi, gj] = mapping(patch, plane, w, 1, 1, spread)(fy - 0.5, fx - 0.5);
   return { w: sheet, gi, gj };
 }
 
@@ -168,12 +270,13 @@ export function drawPlane(
   patch: Patch,
   plane: SurfacePlane,
   w: number,
-  span: number,
   width: number,
   height: number,
   levels: ZarrLevel[],
   level: number,
   out: Uint8ClampedArray,
+  // Where each equal step across the picture falls, in sheets (`acrossSheets`).
+  spread: number[],
 ) {
   /*
    * Written a whole pixel at a time.  Four writes into a clamped array — which rounds and clamps
@@ -183,7 +286,7 @@ export function drawPlane(
    */
   const words = new Uint32Array(out.buffer);
   const readers = levels.map((one) => new LevelReader(one));
-  const where = mapping(patch, plane, w, span, width, height);
+  const where = mapping(patch, plane, w, width, height, spread);
   const point = new Float64Array(3);
 
   // Where the piece is, at every STEP-th pixel across and down, whether it is there at all, and how
@@ -273,12 +376,13 @@ export function planeChunks(
   patch: Patch,
   plane: SurfacePlane,
   w: number,
-  span: number,
   width: number,
   height: number,
   level: ZarrLevel,
+  // Where each equal step across the picture falls, in sheets (`acrossSheets`).
+  spread: number[],
 ): Chunk[] {
-  const where = mapping(patch, plane, w, span, width, height);
+  const where = mapping(patch, plane, w, width, height, spread);
   const point = new Float64Array(3);
   const lattice = latticeFor(patch);
   const positions = new Float32Array(lattice * lattice * 3).fill(NaN);

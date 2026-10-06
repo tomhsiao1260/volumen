@@ -15,9 +15,9 @@ import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
 import type { SurfacePlane } from "./render";
-import { drawPlane, LevelReader, pieceAt, planeChunks, spanFor } from "./render";
+import { acrossSheets, acrossWalk, acrossWanted, drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
-import type { ChainSaid, FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./types";
+import type { ChainSaid, FrameEvent, OpenRequest, PieceSpot, SurfaceEvent, SurfaceRequest } from "./types";
 
 
 // Sheets each side of the one the card sits on, and table layers per sheet.
@@ -191,8 +191,22 @@ class Card {
   private stale = false;
   // The sheet whose line the page has, so that it is sent once rather than with every frame.
   private sent: string | undefined;
+  // How far through the papyrus each sheet of the piece is, walked once (`acrossWalk`).
+  private walked: { patch: Patch; walk: { sheets: number[]; walked: number[] } } | undefined;
   // When a sheet was last asked for, which says whether the hand has come to rest.
   private askedAt = 0;
+  /*
+   * Whether a hand is still moving, which is the whole rule for what this card may do.
+   *
+   * Asked of the clock rather than said by the page, so that nothing has to remember to say it: a
+   * sheet asked for less than a rest ago is one of a run, and a run means the sheet in hand is
+   * already old.  While that is true the card sends the line and NOTHING else — no rebuilding, no
+   * picture, no fetching — because every one of those is work for a sheet the hand has left, and the
+   * line standing still under a moving hand is the one thing a drag must never do.
+   */
+  private get moving() {
+    return performance.now() - this.askedAt < RESTING_MS;
+  }
   // How many voxels apart the sheets are here, as the piece was built with.
   private spacing = 40;
 
@@ -204,12 +218,19 @@ class Card {
   }
 
   /*
-   * How many sheets either side of its own this card's cuts show.  Worked out rather than fixed, so
-   * that a cut is drawn at the same scale both ways (`spanFor`); asked for in every place that maps
-   * between the frame and the piece, so that they cannot disagree.
+   * Where each equal step across one of this card's cuts falls, in sheets.
+   *
+   * Two things at once, and they are the same thing: how far across the sheets the cut reaches, which
+   * is however much papyrus the other axis of the card is showing (`acrossWanted`), and how that is
+   * spread, which is by distance rather than by winding (`acrossSheets`).  Asked for in every place
+   * that maps between the frame and the piece, so that they cannot disagree.
    */
-  private span(patch: Patch, plane: SurfacePlane) {
-    return spanFor(patch, plane, this.spacing, this.request.width, this.request.height);
+  private across(patch: Patch, plane: SurfacePlane, sheet: number) {
+    // The flat card has no way across the sheets to spread.
+    if (plane === "uv") return [sheet];
+    // Walked once for the piece and kept: a lookup afterwards, however often it is asked.
+    if (this.walked?.patch !== patch) this.walked = { patch, walk: acrossWalk(patch) };
+    return acrossSheets(this.walked.walk, sheet, acrossWanted(patch, plane, this.request.width, this.request.height));
   }
 
   show(w: number, plane: SurfacePlane) {
@@ -248,14 +269,28 @@ class Card {
     const { patch } = this;
     const out = new Float64Array(3);
     let voxel: [number, number, number] | null = null;
+    let on: PieceSpot | null = null;
     if (patch !== undefined) {
-      const spot = pieceAt(patch, this.plane, this.wanted - this.baseW, fx, fy, this.span(patch, this.plane));
+      const sheet = this.wanted - this.baseW;
+      const spot = pieceAt(patch, this.plane, sheet, fx, fy, this.across(patch, this.plane, sheet));
       const there = positionAt(patch, spot.w, spot.gi, spot.gj, out);
       if (there && (loose || coverageAt(patch, spot.w, spot.gi, spot.gj) >= 0.5)) {
         voxel = [out[0], out[1], out[2]];
+        /*
+         * And where on the piece that was, which the card asked about and so already knows.  Finding
+         * it again from the voxel is not the same question: the nearest place of the piece to a voxel
+         * is not always the place the voxel came from, because a piece can come back round close to
+         * itself — measured on a real one, a press on the flat card came back nearly two wraps away.
+         * Asking the card is the one answer that cannot be wrong, since the card is the sheet.
+         */
+        on = {
+          w: spot.w + this.baseW,
+          fu: spot.gj / (patch.nu - 1),
+          fv: spot.gi / (patch.nv - 1),
+        };
       }
     }
-    this.post({ type: "place", id: this.request.id, token, spot: null, voxel });
+    this.post({ type: "place", id: this.request.id, token, spot: on, voxel });
   }
 
   private fail(error: unknown) {
@@ -439,7 +474,9 @@ class Card {
    */
   private async reach(w: number) {
     let left = 4;
-    while (this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
+    // Never under a moving hand: a rebuild is the better part of a second on this thread, and this
+    // thread is the one that sends the line.
+    while (!this.moving && this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
       const patch: Patch = this.patch;
       const step = Math.max(-K, Math.min(K, Math.round(w - this.baseW)));
       // The centre of that sheet, or of the nearest one back towards this piece's own.
@@ -512,13 +549,16 @@ class Card {
          * pixel of a fine level is its own trip to memory.  A coarse level is small enough to stay
          * near the processor, and while the wheel is turning nobody is reading the papyrus.
          */
-        const span = this.span(patch, plane);
+        // Once per sheet shown, not once per frame: it is the same for the quick look and for the
+        // sharp one, and for every redraw as chunks arrive.
+        const spread = this.across(patch, plane, sheet);
+        const span = (spread[spread.length - 1] - spread[0]) / 2;
         const send = (scale = 1, at = fine, settled = false) => {
           const across = Math.max(1, Math.ceil(width / scale));
           const down = Math.max(1, Math.ceil(height / scale));
           const pixels = new Uint8ClampedArray(across * down * 4);
           const began = performance.now();
-          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, span, across, down, scan, at, pixels);
+          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, across, down, scan, at, pixels, spread);
           const drew = performance.now() - began;
           // Nothing drawn is not worth sending — unless it is the last word, and the last word has
           // to be said even when it is that there is no sheet here at all.
@@ -538,6 +578,9 @@ class Card {
             loading: !settled && (coarser > 0 || scale > 1 || at !== fine),
             drew,
             span,
+            // Counted as the card counts its sheets, not as the piece does: a `place` answer says
+            // `found.w + baseW`, and the card puts a place in the frame by looking it up in this.
+            spread: spread.map((at) => at + this.baseW),
           };
           this.post(frame, [frame.pixels]);
           return coarser;
@@ -563,7 +606,16 @@ class Card {
           );
         }
         if (this.wanted !== w || this.plane !== plane) continue;
-        if (sketched !== asked) {
+        /*
+         * And while the hand is moving, that line was the whole of the work.
+         *
+         * Even the quick look is fifteen milliseconds, and every one of them is for a sheet the hand
+         * has already gone past.  Drawing them is what put the line a wrap behind the hand and stood
+         * it still for a quarter of a second at a time.  Nothing is skipped for ever: the wait below
+         * wakes either when another sheet is asked for or when the hand has been still long enough,
+         * and then the picture is drawn for wherever it ended up.
+         */
+        if (!this.moving && sketched !== asked) {
           send(2, preview);
           sketched = asked;
         }
@@ -577,7 +629,7 @@ class Card {
         drawn = asked;
         if (send() > 0) {
           for (const level of preview === fine ? [fine] : [preview, fine]) {
-            const chunks = planeChunks(patch, plane, sheet, span, width, height, scan[level]);
+            const chunks = planeChunks(patch, plane, sheet, width, height, scan[level], spread);
             let arrived = false, last = performance.now();
             const loads = chunks.map((chunk) =>
               // A chunk that fails to arrive is drawn from a coarser level.
@@ -603,7 +655,7 @@ class Card {
         if (plane === "uv") {
           for (const next of [sheet + 0.5, sheet - 0.5]) {
             if (Math.abs(next) > K) continue;
-            for (const chunk of planeChunks(patch, plane, next, span, width, height, scan[fine])) {
+            for (const chunk of planeChunks(patch, plane, next, width, height, scan[fine], this.across(patch, plane, next))) {
               scan[fine].load(...chunk).catch(() => {});
             }
           }
