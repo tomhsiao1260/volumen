@@ -17,7 +17,7 @@
 import type { Patch } from "./patch";
 import { coverageAt, positionAt } from "./patch";
 import type { ZarrLevel } from "./store";
-import { SPAN } from "./types";
+import { SPAN_LEAST } from "./types";
 
 export type SurfacePlane = "uv" | "uw" | "vw";
 
@@ -46,12 +46,45 @@ function mapping(
 }
 
 /**
+ * How many sheets either side of its own a cut should show, so that it is drawn at the same scale
+ * both ways: a square of papyrus as a square, and the grain of it running true.
+ *
+ * One axis of a cut runs along the sheet, and how much of the scan that covers is decided — it is
+ * the piece's own width or height.  The other runs across the sheets, and nothing decides it, so it
+ * is decided here: enough wraps that a pixel of it is worth the same as a pixel of the other.  Held
+ * under what the table actually holds, so that a cut never asks for a sheet that was never walked;
+ * where that bites, the picture is still stretched, and the only cure for that is a deeper table.
+ */
+export function spanFor(
+  patch: Patch,
+  plane: SurfacePlane,
+  // How far apart the wraps came out, in voxels.
+  spacing: number,
+  width: number,
+  height: number,
+) {
+  if (plane === "uv" || !(spacing > 0) || !(width > 0) || !(height > 0)) return patch.K;
+  // The voxels one pixel of the along-the-sheet axis is worth, and the pixels the other axis has.
+  const along = plane === "uw" ? ((patch.nu - 1) * patch.hu) / width : ((patch.nv - 1) * patch.hv) / height;
+  const across = plane === "uw" ? height : width;
+  return Math.max(SPAN_LEAST, Math.min(patch.K, (across * along) / spacing / 2));
+}
+
+/**
  * Where a point of a drawn frame sits in the piece — `fx` and `fy` being 0 to 1 across and down it,
  * `w` the sheet the card is on.  It is `mapping` asked about one point instead of every pixel, for
  * turning a place pointed at on the card into a place in the scan.
  */
-export function pieceAt(patch: Patch, plane: SurfacePlane, w: number, fx: number, fy: number) {
-  const [sheet, gi, gj] = mapping(patch, plane, w, SPAN, 1, 1)(fy - 0.5, fx - 0.5);
+export function pieceAt(
+  patch: Patch,
+  plane: SurfacePlane,
+  w: number,
+  fx: number,
+  fy: number,
+  // The same span the frame was drawn with, or the answer is about a different picture.
+  span: number,
+) {
+  const [sheet, gi, gj] = mapping(patch, plane, w, span, 1, 1)(fy - 0.5, fx - 0.5);
   return { w: sheet, gi, gj };
 }
 

@@ -15,13 +15,22 @@ import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
 import type { SurfacePlane } from "./render";
-import { drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
+import { drawPlane, LevelReader, pieceAt, planeChunks, spanFor } from "./render";
 import { ZarrLevel } from "./store";
 import type { ChainSaid, FrameEvent, OpenRequest, SurfaceEvent, SurfaceRequest } from "./types";
-import { SPAN } from "./types";
+
 
 // Sheets each side of the one the card sits on, and table layers per sheet.
-const K = 3;
+/*
+ * How many sheets either side of the one fitted the table holds.
+ *
+ * Five rather than three because of the cut cards: a cut is drawn at the same scale both ways
+ * (`spanFor`), and on a card of the usual size that wants about five wraps either side.  Capped at
+ * what is here, three left the picture half again too tall and smeared with it.  It costs: measured,
+ * a piece took 723 ms to build at three and 998 ms at five, and the box of prediction read for it is
+ * half as deep again.
+ */
+const K = 5;
 const PER = 8;
 // Sheets either side of the one fitted first, and how much room to leave for them in the box.
 const REACH_SHEETS = K + 1;
@@ -194,6 +203,15 @@ class Card {
     request.height = Math.max(1, Math.round(request.height));
   }
 
+  /*
+   * How many sheets either side of its own this card's cuts show.  Worked out rather than fixed, so
+   * that a cut is drawn at the same scale both ways (`spanFor`); asked for in every place that maps
+   * between the frame and the piece, so that they cannot disagree.
+   */
+  private span(patch: Patch, plane: SurfacePlane) {
+    return spanFor(patch, plane, this.spacing, this.request.width, this.request.height);
+  }
+
   show(w: number, plane: SurfacePlane) {
     this.wanted = w;
     this.plane = plane;
@@ -231,7 +249,7 @@ class Card {
     const out = new Float64Array(3);
     let voxel: [number, number, number] | null = null;
     if (patch !== undefined) {
-      const spot = pieceAt(patch, this.plane, this.wanted - this.baseW, fx, fy);
+      const spot = pieceAt(patch, this.plane, this.wanted - this.baseW, fx, fy, this.span(patch, this.plane));
       const there = positionAt(patch, spot.w, spot.gi, spot.gj, out);
       if (there && (loose || coverageAt(patch, spot.w, spot.gi, spot.gj) >= 0.5)) {
         voxel = [out[0], out[1], out[2]];
@@ -494,12 +512,13 @@ class Card {
          * pixel of a fine level is its own trip to memory.  A coarse level is small enough to stay
          * near the processor, and while the wheel is turning nobody is reading the papyrus.
          */
+        const span = this.span(patch, plane);
         const send = (scale = 1, at = fine, settled = false) => {
           const across = Math.max(1, Math.ceil(width / scale));
           const down = Math.max(1, Math.ceil(height / scale));
           const pixels = new Uint8ClampedArray(across * down * 4);
           const began = performance.now();
-          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, SPAN, across, down, scan, at, pixels);
+          const { coarser, drawn: painted } = drawPlane(patch, plane, sheet, span, across, down, scan, at, pixels);
           const drew = performance.now() - began;
           // Nothing drawn is not worth sending — unless it is the last word, and the last word has
           // to be said even when it is that there is no sheet here at all.
@@ -518,6 +537,7 @@ class Card {
             // card that says it is still loading for ever is worse than one that shows what it has.
             loading: !settled && (coarser > 0 || scale > 1 || at !== fine),
             drew,
+            span,
           };
           this.post(frame, [frame.pixels]);
           return coarser;
@@ -557,7 +577,7 @@ class Card {
         drawn = asked;
         if (send() > 0) {
           for (const level of preview === fine ? [fine] : [preview, fine]) {
-            const chunks = planeChunks(patch, plane, sheet, SPAN, width, height, scan[level]);
+            const chunks = planeChunks(patch, plane, sheet, span, width, height, scan[level]);
             let arrived = false, last = performance.now();
             const loads = chunks.map((chunk) =>
               // A chunk that fails to arrive is drawn from a coarser level.
@@ -583,7 +603,7 @@ class Card {
         if (plane === "uv") {
           for (const next of [sheet + 0.5, sheet - 0.5]) {
             if (Math.abs(next) > K) continue;
-            for (const chunk of planeChunks(patch, plane, next, SPAN, width, height, scan[fine])) {
+            for (const chunk of planeChunks(patch, plane, next, span, width, height, scan[fine])) {
               scan[fine].load(...chunk).catch(() => {});
             }
           }

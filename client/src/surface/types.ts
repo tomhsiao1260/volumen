@@ -8,11 +8,19 @@ import type { SurfacePlane } from "./render";
 export type { SurfacePlane };
 
 /*
- * How many sheets either side of its own a cut shows.  Here rather than in the worker because the
- * card works out where a marked place falls in its frame, which is the same mapping the other way
- * round (`mapping` in `render.ts`).
+ * The most and the least a cut may show, in sheets either side of its own.
+ *
+ * How many it actually shows is worked out per card from how big it is drawn (`spanFor` in
+ * `render.ts`), so that a square of papyrus comes out square: the across-the-sheet axis of a cut is
+ * set by the card's width and the across-the-SHEETS axis by nothing at all, and a fixed number of
+ * wraps stretched over the card's height is a picture squeezed in one direction.  Measured on a real
+ * board the w axis was magnified 1.6 times against the other, and on a 7.9 µm scroll six times,
+ * which is the smear a cut card used to show.
+ *
+ * The most is what the table holds; the least keeps a cut from showing almost nothing of the stack
+ * when the card is small or the wraps are far apart.
  */
-export const SPAN = 2;
+export const SPAN_LEAST = 0.6;
 
 /*
  * A winding chain as the worker needs it: where its points are and which wrap each was counted as.
@@ -181,6 +189,9 @@ export interface FrameEvent {
   loading: boolean;
   // How long the drawing took.
   drew: number;
+  // How many sheets either side of its own this frame shows, which the card needs to put a place in
+  // it and to turn a pull into sheets (`spanFor`).
+  span: number;
 }
 
 /**

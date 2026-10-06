@@ -22,6 +22,7 @@ import type { Session } from "../board/session";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import { surfaceEngine } from "../surface/engine";
 import { crossSection, setDrawnDots, sheetsOf, watchSheets, type DrawnDot } from "../surface/layers";
+import type { WindChain } from "../surface/windings";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { SourcePicker } from "./SourcePicker";
 
@@ -180,12 +181,13 @@ export interface CardViewProps {
   // Takes this card out of its group, keeping it where it is looking.
   onUnlink: () => void;
   // Puts a winding point down at this voxel, joining the chain being drawn or starting one.
-  onPlace: (at: Point) => void;
+  // Both hand back the chain the point went on, so that it can be drawn before anything else runs.
+  onPlace: (at: Point) => WindChain | undefined;
   /*
    * A press with a winding tool on a point already down.  It says that point is part of what is being
    * drawn, so the chain it belongs to and the chain being drawn are one and the same winding.
    */
-  onJoin: (at: PickedPoint) => void;
+  onJoin: (at: PickedPoint) => WindChain | undefined;
   // Takes hold of a winding point already down, or lets go.
   onPick: (picked: PickedPoint | undefined) => void;
   // Opens a surface card on the sheet at `seed`.
@@ -534,11 +536,36 @@ export function CardView({
          * merged.  Anywhere else puts another point down.  Taking hold of a point to move or delete it
          * is the arrow tool's press, below: one gesture cannot mean both.
          */
-        if (under !== undefined) onJoinRef.current(under);
-        else {
-          onPickRef.current(undefined);
-          const at = pointerRef.current;
-          if (at !== undefined) onPlaceRef.current(at);
+        /*
+         * And the point is drawn where the press was, there and then.
+         *
+         * Everything else about it — the store, React, the redraw of every card that shows this scan
+         * — happens after, and it does not have to be waited for: the one thing a person needs back
+         * from a press is that it landed, and the place it landed is where their hand is.  The next
+         * redraw paints the same point properly, from the chain, over the top of this one.
+         */
+        const drawn =
+          under !== undefined
+            ? onJoinRef.current(under)
+            : (onPickRef.current(undefined),
+              pointerRef.current === undefined ? undefined : onPlaceRef.current(pointerRef.current));
+        if (drawn !== undefined) {
+          const canvas = lines.current;
+          const context = canvas?.getContext("2d") ?? null;
+          if (canvas !== null && context !== null) {
+            const density = canvas.width / canvas.clientWidth;
+            drawDot(
+              context,
+              ((event.clientX - box.left) / scale) * density,
+              ((event.clientY - box.top) / scale) * density,
+              density,
+              1,
+              null,
+              false,
+              chainColour(drawn),
+              drawn.kind === "step",
+            );
+          }
         }
         return;
       }

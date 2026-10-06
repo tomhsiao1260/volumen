@@ -19,7 +19,7 @@ import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
 import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
-import { SPAN } from "../surface/types";
+
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
 import { drawDot, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
 
@@ -207,6 +207,13 @@ export function SurfaceCardView({
   // The sheet and plane asked for last, which the wheel and the badge change before the state has
   // caught up, and which a frame is compared against to know whether it is the one being waited for.
   const wanted = useRef(w);
+  /*
+   * How many sheets either side of its own the cuts are showing, as the last frame was drawn with.
+   * The worker decides it from how big the card is (`spanFor`), and both the mapping of a place into
+   * the frame and the pull across the sheets have to use the same number or they describe a picture
+   * that is not the one on screen.
+   */
+  const span = useRef(2);
   const wantedPlane = useRef(plane);
   // Taken from the board only when the board itself moves the card — a sheet asked for by the wheel
   // is held here until the board hears about it, and a render in between must not undo it.
@@ -362,6 +369,7 @@ export function SurfaceCardView({
           },
           (event) => {
             if (event.type === "frame") {
+              span.current = event.span;
               paint(event);
               // The sheets could not be followed as far as the wheel went.
               if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
@@ -555,7 +563,7 @@ export function SurfaceCardView({
         for (const point of one.points) {
           const found = dots.current.get(point.id);
           if (found === undefined) continue;
-          const across = 0.5 + (found.w - sheet) / (2 * SPAN);
+          const across = 0.5 + (found.w - sheet) / (2 * span.current);
           const at =
             wantedPlane.current === "uv"
               ? [found.fu, found.fv]
@@ -735,7 +743,7 @@ export function SurfaceCardView({
         from: down ? event.clientY : event.clientX,
         w: wanted.current,
         // Pulling one way brings the sheets on the other side into view, so w falls as the hand goes.
-        perPixel: -(2 * SPAN) / across,
+        perPixel: -(2 * span.current) / across,
       };
       let waiting = false;
       const move = (moved: PointerEvent) => {

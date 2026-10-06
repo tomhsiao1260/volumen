@@ -323,7 +323,7 @@ export function App() {
     const kind = latest.current.tool === "same" ? "same" : "step";
     const source = card.sourceId === null ? undefined : latest.current.sources[card.sourceId];
     const scan = source === undefined ? "" : scanOf(source);
-    if (scan === "") return;
+    if (scan === "") return undefined;
     const drawing = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
     // A chain says one thing about one scan: a point of another kind, or on another scan, starts a
     // chain of its own rather than being appended to whatever was open.
@@ -356,6 +356,9 @@ export function App() {
         : { ...open, points: [...open.points, point] },
     );
     if (open === undefined) dispatch({ type: "adding", chainId: saved.id });
+    // Handed back so that the card can draw the point under the hand straight away, rather than when
+    // the store, React and a full redraw of every card have been round (`CardView`).
+    return saved;
   };
 
   /**
@@ -376,7 +379,7 @@ export function App() {
     const scan = source === undefined ? "" : scanOf(source);
     const touched = chain(at.chain);
     const place = touched?.points.find((point) => point.id === at.point);
-    if (touched === undefined || place === undefined || touched.scan !== scan) return;
+    if (touched === undefined || place === undefined || touched.scan !== scan) return undefined;
     const drawing = latest.current.adding === undefined ? undefined : chain(latest.current.adding);
     const open = drawing?.kind === kind && drawing.scan === scan ? drawing : undefined;
 
@@ -401,19 +404,20 @@ export function App() {
           : { ...open, points: [...open.points, point] },
       );
       if (open === undefined) dispatch({ type: "adding", chainId: saved.id });
-      return;
+      return saved;
     }
 
     // And a same winding drawn through a place does take it in: a place cannot be on two windings, so
     // the chain it belonged to and the chain being drawn are one and the same.
-    if (touched.kind !== kind) return;
+    if (touched.kind !== kind) return undefined;
     if (open === undefined) {
       dispatch({ type: "adding", chainId: touched.id });
-      return;
+      return undefined;
     }
-    if (open.id === touched.id) return;
-    setChain({ ...open, points: [...open.points, ...touched.points] });
+    if (open.id === touched.id) return undefined;
+    const merged = setChain({ ...open, points: [...open.points, ...touched.points] });
     forgetChain(touched.id);
+    return merged;
   };
 
   /**
