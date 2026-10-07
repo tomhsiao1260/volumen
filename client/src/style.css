@@ -139,6 +139,13 @@ button {
 }
 
 /* Lines drawn over a slice: where the sheets of the surface cards cut it. */
+/* Where a card drawn on the GPU puts its canvas: over the black the flat card leaves showing, and
+   under the sheet line and the winding points, which are painted on their own canvas above it. */
+.card-gpu {
+  position: absolute;
+  inset: 0;
+}
+
 .card-lines {
   position: absolute;
   inset: 0;

@@ -352,6 +352,8 @@ export const SLICEVIEW_RPC_ID = "SliceView";
 export const SLICEVIEW_RENDERLAYER_RPC_ID = "sliceview/RenderLayer";
 // Sends the render layer and its sources from a view to the view's worker counterpart.
 export const SLICEVIEW_SET_LAYER_RPC_ID = "SliceView.setLayer";
+export const SURFACE_VIEW_RPC_ID = "SurfaceView";
+export const SURFACE_VIEW_WANT_RPC_ID = "SurfaceView.want";
 
 const tempVisibleVolumetricChunkLower = new Float32Array(3);
 const tempVisibleVolumetricChunkUpper = new Float32Array(3);

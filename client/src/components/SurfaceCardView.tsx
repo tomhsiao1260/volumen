@@ -17,13 +17,15 @@ import { sourceLabel, sourceMicron } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
-import { acrossAt } from "../surface/render";
+import type { SurfaceView } from "viewer";
+import type { Session } from "../board/session";
+import { farOf, sheetOf } from "../surface/render";
 import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
 import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 
 import type { WindChain } from "../surface/windings";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
-import { drawDot, formatVoxel, SAME_DOT, shorten, STEP_DOT } from "./CardView";
+import { drawDot, formatVoxel, shorten } from "./CardView";
 
 type Status = SurfaceStatus | "no-prediction" | "no-source" | "unknown";
 
@@ -73,6 +75,12 @@ const SHEET_LINE = "rgba(130, 225, 255, 0.92)";
 const SHEET_LINE_EDGE = "rgba(0, 10, 20, 0.55)";
 // How near the pointer has to be to one to take hold of it.
 const GRAB = 7;
+// How near the line a press has to be to pull the sheets.  Wider than the line looks, because it is
+// the only handle a cut card has.
+const LINE = 16;
+// How often the worker is told where a pull has got to.  It is not what the hand is watching, so it
+// only has to be often enough that the sharp picture is of roughly the right sheet when the hand stops.
+const TELL_MS = 150;
 
 /*
  * How faint a winding point goes when the card is turned away from the wrap it is on.  Not to nothing:
@@ -104,12 +112,6 @@ const MESSAGES: Partial<Record<Status, string>> = {
 };
 
 // How many sheets one whole width of a cut is worth, about its middle: what a pull across it moves.
-function middleOf(spread: number[], span: number) {
-  if (spread.length < 3) return 2 * span;
-  const half = spread.length >> 1;
-  return (spread[half + 1] - spread[half - 1]) * ((spread.length - 1) / 2);
-}
-
 function describe(facts: SurfaceFacts) {
   return (
     `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
@@ -142,6 +144,8 @@ export interface SurfaceCardViewProps {
   dispatch: (action: BoardAction) => void;
   onUnlink: () => void;
   // Puts a winding point down at this voxel, and takes hold of one already down.
+  // The viewer, for a card that draws on the GPU; `null` until it exists.
+  session: Session | null;
   onPlace: (at: Point) => WindChain | undefined;
   // A press with a winding tool on a point already down: that place is on what is being drawn too,
   // so the chain it belongs to and the chain being drawn are one and the same winding.
@@ -166,6 +170,7 @@ export function SurfaceCardView({
   lit,
   dispatch,
   onUnlink,
+  session,
   onPlace,
   onJoin,
   onPick,
@@ -175,7 +180,7 @@ export function SurfaceCardView({
   const canvas = useRef<HTMLCanvasElement>(null);
   // The sheets drawn over a cut across them, and what is being pulled.
   const lines = useRef<HTMLCanvasElement>(null);
-  const pulling = useRef<{ from: number; w: number; perPixel: number } | undefined>(undefined);
+  const pulling = useRef<{ from: number; zoomed: number; far: number; perPixel: number } | undefined>(undefined);
   // Kept between frames: a frame is copied into it rather than a new one being made each time.
   const image = useRef<ImageData>(undefined);
   // And for the quick looks, which come smaller than the card: somewhere to put one before it is
@@ -194,17 +199,6 @@ export function SurfaceCardView({
    * and they fade as the card turns away from the sheet they are on.
    */
   const dots = useRef(new Map<string, PieceSpot>());
-  /*
-   * And the ones just put down, drawn where the hand was until the piece says where they are.
-   *
-   * On a slice card the voxel under the pointer is known before the press, so a point can be drawn
-   * and filed in the same breath.  Here it is not: only the worker knows which voxel a place of this
-   * piece is, so the press has to ask and the answer comes back a frame or two later.  That wait is
-   * the worker's business, not the person's — the one thing a press has to give back is that it
-   * landed, and where it landed is where their hand is.  So the dot goes down at once, and the real
-   * one is painted over it when the piece answers.
-   */
-  const justPut = useRef<{ x: number; y: number; colour: string; apart: boolean }[]>([]);
   // The winding point the pointer is on, drawn ringed to say it can be pressed.
   const [over, setOver] = useState<PickedPoint>();
   // Where each of them was drawn, in the card's own pixels: what a press looks through to find one.
@@ -228,16 +222,6 @@ export function SurfaceCardView({
   // The sheet and plane asked for last, which the wheel and the badge change before the state has
   // caught up, and which a frame is compared against to know whether it is the one being waited for.
   const wanted = useRef(w);
-  /*
-   * How many sheets either side of its own the cuts are showing, as the last frame was drawn with.
-   * The worker decides it from how big the card is (`spanFor`), and both the mapping of a place into
-   * the frame and the pull across the sheets have to use the same number or they describe a picture
-   * that is not the one on screen.
-   */
-  const span = useRef(2);
-  // And where each equal step across a cut falls, in sheets: the cut is spread by distance, not by
-  // winding (`acrossSheets`), so a place is put in the frame with the map it was drawn with.
-  const spread = useRef<number[]>([]);
   const wantedPlane = useRef(plane);
   // Taken from the board only when the board itself moves the card — a sheet asked for by the wheel
   // is held here until the board hears about it, and a render in between must not undo it.
@@ -260,6 +244,210 @@ export function SurfaceCardView({
   // sheet it shows does not change.
   const size = useRef({ width: card.width, height: card.height });
   const density = Math.min(MAX_DENSITY, window.devicePixelRatio || 1);
+
+  /*
+   * The whole of this cut as one picture, as the worker carved it (`flatCut`).
+   *
+   * Everything a cut card could show is in here, for every sheet: asking for another one only moves
+   * the window on it.  So a hand pulling the sheets is answered on this thread by a `drawImage` with
+   * a different source rectangle — nothing is computed, nothing crosses into the worker, and nothing
+   * reads the scan.  That is what makes a pull keep up with a hand.
+   */
+  const cut = useRef<
+    | {
+        plane: SurfacePlane;
+        picture: HTMLCanvasElement;
+        wide: number;
+        tall: number;
+        lo: number;
+        hi: number;
+        along: number;
+        walk: { sheets: number[]; walked: number[] };
+      }
+    | undefined
+  >(undefined);
+  /*
+   * Where the card is looking, as a DISTANCE through the papyrus in voxels.
+   *
+   * This is the one authority while a cut is in hand, and `w` is derived from it — not the other way
+   * round.  A hand moves in pixels and a picture is in voxels; going through windings in between is
+   * what let the two come apart, and they came apart badly: the rate was read from a field only a
+   * `FrameEvent` ever set, and a cut card is sent no frames, so it fell back to a constant and the
+   * papyrus moved at a quarter of hand speed.  In distance there is no constant to get wrong.
+   *
+   * `undefined` means "wherever `w` says", which is what any ask from outside the card leaves it as.
+   */
+  const far = useRef<number | undefined>(undefined);
+  /*
+   * Drawn on the GPU, where the march is a texture and a pixel of the card is two texture reads.
+   *
+   * `?gpu=yes` while the two paths are held against each other: everything measured so far was
+   * measured on the CPU one, and the only honest way to replace it is to draw the same sheet both
+   * ways and compare.
+   */
+  const onGpu = new URLSearchParams(window.location.search).get("gpu") !== null &&
+    new URLSearchParams(window.location.search).get("gpu") !== "no";
+  const gpuShow = Number(new URLSearchParams(window.location.search).get("show") ?? 0);
+  const gpuRef = useRef<SurfaceView | undefined>(undefined);
+  const gpuBox = useRef<HTMLDivElement>(null);
+  // The sheet the piece was based on, in the card's own windings: the card counts from where it was
+  // opened and the field counts from the piece's base.
+  const baseW = useRef(0);
+  // What the card needs of the piece to work its own window out: how much papyrus the grid covers
+  // each way, and the walk, for turning a winding into a distance through it.
+  const piece = useRef<
+    { alongU: number; alongV: number; walk: { sheets: number[]; walked: number[] } } | undefined
+  >(undefined);
+  // Both are set up once, in handlers that must still reach the ones of the render they run in.
+  const glideRef = useRef<() => void>(() => {});
+  const onCutRef = useRef<() => ReturnType<typeof onCut>>(() => undefined);
+  /*
+   * What the card shows of the cut: the distances through the papyrus at its two edges.
+   *
+   * Taken from the card's own shape — the along-the-sheet axis covers the whole piece, so a pixel of
+   * it is worth so many voxels, and across the sheets a pixel is worth the same.  That is what makes
+   * a square of papyrus square, and it does not move while a hand does.
+   */
+  const onCut = () => {
+    const have = cut.current;
+    const element = canvas.current;
+    if (have === undefined || element === null) return undefined;
+    if (wantedPlane.current === "uv" || have.plane !== wantedPlane.current) return undefined;
+    /*
+     * The card's own size, set here because nothing else does it any more: a frame used to carry the
+     * size it was drawn at, and a cut card is sent no frames.  Left at the canvas default of 300×150
+     * every length below is read off the wrong shape — which is what squashed one cut and stretched
+     * the other.
+     */
+    const density = Math.min(2, window.devicePixelRatio || 1);
+    const width = Math.max(1, Math.round(element.clientWidth * density));
+    const height = Math.max(1, Math.round(element.clientHeight * density));
+    if (element.width !== width || element.height !== height) {
+      element.width = width;
+      element.height = height;
+    }
+    const down = wantedPlane.current === "uw";
+    // Voxels of papyrus a pixel of the card is worth.  The along-the-sheet axis covers the whole
+    // piece, and across the sheets a pixel is worth the same — that is a square of papyrus drawn
+    // square, and it is the only number a pull needs.
+    const perPixel = have.along / (down ? element.width : element.height);
+    const across = perPixel * (down ? element.height : element.width);
+    const middle = far.current ?? farOf(have.walk, wanted.current);
+    if (!(across > 0) || !Number.isFinite(middle)) return undefined;
+    /*
+     * Held inside the picture.  Past its end there is nothing to show, and letting the window go
+     * there anyway is what made the card read as dead while the number in the corner kept counting.
+     */
+    const room = Math.max(have.lo, have.hi - across);
+    const start = Math.min(room, Math.max(have.lo, middle - across / 2));
+    return { have, down, across, perPixel, from: start, middle: start + across / 2 };
+  };
+
+  /*
+   * What the card is showing across the sheets, whichever way it is drawn: the walk to read windings
+   * against, the distance at its near edge, and how much of it.
+   *
+   * One answer for both paths, because the winding points are placed against it — and a dot placed
+   * against a different window from the papyrus under it is a dot in the wrong place.
+   */
+  const shownAcross = () => {
+    const have = piece.current;
+    const box = gpuBox.current;
+    if (onGpu) {
+      if (have === undefined || box === null || wantedPlane.current === "uv") return undefined;
+      const down = wantedPlane.current === "uw";
+      const along = (down ? have.alongU : have.alongV) / (down ? box.clientWidth : box.clientHeight);
+      const wide = along * (down ? box.clientHeight : box.clientWidth);
+      const middle = far.current ?? farOf(have.walk, wanted.current - baseW.current);
+      // A point's winding is counted from where the card was opened; this window is in the piece's
+      // own, so the base comes off a winding before it is looked up.
+      return { walk: have.walk, from: middle - wide / 2, wide, base: baseW.current };
+    }
+    const held = onCut();
+    if (held === undefined) return undefined;
+    return { walk: held.have.walk, from: held.from, wide: held.across, base: 0 };
+  };
+
+  // The cut, where the hand has got to.  One `drawImage`, which is the whole of what a pull costs.
+  const sliceOut = () => {
+    const at = onCut();
+    const element = canvas.current;
+    const context = element?.getContext("2d");
+    if (at === undefined || element == null || context == null) return false;
+    const { have, down, across, from } = at;
+    const run = have.hi - have.lo;
+    if (!(run > 0)) return false;
+    // Samples of the picture per voxel of papyrus, along the axis that crosses the sheets.
+    const per = ((down ? have.tall : have.wide) - 1) / run;
+    const start = (from - have.lo) * per;
+    const size = across * per;
+    context.clearRect(0, 0, element.width, element.height);
+    context.imageSmoothingEnabled = true;
+    context.imageSmoothingQuality = "low";
+    context.drawImage(
+      have.picture,
+      down ? 0 : start,
+      down ? start : 0,
+      down ? have.wide : size,
+      down ? size : have.tall,
+      0,
+      0,
+      element.width,
+      element.height,
+    );
+    /*
+     * And the card now says it is where the picture is, not where the hand asked for.  Derived from
+     * the window that was actually drawn, so the number in the corner and the papyrus can never
+     * disagree.
+     */
+    far.current = at.middle;
+    wanted.current = Math.round(sheetOf(have.walk, at.middle) * 1000) / 1000;
+    shown.current = wanted.current;
+    return true;
+  };
+
+  /*
+   * Where the card is looking, said to the GPU.
+   *
+   * Two uniforms for a cut and one for the flat card, and nothing else: no drawing here, no message
+   * to the worker, no data.  This is the whole of what a pull costs.
+   */
+  const showOnGpu = () => {
+    const view = gpuRef.current;
+    const element = gpuBox.current;
+    const have = piece.current;
+    if (view === undefined || element === null || have === undefined) return;
+    const own = wanted.current - baseW.current;
+    if (wantedPlane.current === "uv") {
+      view.show({ plane: "uv", w: own, from: 0, across: 1, show: gpuShow });
+      shown.current = wanted.current;
+      return;
+    }
+    // A pixel of the card is worth the same in both directions — that is a square of papyrus drawn
+    // square — so how much a cut shows across the sheets is read off the card's own shape.
+    const down = wantedPlane.current === "uw";
+    const along = (down ? have.alongU : have.alongV) /
+      (down ? element.clientWidth : element.clientHeight);
+    const across = along * (down ? element.clientHeight : element.clientWidth);
+    const middle = far.current ?? farOf(have.walk, own);
+    view.show({ plane: wantedPlane.current, w: own, from: middle - across / 2, across, show: gpuShow });
+    // What the card is showing, which is what the sheet line and the winding points are drawn against.
+    shown.current = wanted.current;
+  };
+
+  // The picture where the hand has got to.
+  const glide = () => {
+    if (onGpu) {
+      showOnGpu();
+      markSheets();
+      return;
+    }
+    sliceOut();
+    markSheets();
+  };
+
+  glideRef.current = glide;
+  onCutRef.current = onCut;
 
   const paint = (frame: FrameEvent) => {
     const element = canvas.current;
@@ -374,6 +562,8 @@ export function SurfaceCardView({
          * prediction, which is how the two are held against each other.
          */
         const asked = new URLSearchParams(window.location.search).get("normals");
+        // Another piece, so the cut carved for the last one is of somewhere else.
+        cut.current = undefined;
         engine.open(
           {
             id,
@@ -383,6 +573,7 @@ export function SurfaceCardView({
             lasagna,
             normals: lasagna === null || asked === "scan" ? "scan" : "prediction",
             charts: new URLSearchParams(window.location.search).get("charts") !== "no",
+            gpu: onGpu,
             seed,
             w: wanted.current,
             plane,
@@ -394,8 +585,6 @@ export function SurfaceCardView({
           },
           (event) => {
             if (event.type === "frame") {
-              span.current = event.span;
-              spread.current = event.spread;
               paint(event);
               // The sheets could not be followed as far as the wheel went.
               if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
@@ -403,6 +592,84 @@ export function SurfaceCardView({
             }
             // Where the sheet is goes straight to the slice cards, not through this one.
             if (event.type === "sheet") return;
+            if (event.type === "field") {
+              if (DEBUG) {
+                const look = new Float32Array(event.data);
+                const middle = ((event.layers >> 1) * event.nv * event.nu + ((event.nv >> 1) * event.nu) + (event.nu >> 1)) * 4;
+                console.info(
+                  `${id}: field ${event.nu}x${event.nv}x${event.layers}, baseW ${event.baseW}` +
+                    ` · middle node at (z y x) ${look[middle].toFixed(0)} ${look[middle + 1].toFixed(0)} ${look[middle + 2].toFixed(0)}` +
+                    ` a ${look[middle + 3]}`,
+                );
+              }
+              gpuRef.current?.take({
+                nu: event.nu,
+                nv: event.nv,
+                layers: event.layers,
+                per: event.per,
+                K: event.K,
+                data: new Float32Array(event.data),
+                walk: new Float32Array(event.walk),
+                lo: event.lo,
+                hi: event.hi,
+              });
+              baseW.current = event.baseW;
+              piece.current = {
+                alongU: event.alongU,
+                alongV: event.alongV,
+                walk: {
+                  sheets: Array.from(new Float32Array(event.sheets)),
+                  walked: Array.from(new Float32Array(event.walked)),
+                },
+              };
+              showOnGpu();
+              setDrawn(true);
+              return;
+            }
+            if (event.type === "want") {
+              if (DEBUG) console.info(`${id}: want ${event.wanted.map((o) => `level ${o.level}: ${new Float32Array(o.chunks).length / 3} chunks`).join(", ")}`);
+              gpuRef.current?.want(
+                event.wanted.map((one) => ({
+                  level: one.level,
+                  factor: one.factor,
+                  chunks: new Float32Array(one.chunks),
+                })),
+              );
+              return;
+            }
+            if (event.type === "cut") {
+              const picture = cut.current?.picture ?? document.createElement("canvas");
+              if (picture.width !== event.wide || picture.height !== event.tall) {
+                picture.width = event.wide;
+                picture.height = event.tall;
+              }
+              const context = picture.getContext("2d");
+              if (context === null) return;
+              context.putImageData(
+                new ImageData(new Uint8ClampedArray(event.pixels), event.wide, event.tall),
+                0,
+                0,
+              );
+              cut.current = {
+                plane: event.plane,
+                picture,
+                wide: event.wide,
+                tall: event.tall,
+                lo: event.lo,
+                hi: event.hi,
+                along: event.along,
+                walk: {
+                  sheets: Array.from(new Float32Array(event.sheets)),
+                  walked: Array.from(new Float32Array(event.walked)),
+                },
+              };
+              if (sliceOut()) {
+                markSheets();
+                setDrawn(true);
+                setLoading(event.loading);
+              }
+              return;
+            }
             if (event.type === "place") {
               // Answers about the winding points, which are asked for one at a time and told apart
               // by the token they carry.
@@ -423,12 +690,6 @@ export function SurfaceCardView({
                       setSpots(id, dots.current);
                     }
                   }
-                  /*
-                   * Either way the dot drawn under the hand has given way: to the point itself, or,
-                   * where the press was off the piece, to nothing.  Only a press retires one, and a
-                   * press is answered once, so the oldest is always this one.
-                   */
-                  justPut.current.shift();
                   setSpotted((count) => count + 1);
                 } else {
                   if (event.spot === null) dots.current.delete(event.token);
@@ -438,11 +699,8 @@ export function SurfaceCardView({
                 }
                 return;
               }
-              // The answer to "which voxel is this place of the frame", which nothing asks for any
-              // more, or to "where is this voxel on your piece".
-              if (event.voxel !== null) {
-                return;
-              } else if (event.spot !== null) {
+              // Where the group's mark falls on this piece, which is what puts the cross on it.
+              if (event.spot !== null) {
                 spot.current = event.spot;
                 setSpotted((count) => count + 1);
                 // The place is on another sheet of this piece: turn to it, as the slices move.
@@ -476,6 +734,12 @@ export function SurfaceCardView({
   }, [id, sourceId, seed, zoom, said]);
 
   useEffect(() => {
+    wanted.current = w;
+    wantedPlane.current = plane;
+    // Somebody else said where to look, so the card's own place gives way to theirs.
+    far.current = undefined;
+    // The cut the card holds already covers this sheet, so it is shown before anybody is asked.
+    glideRef.current();
     surfaceEngine().show(id, w, plane);
     waitFor();
     // `waitFor` is the same work every time and is not worth being a dependency.
@@ -498,6 +762,9 @@ export function SurfaceCardView({
   };
   const askFor = (next: number) => {
     wanted.current = next;
+    far.current = undefined;
+    // The picture goes there straight away, out of the cut the card holds; the sharp one follows.
+    glide();
     surfaceEngine().show(id, next, wantedPlane.current);
     waitFor();
     if (settling.current !== undefined) clearTimeout(settling.current);
@@ -592,7 +859,11 @@ export function SurfaceCardView({
      * fade as the card turns away from the sheet they were put on — which is the plainest answer
      * there is to "are these really the same sheet": they are the ones that stay.
      */
-    if (shown.current !== undefined) {
+    // Not while a hand is pulling: every one of these is a scan over every chain of the scan, and
+    // the hand is watching the papyrus, not the dots.  They are put back when it lets go.
+    if (shown.current !== undefined && pulling.current === undefined) {
+      // The window the picture was drawn with, asked once rather than once a dot.
+      const held = shownAcross();
       drawnDots.current = [];
       for (const one of chainsOf(scan)) {
         const colour = chainColour(one);
@@ -604,16 +875,21 @@ export function SurfaceCardView({
         for (const point of one.points) {
           const found = dots.current.get(point.id);
           if (found === undefined) continue;
-          const across =
-            spread.current.length > 1
-              ? acrossAt(spread.current, found.w)
-              : 0.5 + (found.w - sheet) / (2 * span.current);
+          /*
+           * Where that winding falls across the cut: out of the same window the picture was drawn
+           * with, so a dot cannot come apart from the papyrus under it.  On the flat card there is
+           * no across to speak of, and before the first cut arrives there is nothing drawn to pin a
+           * dot to either.
+           */
+          if (held === undefined && wantedPlane.current !== "uv") continue;
+          const sideways =
+            held === undefined ? 0.5 : (farOf(held.walk, found.w - held.base) - held.from) / held.wide;
           const at =
             wantedPlane.current === "uv"
               ? [found.fu, found.fv]
               : wantedPlane.current === "uw"
-                ? [found.fu, across]
-                : [across, found.fv];
+                ? [found.fu, sideways]
+                : [sideways, found.fv];
           if (at[0] < 0 || at[0] > 1 || at[1] < 0 || at[1] > 1) continue;
           /*
            * On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
@@ -672,9 +948,6 @@ export function SurfaceCardView({
       }
       setDrawnDots(id, drawnDots.current);
     }
-    // Still waiting on the piece, so still drawn where the hand put them.
-    for (const one of justPut.current)
-      drawDot(context, one.x * density, one.y * density, density, 1, null, false, one.colour, one.apart);
     if (wantedPlane.current === "uv" || shown.current === undefined) return;
     /*
      * One line: where the card itself is in the stack, which is the middle of a cut.  Its neighbours
@@ -733,15 +1006,30 @@ export function SurfaceCardView({
   }, [id, scan]);
   // A new piece: every answer about the old one is about a different piece.
   useEffect(() => {
-    if (status === "ready") {
-      justPut.current = [];
-      askAbout(false);
-    }
+    if (status === "ready") askAbout(false);
   }, [status, askAbout]);
   // And the points as they are put down.
   useEffect(() => {
     if (status === "ready") askAbout(tool !== "look");
   }, [chainsMoved, tool, status, askAbout]);
+
+  /*
+   * The viewer's side of a card drawn on the GPU: one surface view, for as long as the card shows
+   * this scan.  It joins the same context and the same shared canvas as every slice card, so the
+   * two kinds of card cost one GPU context between them and read the same chunk textures.
+   */
+  useEffect(() => {
+    if (!onGpu || session === null || sourceId === null || gpuBox.current === null) return;
+    const volume = session.volumes.get(sourceId);
+    const view = session.viewer.addSurfaceView(gpuBox.current, { volume });
+    gpuRef.current = view;
+    return () => {
+      gpuRef.current = undefined;
+      view.dispose();
+    };
+    // `onGpu` is read from the address and does not change while the page is open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, sourceId]);
 
   /*
    * Putting a winding point down on the papyrus, and pulling a sheet on a cut.  Both are a press on
@@ -755,10 +1043,29 @@ export function SurfaceCardView({
     if (element === null) return;
     // A cut along u stacks the sheets downwards; a cut along v lays them out to the right.
     const down = plane === "uw";
+    /*
+     * Where a press is on the card, in the card's OWN pixels.
+     *
+     * The board draws its cards at whatever it is zoomed to, so a press arrives in screen pixels and
+     * the card is laid out in its own: on a board zoomed to half, one screen pixel is two of the
+     * card's.  Everything below works in the card's, as the drawing does.
+     */
+    const spot = (event: PointerEvent) => {
+      const box = element.getBoundingClientRect();
+      const zoomed = box.width / element.clientWidth || 1;
+      return {
+        x: (event.clientX - box.left) / zoomed,
+        y: (event.clientY - box.top) / zoomed,
+        // And the same place as a fraction of the frame, which is what the piece is asked about.
+        fx: (event.clientX - box.left) / box.width,
+        fy: (event.clientY - box.top) / box.height,
+        zoomed,
+      };
+    };
     // The winding point under the pointer, in the card's own pixels.
-    const dotUnder = (x: number, y: number) => {
+    const dotUnder = (x: number, y: number, within = GRAB + 3) => {
       let found;
-      let nearest = GRAB + 3;
+      let nearest = within;
       for (const dot of drawnDots.current) {
         const away = Math.hypot(dot.x - x, dot.y - y);
         if (away < nearest) {
@@ -770,8 +1077,20 @@ export function SurfaceCardView({
     };
     const onPointerDown = (event: PointerEvent) => {
       if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
-      const box = element.getBoundingClientRect();
-      const under = dotUnder(event.clientX - box.left, event.clientY - box.top);
+      const here = spot(event);
+      /*
+       * A press on the line pulls the sheets, even where a winding point is sitting on it.
+       *
+       * The line marks the sheet the card is on, so the points on THAT sheet are drawn along it —
+       * which on an annotated card is most of its length.  Taking the point every time left the line
+       * impossible to grab: the pull simply never started, and the card read as frozen.  A press
+       * the line reads as frozen.  So near the line the line wins, and the points on every other wrap
+       * — which is nearly all of them — are picked as before.
+       */
+      const across = down ? element.clientHeight : element.clientWidth;
+      const online =
+        plane !== "uv" && toolRef.current === "look" && Math.abs((down ? here.y : here.x) - across / 2) <= LINE;
+      const under = online ? undefined : dotUnder(here.x, here.y);
       if (toolRef.current !== "look") {
         event.stopPropagation();
         event.preventDefault();
@@ -781,27 +1100,9 @@ export function SurfaceCardView({
         if (under !== undefined) onJoinRef.current(under);
         else {
           onPickRef.current(undefined);
-          // The dot first, where the press was, before anything is asked of anyone.
-          const context = element.getContext("2d");
-          const density = element.width / element.clientWidth;
-          const put = {
-            x: event.clientX - box.left,
-            y: event.clientY - box.top,
-            colour: toolRef.current === "same" ? SAME_DOT : STEP_DOT,
-            apart: toolRef.current === "step",
-          };
-          justPut.current.push(put);
-          if (context !== null)
-            drawDot(context, put.x * density, put.y * density, density, 1, null, false, put.colour, put.apart);
           // Asked loosely: the places most worth saying something about are the ones the fit itself
           // has given up on.
-          surfaceEngine().where(
-            id,
-            (event.clientX - box.left) / box.width,
-            (event.clientY - box.top) / box.height,
-            "put",
-            true,
-          );
+          surfaceEngine().where(id, here.fx, here.fy, "put", true);
         }
         return;
       }
@@ -813,36 +1114,46 @@ export function SurfaceCardView({
         return;
       }
       onPickRef.current(undefined);
-      if (plane === "uv") return;
-      const across = down ? element.clientHeight : element.clientWidth;
-      const at = down ? event.clientY - box.top : event.clientX - box.left;
-      if (Math.abs(at - across / 2) > GRAB) return;
+      if (!online) return;
+      const at = onCutRef.current();
+      if (at === undefined) return;
       event.stopPropagation();
+      /*
+       * The pull is in VOXELS, not in sheets.
+       *
+       * A pixel of the card is worth `perPixel` voxels of papyrus, in both directions, because that
+       * is what drawing a square of papyrus as a square means.  So the picture moves exactly as far
+       * as the hand, by construction — there is no rate to work out and none to get wrong.  The
+       * board's own zoom divides out, since the hand moves in screen pixels and this is the card's.
+       * Pulling one way brings the papyrus on the other side into view, hence the sign.
+       */
       pulling.current = {
         from: down ? event.clientY : event.clientX,
-        w: wanted.current,
-        // Pulling one way brings the sheets on the other side into view, so w falls as the hand goes.
-        /*
-         * How much of a sheet one pixel of the pull is worth.  Taken from the middle of the map the
-         * cut was drawn with rather than from the span, since the two are no longer the same thing:
-         * the sheets are spread by distance, so a pixel at the middle is worth less of a sheet where
-         * the papyrus is thick there and more where it is thin.
-         */
-        perPixel: -(middleOf(spread.current, span.current)) / across,
+        zoomed: here.zoomed,
+        far: at.middle,
+        perPixel: -at.perPixel * (element.width / element.clientWidth),
       };
       let waiting = false;
+      // The worker is not in this loop.  The picture comes from the flattened papyrus on this thread;
+      // the worker is only told now and then, so that it is drawing the right sheet by the time the
+      // hand lets go.
+      let told = 0;
       const move = (moved: PointerEvent) => {
         const hold = pulling.current;
         if (hold === undefined) return;
         moved.preventDefault();
         const now = down ? moved.clientY : moved.clientX;
-        const next = Math.round((hold.w + (now - hold.from) * hold.perPixel) * 1000) / 1000;
-        wanted.current = next;
+        far.current = hold.far + ((now - hold.from) / hold.zoomed) * hold.perPixel;
         if (waiting) return;
         waiting = true;
         requestAnimationFrame(() => {
           waiting = false;
-          if (pulling.current !== undefined) surfaceEngine().show(id, wanted.current, wantedPlane.current);
+          if (pulling.current === undefined) return;
+          glideRef.current();
+          if (performance.now() - told > TELL_MS) {
+            told = performance.now();
+            surfaceEngine().show(id, wanted.current, wantedPlane.current);
+          }
         });
       };
       const stop = () => {
@@ -850,6 +1161,9 @@ export function SurfaceCardView({
         window.removeEventListener("pointerup", stop, true);
         window.removeEventListener("pointercancel", stop, true);
         pulling.current = undefined;
+        glideRef.current();
+        // And the sheet the hand came to rest on, which is the one worth drawing properly.
+        surfaceEngine().show(id, wanted.current, wantedPlane.current);
         dispatch({ type: "setSurfaceLayer", id, w: wanted.current });
       };
       window.addEventListener("pointermove", move, true);
@@ -858,8 +1172,11 @@ export function SurfaceCardView({
     };
     const onPointerMove = (event: PointerEvent) => {
       if (pulling.current !== undefined) return;
-      const box = element.getBoundingClientRect();
-      const under = dotUnder(event.clientX - box.left, event.clientY - box.top);
+      const here = spot(event);
+      const across = down ? element.clientHeight : element.clientWidth;
+      const online =
+        plane !== "uv" && toolRef.current === "look" && Math.abs((down ? here.y : here.x) - across / 2) <= LINE;
+      const under = online ? undefined : dotUnder(here.x, here.y);
       setOver((was) => (was?.chain === under?.chain && was?.point === under?.point ? was : under));
       if (under !== undefined) {
         element.style.cursor = "pointer";
@@ -869,13 +1186,7 @@ export function SurfaceCardView({
         element.style.cursor = "crosshair";
         return;
       }
-      if (plane === "uv") {
-        element.style.cursor = "";
-        return;
-      }
-      const across = down ? element.clientHeight : element.clientWidth;
-      const at = down ? event.clientY - box.top : event.clientX - box.left;
-      element.style.cursor = Math.abs(at - across / 2) <= GRAB ? (down ? "ns-resize" : "ew-resize") : "";
+      element.style.cursor = online ? (down ? "ns-resize" : "ew-resize") : "";
     };
     element.addEventListener("pointerdown", onPointerDown);
     element.addEventListener("pointermove", onPointerMove);
@@ -968,6 +1279,7 @@ export function SurfaceCardView({
         }}
       >
         <canvas className="card-surface" ref={canvas} />
+        <div className="card-gpu" ref={gpuBox} />
         <canvas className="card-lines card-sheets" ref={lines} />
         {message !== undefined && (
           <div className="card-overlay">

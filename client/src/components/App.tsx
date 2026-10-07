@@ -555,6 +555,7 @@ export function App() {
                 tool={state.tool}
                 scan={source === undefined ? "" : scanOf(source)}
                 picked={state.picked}
+                session={session}
                 dispatch={dispatch}
                 onUnlink={() => unlink(card)}
                 onPlace={(at) => place(card, at)}

@@ -15,4 +15,6 @@ export type {
   Volume,
   VolumeOptions,
 } from "#src/viewer.js";
+export type { SurfaceField, SurfaceWindow } from "#src/render/surface_layer.js";
+export type { SurfaceView, SurfaceWant } from "#src/render/surface_view.js";
 export type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";

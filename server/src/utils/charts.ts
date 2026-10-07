@@ -41,7 +41,7 @@ const ID = /^[0-9a-f]{12}$/;
  * end.  The least recently used go: `meta.json` is touched whenever a chart is read, so "recently
  * used" is when it was last of use and not when it was made.
  */
-const KEPT = 24;
+const KEPT = 12;
 
 export function chartFile(id: string, key: string) {
   if (!ID.test(id)) return undefined;

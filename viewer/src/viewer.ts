@@ -33,6 +33,8 @@ import {
 import { loadZarrVolume } from "#src/datasource/zarr/frontend.js";
 import type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";
 import { DisplayContext, SliceViewPanel } from "#src/render/panel.js";
+import type { RenderLayer } from "#src/render/renderlayer.js";
+import { SurfaceView } from "#src/render/surface_view.js";
 import { ImageRenderLayer } from "#src/render/renderlayer.js";
 import {
   makeCoordinateSpace,
@@ -130,7 +132,7 @@ export class Volume extends RefCounted {
   // coordinates from the volume it is created with.
   readonly coordinateSpace = new TrackableCoordinateSpace();
   // The layer that draws the volume; `undefined` until it has loaded.
-  readonly renderLayer = new WatchableValue<ImageRenderLayer | undefined>(
+  readonly renderLayer = new WatchableValue<RenderLayer | undefined>(
     undefined,
   );
 
@@ -350,6 +352,28 @@ export class Viewer extends RefCounted {
    * of its own inside the element, which must lie inside the container.  Call `dispose()` on the
    * returned view to remove it; the element itself is left in place.
    */
+  /**
+   * A card showing a volume not in cross-section but laid flat: papyrus unrolled onto a grid worked
+   * out elsewhere.
+   *
+   * It draws with the same context and into the same shared surface as every cross-section, so the
+   * two kinds of card cost one GPU context between them and the chunks they read are the same chunks
+   * — a scan already on the GPU for a slice card is not downloaded or uploaded a second time.
+   *
+   * What it is NOT given is a navigation: a flattening has coordinates of its own, and where it is
+   * looking is said with `show`.  See `render/surface_view.ts`.
+   */
+  addSurfaceView(element: HTMLElement, { volume }: { volume: Volume }): SurfaceView {
+    const view = new SurfaceView(
+      element,
+      this.display,
+      this.chunkManager,
+      volume.renderLayer,
+    );
+    this.registerDisposer(view);
+    return view;
+  }
+
   addView(
     element: HTMLElement,
     { volume, orientation, navigation }: ViewOptions,
@@ -428,7 +452,7 @@ export class Viewer extends RefCounted {
     for (const panel of this.display.panels) {
       if (panel.visibility.value === Number.NEGATIVE_INFINITY) continue;
       panel.ensureBoundsUpdated();
-      if (!panel.sliceView.isReady()) return false;
+      if (!panel.isReady()) return false;
     }
     return true;
   }

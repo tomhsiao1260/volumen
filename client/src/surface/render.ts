@@ -15,6 +15,7 @@
  * winding (`acrossSheets`), so that the papyrus is drawn at one scale all the way across.
  */
 
+import type { Vec3 } from "./field";
 import type { Patch } from "./patch";
 import { coverageAt, positionAt } from "./patch";
 import type { ZarrLevel } from "./store";
@@ -99,43 +100,54 @@ export function acrossWalk(patch: Patch) {
  * which is every frame of a slide and — worse — once for every annotation point the card is asked
  * about: a hundred points came to sixty thousand lookups into the table on every change.
  */
-export function acrossSheets(walk: { sheets: number[]; walked: number[] }, w: number, wanted: number) {
+export type Walked = { sheets: number[]; walked: number[] };
+
+// How far through the papyrus a sheet is, in voxels, along the walk.
+export function farOf(walk: Walked, sheet: number) {
+  const { sheets, walked } = walk;
+  const n = sheets.length;
+  const at = Math.min(n - 1, Math.max(0, (sheet - sheets[0]) * ACROSS_STEPS));
+  const i = Math.min(n - 2, Math.floor(at));
+  return walked[i] + (at - i) * (walked[i + 1] - walked[i]);
+}
+
+/**
+ * And the sheet at a distance along it.
+ *
+ * Past the ends the walk is carried on at the rate it finished at, rather than held at the last
+ * sheet.  Held, the picture would repeat that sheet down the rest of the card — a smeared band
+ * exactly where the point is to have none; carried on, those places are off the piece and draw as
+ * nothing, which says plainly that the table does not reach that far.
+ */
+export function sheetOf(walk: Walked, far: number) {
+  const { sheets, walked } = walk;
+  const n = sheets.length;
+  const edge = (lo: number, hi: number) => {
+    const run = walked[hi] - walked[lo];
+    return sheets[hi] + (run > 0 ? (far - walked[hi]) / run : 0) * (sheets[hi] - sheets[lo]);
+  };
+  if (far <= walked[0]) return edge(1, 0);
+  if (far >= walked[n - 1]) return edge(n - 2, n - 1);
+  let lo = 0, hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (walked[mid] <= far) lo = mid;
+    else hi = mid;
+  }
+  const run = walked[hi] - walked[lo];
+  return sheets[lo] + (run > 0 ? (far - walked[lo]) / run : 0) * (sheets[hi] - sheets[lo]);
+}
+
+export function acrossSheets(walk: Walked, w: number, wanted: number) {
   const { sheets, walked } = walk;
   const n = sheets.length;
   if (n < 2) return [w];
-  // How far along the walk a sheet is, and the sheet at a distance along it.
-  const farOf = (sheet: number) => {
-    const at = Math.min(n - 1, Math.max(0, (sheet - sheets[0]) * ACROSS_STEPS));
-    const i = Math.min(n - 2, Math.floor(at));
-    return walked[i] + (at - i) * (walked[i + 1] - walked[i]);
-  };
-  const sheetOf = (far: number) => {
-    /*
-     * Past the ends the walk is carried on at the rate it finished at, rather than held at the last
-     * sheet.  Held, the picture would repeat that sheet down the rest of the card — a smeared band
-     * exactly where the point is to have none; carried on, those places are off the piece and draw
-     * as nothing, which says plainly that the table does not reach that far.
-     */
-    const edge = (lo: number, hi: number) => {
-      const run = walked[hi] - walked[lo];
-      return sheets[hi] + (run > 0 ? (far - walked[hi]) / run : 0) * (sheets[hi] - sheets[lo]);
-    };
-    if (far <= walked[0]) return edge(1, 0);
-    if (far >= walked[n - 1]) return edge(n - 2, n - 1);
-    let lo = 0, hi = n - 1;
-    while (hi - lo > 1) {
-      const mid = (lo + hi) >> 1;
-      if (walked[mid] <= far) lo = mid;
-      else hi = mid;
-    }
-    const run = walked[hi] - walked[lo];
-    return sheets[lo] + (run > 0 ? (far - walked[lo]) / run : 0) * (sheets[hi] - sheets[lo]);
-  };
-  const here = farOf(w);
+  const here = farOf(walk, w);
   const reach = Math.min(wanted, Math.max(here - walked[0], walked[n - 1] - here));
   if (!(reach > 0)) return [w];
   const even: number[] = [];
-  for (let t = 0; t <= ACROSS_STEPS; t++) even.push(sheetOf(here + ((2 * reach * t) / ACROSS_STEPS - reach)));
+  for (let t = 0; t <= ACROSS_STEPS; t++)
+    even.push(sheetOf(walk, here + ((2 * reach * t) / ACROSS_STEPS - reach)));
   return even;
 }
 
@@ -188,6 +200,124 @@ export function pieceAt(
 ) {
   const [sheet, gi, gj] = mapping(patch, plane, w, 1, 1, spread)(fy - 0.5, fx - 0.5);
   return { w: sheet, gi, gj };
+}
+
+/**
+ * A cut of the piece as one picture: the papyrus along the sheet by the distance through it, at a
+ * voxel a sample, for the whole of the walk.
+ *
+ * This is what a cut card shows, and the whole of what it shows.  A cut along u is drawn at the
+ * middle row of the grid and a cut along v at the middle column (`mapping`), so neither of them
+ * needs a volume — each is one picture, and asking for another sheet only moves the window on it.
+ * Three hundred and thirty-eight by four hundred and eighty is a hundred and sixty kilobytes, which
+ * is small enough to resample in a moment, hold in the page, and hand to `drawImage` as a source
+ * rectangle: a pull is then a picture being panned, which is a thing browsers already do perfectly.
+ *
+ * The distance axis is uniform in VOXELS, not in windings — the papyrus is not the same thickness
+ * everywhere, and a picture uniform in windings would be pre-stretched by exactly the amount
+ * `acrossSheets` exists to undo.
+ */
+export interface FlatCut {
+  points: Float32Array;
+  wide: number;
+  tall: number;
+  // The distance along the walk at the first and last sample of the across-the-sheets axis.
+  lo: number;
+  hi: number;
+  // How much papyrus the along-the-sheet axis covers, in voxels.
+  along: number;
+  step: number;
+}
+
+export function flatCut(patch: Patch, walk: Walked, plane: SurfacePlane, step: number): FlatCut {
+  const down = plane === "uw";
+  const along = down ? (patch.nu - 1) * patch.hu : (patch.nv - 1) * patch.hv;
+  const lo = walk.walked[0], hi = walk.walked[walk.walked.length - 1];
+  const n = Math.max(2, Math.min(4096, Math.round(along / step)));
+  const across = Math.max(2, Math.min(4096, Math.round((hi - lo) / step)));
+  const [wide, tall] = down ? [n, across] : [across, n];
+  const points = new Float32Array(wide * tall * 3).fill(NaN);
+  const out = new Float64Array(3);
+  const middle = down ? (patch.nv - 1) / 2 : (patch.nu - 1) / 2;
+  for (let k = 0; k < across; k++) {
+    const sheet = sheetOf(walk, lo + ((hi - lo) * k) / (across - 1));
+    for (let t = 0; t < n; t++) {
+      const at = ((down ? patch.nu - 1 : patch.nv - 1) * t) / (n - 1);
+      if (!positionAt(patch, sheet, down ? middle : at, down ? at : middle, out)) continue;
+      const o = (down ? k * wide + t : t * wide + k) * 3;
+      points[o] = out[0];
+      points[o + 1] = out[1];
+      points[o + 2] = out[2];
+    }
+  }
+  return { points, wide, tall, lo, hi, along, step };
+}
+
+// The chunks a cut reads, by the box each patch of it falls in.
+export function cutChunks(cut: FlatCut, level: ZarrLevel) {
+  const f = level.factor;
+  const keys = new Map<string, [number, number, number]>();
+  const lo = [0, 0, 0], hi = [0, 0, 0];
+  const BLOCK = 16;
+  for (let y = 0; y < cut.tall; y += BLOCK)
+    for (let x = 0; x < cut.wide; x += BLOCK) {
+      lo.fill(Infinity);
+      hi.fill(-Infinity);
+      let any = false;
+      for (let j = y; j < Math.min(y + BLOCK + 1, cut.tall); j++)
+        for (let i = x; i < Math.min(x + BLOCK + 1, cut.wide); i++) {
+          const o = (j * cut.wide + i) * 3;
+          if (Number.isNaN(cut.points[o])) continue;
+          any = true;
+          for (let c = 0; c < 3; c++) {
+            const at = (cut.points[o + c] + 0.5) / f - 0.5;
+            lo[c] = Math.min(lo[c], Math.floor(at));
+            hi[c] = Math.max(hi[c], Math.floor(at) + 1);
+          }
+        }
+      if (!any) continue;
+      for (const chunk of level.chunksBetween(lo, hi)) keys.set(chunk.join("/"), chunk);
+    }
+  return [...keys.values()];
+}
+
+/**
+ * The scan read along a cut, a band of rows at a time.
+ *
+ * In bands because resampling the whole of it is tens of milliseconds and the worker owes the hand
+ * an answer sooner than that; and because the rows at the far end are the ones nobody is looking at
+ * yet.  Writes straight to RGBA, so the page has nothing to do but hand it to `drawImage`.
+ */
+export function fillCut(cut: FlatCut, level: ZarrLevel, into: Uint8ClampedArray, from: number, to: number) {
+  const f = level.factor;
+  const reader = new LevelReader(level);
+  const words = new Uint32Array(into.buffer);
+  for (let y = from; y < Math.min(to, cut.tall); y++)
+    for (let x = 0; x < cut.wide; x++) {
+      const o = (y * cut.wide + x) * 3;
+      if (Number.isNaN(cut.points[o])) continue;
+      const value = reader.sample(
+        (cut.points[o] + 0.5) / f - 0.5,
+        (cut.points[o + 1] + 0.5) / f - 0.5,
+        (cut.points[o + 2] + 0.5) / f - 0.5,
+      );
+      // Little-endian ABGR: one write instead of four into a clamped array.
+      if (value >= 0) words[y * cut.wide + x] = (255 << 24) | (value << 16) | (value << 8) | value;
+    }
+}
+
+// The box of the scan a piece lies in, which is what has to be fetched before it can be resampled.
+export function patchBox(patch: Patch): [Vec3, Vec3] {
+  const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
+  const { P } = patch;
+  for (let o = 0; o < P.length; o += 3) {
+    if (Number.isNaN(P[o])) continue;
+    for (let c = 0; c < 3; c++) {
+      if (P[o + c] < lo[c]) lo[c] = P[o + c];
+      if (P[o + c] > hi[c]) hi[c] = P[o + c];
+    }
+  }
+  return [lo, hi];
 }
 
 // Reads voxels of one level, remembering the chunks it has looked up during one drawing.

@@ -3,7 +3,7 @@
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { RenderViewport } from "#src/render/base.js";
 import { SliceView } from "#src/render/frontend.js";
-import type { ImageRenderLayer } from "#src/render/renderlayer.js";
+import type { RenderLayer } from "#src/render/renderlayer.js";
 import type { NavigationState } from "#src/state/navigation_state.js";
 import type { WatchableValueInterface } from "#src/state/trackable_value.js";
 import { WatchableValue } from "#src/state/trackable_value.js";
@@ -21,9 +21,28 @@ import { initializeWebGL } from "#src/webgl/context.js";
  * ordinary elements, which may be styled, stacked and clipped like any others, and the surface only
  * has to be as large as the largest panel being drawn.
  */
+/**
+ * What the display needs of a panel: somewhere on the page, a size, whether it is worth drawing, and
+ * a way to draw itself into the shared surface.
+ *
+ * Nothing here is about cross-sections.  The surface and the blit are useful to anything that wants
+ * the GPU and a card of its own, which is why this is an interface rather than the one class.
+ */
+export interface Panel {
+  readonly element: HTMLElement;
+  readonly visibility: WatchableValueInterface<number>;
+  readonly renderViewport: { width: number; height: number };
+  ensureBoundsUpdated(): void;
+  releaseCanvas(): void;
+  draw(): void;
+  // Whether everything it is waiting for has arrived.  For tests and screenshots only; a panel that
+  // cannot say simply says yes.
+  isReady(): boolean;
+}
+
 export class DisplayContext extends RefCounted {
   gl: GL;
-  panels = new Set<SliceViewPanel>();
+  panels = new Set<Panel>();
   // Incremented when a panel is added, moved or resized; the panel bounds are then measured again.
   resizeGeneration = 0;
   // Dispatched when a frame starts drawing.
@@ -64,13 +83,13 @@ export class DisplayContext extends RefCounted {
     });
   }
 
-  addPanel(panel: SliceViewPanel) {
+  addPanel(panel: Panel) {
     this.panels.add(panel);
     this.resizeObserver.observe(panel.element);
     this.invalidateBounds();
   }
 
-  removePanel(panel: SliceViewPanel) {
+  removePanel(panel: Panel) {
     this.panels.delete(panel);
     this.resizeObserver.unobserve(panel.element);
     this.invalidateBounds();
@@ -94,7 +113,7 @@ export class DisplayContext extends RefCounted {
     if (this.lost) return;
     this.updateStarted.dispatch();
     // Every panel is measured first, so that the surface can be sized once for the largest of them.
-    const drawing: SliceViewPanel[] = [];
+    const drawing: Panel[] = [];
     let width = 0;
     let height = 0;
     for (const panel of this.panels) {
@@ -203,8 +222,12 @@ function getWheelZoomAmount(event: WheelEvent) {
  * `handleInput` lets the page take any of them over, and decide which events count as navigation at
  * all — a board where a drag moves the card can ask for a modifier to be held first.
  */
-export class SliceViewPanel extends RefCounted {
+export class SliceViewPanel extends RefCounted implements Panel {
   gl: GL = this.viewer.display.gl;
+
+  isReady() {
+    return this.sliceView.isReady();
+  }
 
   // Generation used to check whether the following bounds-related fields are up to date.
   boundsGeneration = -1;
@@ -256,7 +279,7 @@ export class SliceViewPanel extends RefCounted {
     public element: HTMLElement,
     public navigationState: NavigationState,
     // The layer that draws the volume this view shows; `undefined` until the volume has loaded.
-    renderLayer: WatchableValueInterface<ImageRenderLayer | undefined>,
+    renderLayer: WatchableValueInterface<RenderLayer | undefined>,
     public viewer: SliceViewerState,
   ) {
     super();

@@ -76,6 +76,9 @@ export interface OpenRequest {
   // `?charts=no`, which is how the fit is held against itself: the same board drawn both ways has
   // to come out the same, or a chart is not the march it claims to be.
   charts: boolean;
+  // Whether the card draws on the GPU (`?gpu=yes`).  While the two paths are held against each
+  // other both are built; the CPU one is what every number so far was measured on.
+  gpu: boolean;
   // The voxel the card was opened on, in voxels of the full-resolution scan.
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.
@@ -139,6 +142,72 @@ export type SurfaceRequest = OpenRequest | ShowRequest | PointRequest | WhereReq
 export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "too-coarse" | "failed";
 
 // What the card found, which is all it shows for now: nothing is drawn yet.
+/**
+ * A cut of the piece as one picture, sent to the card and kept there (`flatCut` in `render.ts`).
+ *
+ * This is the whole of what a cut card shows, for every sheet it could show: asking for another one
+ * only moves the window on it.  So a hand pulling the sheets is answered on the page's own thread by
+ * a `drawImage` with a different source rectangle — no worker, no scan, and no drawing at all.
+ */
+export interface CutEvent {
+  type: "cut";
+  id: string;
+  plane: SurfacePlane;
+  // RGBA, `wide` × `tall`, a voxel of the scan a sample.
+  pixels: ArrayBuffer;
+  wide: number;
+  tall: number;
+  // Whether more of it is still being filled in.
+  loading: boolean;
+  // The distance along the walk at the first and last sample across the sheets, in voxels, and how
+  // much papyrus the other axis covers.
+  lo: number;
+  hi: number;
+  along: number;
+  // The walk itself, in the card's own windings: enough to turn a winding into a distance and back.
+  sheets: ArrayBuffer;
+  walked: ArrayBuffer;
+}
+
+/**
+ * The march, packed for the GPU, and the chunks the sheet lands in.
+ *
+ * Sent once a piece is built and again when a winding is taken in — never per frame.  After this the
+ * card draws every sheet of the piece from what it holds, and the worker is out of the loop
+ * entirely: moving the window is two uniforms (`viewer`'s `SurfaceView.show`).
+ */
+export interface FieldEvent {
+  type: "field";
+  id: string;
+  nu: number;
+  nv: number;
+  layers: number;
+  per: number;
+  K: number;
+  // The sheet the piece was based on, in the card's own windings: the card counts from where it was
+  // opened and the field counts from the piece's own base, and this is the difference.
+  baseW: number;
+  data: ArrayBuffer;
+  walk: ArrayBuffer;
+  lo: number;
+  hi: number;
+  // How much papyrus the grid covers each way, in voxels: what a pixel of the card is worth, and so
+  // how much of the stack a cut shows.
+  alongU: number;
+  alongV: number;
+  // The walk the other way round — the distance at each winding — so the card can turn the sheet it
+  // is asked for into the place the window starts at, without asking anybody.
+  sheets: ArrayBuffer;
+  walked: ArrayBuffer;
+}
+
+/** Which chunks of which scale the sheet lands in, worked out where the march lives. */
+export interface WantEvent {
+  type: "want";
+  id: string;
+  wanted: { level: number; factor: number; chunks: ArrayBuffer }[];
+}
+
 export interface SurfaceFacts {
   // How far apart the wraps came out, and the grid the piece was built on.
   spacing: number;
@@ -195,9 +264,6 @@ export interface FrameEvent {
   loading: boolean;
   // How long the drawing took.
   drew: number;
-  // How many sheets either side of its own this frame shows, which the card needs to put a place in
-  // it and to turn a pull into sheets (`spanFor`).
-  span: number;
   // And where each equal step across a cut falls, in sheets: the picture is spread by distance and
   // not by winding (`acrossSheets`), so the card must use the same map to put a place in the frame.
   spread: number[];
@@ -234,4 +300,7 @@ export interface PlaceEvent {
   token?: string;
 }
 
-export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent | PlaceEvent;
+export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent | PlaceEvent
+  | CutEvent
+  | FieldEvent
+  | WantEvent;

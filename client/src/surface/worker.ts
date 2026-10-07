@@ -17,8 +17,9 @@ import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
 import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, walkOut, walkReach, wrapGap } from "./patch";
 import type { SurfacePlane } from "./render";
-import { acrossSheets, acrossWalk, acrossWanted, drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
+import { acrossSheets, acrossWalk, acrossWanted, cutChunks, drawPlane, fillCut, flatCut, LevelReader, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
+import { fieldOf } from "./gpu/field";
 import type { ChainSaid, FrameEvent, OpenRequest, PieceSpot, SurfaceEvent, SurfaceRequest } from "./types";
 
 
@@ -32,7 +33,20 @@ import type { ChainSaid, FrameEvent, OpenRequest, PieceSpot, SurfaceEvent, Surfa
  * a piece took 723 ms to build at three and 998 ms at five, and the box of prediction read for it is
  * half as deep again.
  */
-const K = 5;
+/*
+ * How many whole sheets each side of its own a piece holds.
+ *
+ * This is not a quality setting, it is the room a hand has to move.  A cut card draws a square of
+ * papyrus as a square, so how much of the stack it shows is decided by its own shape, not by this —
+ * on a card of the usual size at 2.4 µm that is seven and a half wraps at once.  A piece of five
+ * sheets each way therefore left about a wrap and a quarter of travel, which is fifty pixels of
+ * dragging before the picture simply ran out, and the card read as jammed.  Fourteen leaves ten
+ * wraps of travel each way, which no single gesture reaches.
+ *
+ * It costs a deeper march — two and a half times the samples — but only once: the march is kept
+ * (`chart.ts`), so the price is paid the first time a piece is seen and never again.
+ */
+const K = 14;
 const PER = 8;
 // Sheets either side of the one fitted first, and how much room to leave for them in the box.
 const REACH_SHEETS = K + 1;
@@ -109,7 +123,13 @@ function channelLevel(sourceId: string, level: number) {
 }
 
 // How far from its own sheet a piece is used before another is built around the sheet reached.
-const REBASE_AT = K - 0.75;
+/*
+ * How far the card may wander from the piece's own sheet before the next piece is started.
+ *
+ * Early enough that the next one is ready before the picture runs out: a cut shows about four wraps
+ * either side of where it is, so this leaves a wrap or so of warning.
+ */
+const REBASE_AT = K - 5;
 /*
  * How far from the piece a voxel may be and still be a place on it, in voxels.  A point inside the
  * slab of papyrus the piece covers comes back a fraction of a voxel away; one outside comes back as
@@ -127,6 +147,10 @@ const REDRAW_MS = 120;
  * a half a sixteen-notch turn took, a second was spent waiting for data nobody looked at.
  */
 const RESTING_MS = 110;
+// How often the picture may be redrawn while a hand is still pulling.
+const SKETCH_MS = 60;
+// How many rows of a cut to resample before giving the thread back.
+const CARVE_ROWS = 32;
 
 /**
  * The grid of a patch covering `width` × `height` pixels at `zoom` voxels per pixel.  The points are
@@ -209,6 +233,12 @@ class Card {
   private get moving() {
     return performance.now() - this.askedAt < RESTING_MS;
   }
+  // The cut already carved out and sent, if any.
+  private carved?: { patch: Patch; plane: SurfacePlane };
+  // The piece whose march has already been handed to the card as a texture.
+  private gave?: Patch;
+  // When the last quick look went out, so that one under a moving hand does not become all of them.
+  private sketchedAt = 0;
   // How many voxels apart the sheets are here, as the piece was built with.
   private spacing = 40;
 
@@ -516,11 +546,163 @@ class Card {
    * is sent and no frame is drawn.  Measured, a build is 650 to 870 ms, which is why nothing should
    * ask for a sheet many wraps away once per frame.
    */
+  /**
+   * Hands the march to the card as something a GPU can read, once per piece.
+   *
+   * Ten megabytes, and the only part of drawing that still crosses out of this worker.  After it the
+   * card can draw any sheet of this piece without asking: `positionAt` becomes a texture read, and
+   * moving the window becomes a uniform.
+   */
+  private giveField(patch: Patch) {
+    if (this.gave === patch) return;
+    if (this.walked?.patch !== patch) this.walked = { patch, walk: acrossWalk(patch) };
+    this.gave = patch;
+    const field = fieldOf(patch, this.walked.walk);
+    const sheets = Float32Array.from(this.walked.walk.sheets);
+    const walked = Float32Array.from(this.walked.walk.walked);
+    this.post(
+      {
+        type: "field",
+        id: this.request.id,
+        nu: field.nu,
+        nv: field.nv,
+        layers: field.layers,
+        per: field.per,
+        K: field.K,
+        baseW: this.baseW,
+        data: field.data.buffer as ArrayBuffer,
+        walk: field.walk.buffer as ArrayBuffer,
+        lo: field.lo,
+        hi: field.hi,
+        alongU: (patch.nu - 1) * patch.hu,
+        alongV: (patch.nv - 1) * patch.hv,
+        sheets: sheets.buffer,
+        walked: walked.buffer,
+      },
+      [
+        field.data.buffer as ArrayBuffer,
+        field.walk.buffer as ArrayBuffer,
+        sheets.buffer,
+        walked.buffer,
+      ],
+    );
+  }
+
+  /**
+   * Which chunks of the scan the sheet lands in, which is the one question the viewer cannot answer
+   * for a flattening: its geometry is the march, and the march is here.
+   *
+   * The same `planeChunks` the CPU path has always used to decide what to fetch — it already handles
+   * all three planes, which is why the cut had no need of a lattice of its own.
+   */
+  private async giveWanted(
+    patch: Patch,
+    plane: SurfacePlane,
+    sheet: number,
+    spread: number[],
+  ) {
+    const scan = this.scan;
+    if (scan === undefined) return;
+    const { width, height, zoom } = this.request;
+    const fine = Math.max(0, Math.min(scan.length - 1, Math.floor(Math.log2(zoom) + 1e-6)));
+    const preview = Math.min(scan.length - 1, fine + PREVIEW_LEVELS);
+    const wanted: { level: number; factor: number; chunks: ArrayBuffer }[] = [];
+    /*
+     * Finest first.  The card draws them in this order and the depth buffer stands in for a stencil:
+     * the first fragment at a pixel wins, so the finest scale that has arrived is the one seen and a
+     * coarser one only fills in where it has not.  The other way round the coarse scale wins
+     * everywhere and the fine one is never seen at all.
+     */
+    for (const level of preview === fine ? [fine] : [fine, preview]) {
+      const chunks = planeChunks(patch, plane, sheet, width, height, scan[level], spread);
+      const flat = new Float32Array(chunks.length * 3);
+      /*
+       * Turned round on the way out.  Everything on this side counts (z, y, x) — the order the zarr
+       * array is stored in and the order the march is written in — and the viewer counts (x, y, z),
+       * because its data source reverses the axes when it places a volume in the world.  A chunk
+       * asked for the wrong way round is not refused: it is a chunk of empty space somewhere else
+       * entirely, which arrives, uploads, and draws as nothing at all.
+       */
+      chunks.forEach(([cz, cy, cx], at) => flat.set([cx, cy, cz], at * 3));
+      wanted.push({ level, factor: scan[level].factor, chunks: flat.buffer as ArrayBuffer });
+    }
+    this.post({ type: "want", id: this.request.id, wanted }, wanted.map((one) => one.chunks));
+  }
+
+  /**
+   * Carves the whole of a cut out of the scan, once, and hands it to the card.
+   *
+   * A cut card shows the middle row (or column) of the grid and nothing else, so everything it could
+   * ever show is one picture: the papyrus along the sheet by the distance through it, for the whole
+   * of the walk.  Once the card has it, asking for another sheet is a window moving on a picture it
+   * already holds — no worker, no scan, no drawing — which is the only way a pull keeps up with a
+   * hand.  So this is drawn for, and the cut cards are sent no frames at all.
+   */
+  private async carve(patch: Patch, plane: SurfacePlane) {
+    if (this.carved?.patch === patch && this.carved.plane === plane) return;
+    if (this.scan === undefined) return;
+    if (this.walked?.patch !== patch) this.walked = { patch, walk: acrossWalk(patch) };
+    const walk = this.walked.walk;
+    const scan = this.scan;
+    const level = scan[Math.max(0, Math.min(scan.length - 1, Math.floor(Math.log2(this.request.zoom) + 1e-6)))];
+    // A sample a voxel of the level drawn at: finer than that is reading the same number twice.
+    const cut = flatCut(patch, walk, plane, level.factor);
+    this.carved = { patch, plane };
+    const pixels = new Uint8ClampedArray(cut.wide * cut.tall * 4);
+    const sheets = Float32Array.from(walk.sheets, (sheet) => sheet + this.baseW);
+    const walked = Float32Array.from(walk.walked);
+    const give = (loading: boolean) => {
+      // Copied rather than handed over: it is a hundred and sixty kilobytes, and the next band has
+      // to be written into the same picture.
+      const copy = pixels.slice().buffer;
+      const a = sheets.slice().buffer, b = walked.slice().buffer;
+      this.post(
+        {
+          type: "cut",
+          id: this.request.id,
+          plane,
+          pixels: copy,
+          wide: cut.wide,
+          tall: cut.tall,
+          loading,
+          lo: cut.lo,
+          hi: cut.hi,
+          along: cut.along,
+          sheets: a,
+          walked: b,
+        },
+        [copy, a, b],
+      );
+    };
+    await level.loadAll(cutChunks(cut, level));
+    if (this.closed || this.patch !== patch) return;
+    for (let y = 0; y < cut.tall; y += CARVE_ROWS) {
+      fillCut(cut, level, pixels, y, y + CARVE_ROWS);
+      // Back to the queue between bands: the hand owns this thread.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (this.closed || this.patch !== patch) return;
+      if ((y / CARVE_ROWS) % 4 === 3) give(true);
+    }
+    give(false);
+  }
+
   private async reach(w: number) {
     let left = 4;
-    // Never under a moving hand: a rebuild is the better part of a second on this thread, and this
-    // thread is the one that sends the line.
-    while (!this.moving && this.patch !== undefined && left-- > 0 && Math.abs(w - this.baseW) > REBASE_AT) {
+    /*
+     * Under a moving hand too, on a cut.
+     *
+     * It used not to be: a rebuild was the better part of a second on this thread, and this thread
+     * sends the line.  But a cut card now draws from a picture it holds, so a hand is not waiting on
+     * this thread at all — and refusing to rebuild while the hand moves is exactly what let the card
+     * run out of piece in the middle of a pull with no way to continue.  The flat card still waits,
+     * because there the drawing IS on this thread.
+     */
+    while (
+      (!this.moving || this.plane !== "uv") &&
+      this.patch !== undefined &&
+      left-- > 0 &&
+      Math.abs(w - this.baseW) > REBASE_AT
+    ) {
       const patch: Patch = this.patch;
       const step = Math.max(-K, Math.min(K, Math.round(w - this.baseW)));
       // The centre of that sheet, or of the nearest one back towards this piece's own.
@@ -596,7 +778,6 @@ class Card {
         // Once per sheet shown, not once per frame: it is the same for the quick look and for the
         // sharp one, and for every redraw as chunks arrive.
         const spread = this.across(patch, plane, sheet);
-        const span = (spread[spread.length - 1] - spread[0]) / 2;
         const send = (scale = 1, at = fine, settled = false) => {
           const across = Math.max(1, Math.ceil(width / scale));
           const down = Math.max(1, Math.ceil(height / scale));
@@ -621,7 +802,6 @@ class Card {
             // card that says it is still loading for ever is worse than one that shows what it has.
             loading: !settled && (coarser > 0 || scale > 1 || at !== fine),
             drew,
-            span,
             // Counted as the card counts its sheets, not as the piece does: a `place` answer says
             // `found.w + baseW`, and the card puts a place in the frame by looking it up in this.
             spread: spread.map((at) => at + this.baseW),
@@ -651,17 +831,37 @@ class Card {
         }
         if (this.wanted !== w || this.plane !== plane) continue;
         /*
-         * And while the hand is moving, that line was the whole of the work.
-         *
-         * Even the quick look is fifteen milliseconds, and every one of them is for a sheet the hand
-         * has already gone past.  Drawing them is what put the line a wrap behind the hand and stood
-         * it still for a quarter of a second at a time.  Nothing is skipped for ever: the wait below
-         * wakes either when another sheet is asked for or when the hand has been still long enough,
-         * and then the picture is drawn for wherever it ended up.
+         * Drawn on the GPU: nothing is drawn here at all.  The card holds the march as a texture and
+         * works out every pixel itself, so all this owes it is the chunks the sheet lands in.
          */
-        if (!this.moving && sketched !== asked) {
+        if (this.request.gpu) {
+          drawn = asked;
+          this.giveField(patch);
+          await this.giveWanted(patch, plane, sheet, spread);
+          continue;
+        }
+        /*
+         * A cut needs nothing drawn for it: the card holds the whole picture and moves its own window
+         * on it.  So this carves it and goes back to waiting — no preview, no sharp frame, no
+         * fetching for a sheet nobody will wait on.
+         */
+        if (plane !== "uv") {
+          drawn = asked;
+          await this.carve(patch, plane);
+          continue;
+        }
+        /*
+         * And the papyrus moves under the hand too, but not at the price of the line.
+         *
+         * A quick look is fifteen milliseconds and it fetches nothing — it draws from the chunks
+         * already in the store and leaves the rest coarse — so one every `SKETCH_MS` keeps the
+         * picture alive while a hand pulls, and the line gets the rest of the time.  Drawing one for
+         * EVERY sheet asked for is what once put the line a wrap behind the hand.
+         */
+        if (sketched !== asked && (!this.moving || performance.now() - this.sketchedAt > SKETCH_MS)) {
           send(2, preview);
           sketched = asked;
+          this.sketchedAt = performance.now();
         }
         if (this.wanted !== w || this.plane !== plane) continue;
         // Still moving: leave the sharp frame, and the fetching it leads to, until the hand rests.

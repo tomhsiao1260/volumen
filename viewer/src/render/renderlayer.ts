@@ -17,6 +17,7 @@ import type { ChunkFormat } from "#src/render/chunk_format.js";
 import type {
   MultiscaleVolumeChunkSource,
   SliceView,
+  SliceViewSingleResolutionSource,
 } from "#src/render/frontend.js";
 import type { WatchableValueInterface } from "#src/state/trackable_value.js";
 import { DataType } from "#src/util/data_type.js";
@@ -318,6 +319,24 @@ export interface SliceViewRenderContext {
   projectionParameters: ProjectionParameters;
 }
 
+/**
+ * What a slice view needs of the thing it draws.
+ *
+ * There was no interface here until a second kind of layer wanted one: the view named
+ * `ImageRenderLayer` outright, in four places.  A layer drawing a curved sheet of papyrus rather
+ * than a flat plane needs every one of these and nothing else — the volume's scales, how much
+ * resolution to ask for, the worker counterpart that decides what is downloaded, and a `draw`.
+ *
+ * What is NOT in here is the geometry.  `chunkFormat.defineShader` asks only for a `vChunkPosition`
+ * varying (`chunk_format.ts`), and has no opinion about what shape produced it.
+ */
+export interface RenderLayer extends RefCounted {
+  rpcId: RpcId | null;
+  renderScaleTarget: WatchableValueInterface<number>;
+  getSources(): SliceViewSingleResolutionSource[];
+  draw(renderContext: SliceViewRenderContext): void;
+}
+
 // Draws the volume in grayscale, from the full range of its data type.
 export class ImageRenderLayer extends RefCounted {
   rpcId: RpcId | null = null;
@@ -374,6 +393,13 @@ export class ImageRenderLayer extends RefCounted {
         const builder = new ShaderBuilder(this.gl);
         defineVolumeShader(builder);
         chunkFormat.defineShader(builder);
+        // Where a cross-section's position comes from: the rasteriser, across the polygon the vertex
+        // shader cut out of the chunk.  A sheet laid flat works its own out per pixel instead.
+        builder.addFragmentCode(`
+${chunkFormat.shaderType} getDataValue() {
+  return getDataValueAt(vChunkPosition);
+}
+`);
         builder.addFragmentCode(defineNormalized(chunkFormat));
         builder.setFragmentMain(`
   float value = normalized(getDataValue());

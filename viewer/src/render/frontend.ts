@@ -31,7 +31,7 @@ import {
   FillValueTexture,
   TextureLayout,
 } from "#src/render/chunk_format.js";
-import type { ImageRenderLayer } from "#src/render/renderlayer.js";
+import type { RenderLayer } from "#src/render/renderlayer.js";
 import type { TypedArray } from "#src/util/array.js";
 import type { DataType } from "#src/util/data_type.js";
 import type { Borrowed, Disposer, Owned } from "#src/util/disposable.js";
@@ -165,7 +165,7 @@ export class SliceView extends SliceViewBase<VolumeChunkSource> {
   // Dispatched when the view needs to be drawn again.
   viewChanged = new NullarySignal();
   // The render layer being drawn, once `renderLayer` has a value.
-  layer: ImageRenderLayer | undefined;
+  layer: RenderLayer | undefined;
   private layerDisposers: Disposer[] = [];
 
   projectionParameters!: Owned<DerivedProjectionParameters>;
@@ -179,7 +179,7 @@ export class SliceView extends SliceViewBase<VolumeChunkSource> {
   constructor(
     public chunkManager: ChunkManager,
     // The render layer to draw; `undefined` until the volume has loaded.
-    public renderLayer: WatchableValueInterface<ImageRenderLayer | undefined>,
+    public renderLayer: WatchableValueInterface<RenderLayer | undefined>,
     public navigationState: Owned<NavigationState>,
     // How much the view's chunks are worth loading (see `render/panel.ts`).
     visibility: WatchableValueInterface<number>,

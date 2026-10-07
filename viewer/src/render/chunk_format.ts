@@ -123,8 +123,13 @@ export class ChunkFormat extends RefCounted {
   }
 
   /**
-   * Defines `getDataValue()`, the value of the voxel containing `vChunkPosition` in the chunk bound
-   * with `bindChunk`.  The texture is read from texture unit 0.
+   * Defines `getDataValueAt(p)`: the value of the voxel containing `p` in the chunk bound with
+   * `bindChunk`.  The texture is read from texture unit 0.
+   *
+   * The two exist because the geometry decides where the position comes from: a cross-section has
+   * the rasteriser interpolate it across a polygon, while a sheet laid flat works it out per pixel
+   * out of a field of its own.  Everything below the position is the same either way, which is the
+   * whole of what this format knows.
    */
   defineShader(builder: ShaderBuilder) {
     builder.addUniform(
@@ -137,8 +142,8 @@ export class ChunkFormat extends RefCounted {
     // Texel offset of voxel (0, 0, 0), then the texel offset per voxel along x, y and z.
     builder.addUniform("highp ivec3", "uVolumeChunkStrides", 4);
     builder.addFragmentCode(`
-${this.shaderType} getDataValue() {
-  highp ivec3 p = ivec3(max(vec3(0.0, 0.0, 0.0), min(floor(vChunkPosition), uChunkDataSize - 1.0)));
+${this.shaderType} getDataValueAt(highp vec3 chunkPosition) {
+  highp ivec3 p = ivec3(max(vec3(0.0, 0.0, 0.0), min(floor(chunkPosition), uChunkDataSize - 1.0)));
   highp ivec3 offset = uVolumeChunkStrides[0]
                      + p.x * uVolumeChunkStrides[1]
                      + p.y * uVolumeChunkStrides[2]
