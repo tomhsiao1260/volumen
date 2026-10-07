@@ -2,9 +2,9 @@
  * The flattening as something a GPU can read: the march's table packed into one 3-D image.
  *
  * `positionAt` (`patch.ts`) is a trilinear read of `Patch.P` over (layer, v, u) — eight corners,
- * weights multiplied out, twenty-four multiply-adds — and the CPU renderer cannot afford it: it
- * evaluates it at every eighth pixel and interpolates the rest (`drawPlane`'s `STEP`). That same
- * read is one of the things a texture unit does, so the table belongs in a texture.
+ * weights multiplied out, twenty-four multiply-adds — and a renderer on this thread could not afford
+ * it: the one there used to be evaluated it at every eighth pixel and interpolated the rest.  That
+ * same read is one of the things a texture unit does, so the table belongs in a texture.
  *
  * The packing turns on a coincidence in the fit, which is worth stating because everything below
  * depends on it: `P` holds `NaN` exactly where `A` holds 0 — both are written in the same branch of

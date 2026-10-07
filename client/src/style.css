@@ -141,9 +141,13 @@ button {
 /* Lines drawn over a slice: where the sheets of the surface cards cut it. */
 /* Where a card drawn on the GPU puts its canvas: over the black the flat card leaves showing, and
    under the sheet line and the winding points, which are painted on their own canvas above it. */
+/* A surface card's papyrus, drawn on the GPU out of the march (`viewer`'s `SurfaceView`). */
 .card-gpu {
   position: absolute;
   inset: 0;
+  /* The canvas is left clear where the piece has no sheet, and what shows through is this: the card
+     says plainly that there is nothing there, rather than drawing a likely-looking guess. */
+  background: #000;
 }
 
 .card-lines {
@@ -324,18 +328,6 @@ button {
 .card-link {
   color: hsl(var(--group-hue) 70% 72%);
   opacity: 1;
-}
-
-/* A surface card's frame: the sheet the worker drew, scaled to the card. */
-.card-surface {
-  position: absolute;
-  inset: 0;
-  display: block;
-  width: 100%;
-  height: 100%;
-  /* Where the piece has no sheet the canvas is left clear, and what shows through is this: the card
-     says plainly that there is nothing there, rather than drawing a likely-looking guess. */
-  background: #000;
 }
 
 /* How far through the sheets a surface card is, dimmed while it is still being drawn. */

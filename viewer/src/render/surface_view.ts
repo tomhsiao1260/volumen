@@ -54,11 +54,21 @@ export class SurfaceView extends RefCounted implements Panel {
   private window: SurfaceWindow = { plane: "uv", w: 0, from: 0, across: 1, pin: 0.5 };
   private asked: Asked[] = [];
   private boundsGeneration = -1;
+  private settled = false;
   private onScreen = true;
   private nearScreen = true;
 
   renderViewport = new RenderViewport();
   visibility = new WatchableValue(Number.POSITIVE_INFINITY);
+  /*
+   * Told when every chunk asked for at the finest scale has arrived, and told again when a new ask
+   * leaves some of them missing.
+   *
+   * This is the only honest answer to "is the card still loading": the ask is made here, the
+   * arriving is watched here, and nothing else in the page can see either.  Without it a card has
+   * nothing to go on but a timeout.
+   */
+  onSettled: ((settled: boolean) => void) | undefined;
 
   constructor(
     public element: HTMLElement,
@@ -155,6 +165,11 @@ export class SurfaceView extends RefCounted implements Panel {
   want(wanted: SurfaceWant[]) {
     const sources = this.renderLayer.value?.getSources();
     if (sources === undefined) return;
+    // Another ask, so what was settled is settled no longer until the next draw says otherwise.
+    if (this.settled) {
+      this.settled = false;
+      this.onSettled?.(false);
+    }
     const asked: Asked[] = [];
     const toWorker: { source: number; positions: ArrayBuffer }[] = [];
     for (const { level, factor, chunks } of wanted) {
@@ -180,11 +195,14 @@ export class SurfaceView extends RefCounted implements Panel {
    */
   private resident(): SurfaceScale[] {
     const scales: SurfaceScale[] = [];
-    for (const { source, factor, positions } of this.asked) {
+    // Whether the finest scale asked for is all here, which is what the card calls settled.
+    let missing = this.asked.length === 0 ? 1 : 0;
+    // Finest first, as the worker sends them, so the first is the one that settles the card.
+    for (const [at, { source, factor, positions }] of this.asked.entries()) {
       const have: VolumeChunk[] = [];
-      for (let at = 0; at + 2 < positions.length; at += 3) {
+      for (let one = 0; one + 2 < positions.length; one += 3) {
         const chunk = source.chunks.get(
-          `${positions[at]},${positions[at + 1]},${positions[at + 2]}`,
+          `${positions[one]},${positions[one + 1]},${positions[one + 2]}`,
         );
         /*
          * A chunk the store does not have reaches GPU_MEMORY with no texture at all — the volume is
@@ -193,17 +211,26 @@ export class SurfaceView extends RefCounted implements Panel {
          */
         if (chunk !== undefined && chunk.state === ChunkState.GPU_MEMORY && chunk.texture !== null) {
           have.push(chunk);
+        } else if (at === 0) {
+          // A chunk of the finest scale that is not here yet.  Coarser scales are the stand-in while
+          // it arrives, so they are not what settles the card.
+          missing++;
         }
       }
       if (have.length !== 0) {
         scales.push({ source, factor, chunkSize: source.spec.chunkDataSize, chunks: have });
       }
     }
+    const settled = missing === 0;
+    if (settled !== this.settled) {
+      this.settled = settled;
+      this.onSettled?.(settled);
+    }
     return scales;
   }
 
   isReady() {
-    return true;
+    return this.settled;
   }
 
   ensureBoundsUpdated() {

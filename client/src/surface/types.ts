@@ -76,9 +76,6 @@ export interface OpenRequest {
   // `?charts=no`, which is how the fit is held against itself: the same board drawn both ways has
   // to come out the same, or a chart is not the march it claims to be.
   charts: boolean;
-  // Whether the card draws on the GPU (`?gpu=yes`).  While the two paths are held against each
-  // other both are built; the CPU one is what every number so far was measured on.
-  gpu: boolean;
   // The voxel the card was opened on, in voxels of the full-resolution scan.
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.
@@ -143,34 +140,6 @@ export type SurfaceRequest = OpenRequest | ShowRequest | PointRequest | WhereReq
 
 export type SurfaceStatus = "loading" | "ready" | "no-sheet" | "too-coarse" | "failed";
 
-// What the card found, which is all it shows for now: nothing is drawn yet.
-/**
- * A cut of the piece as one picture, sent to the card and kept there (`flatCut` in `render.ts`).
- *
- * This is the whole of what a cut card shows, for every sheet it could show: asking for another one
- * only moves the window on it.  So a hand pulling the sheets is answered on the page's own thread by
- * a `drawImage` with a different source rectangle — no worker, no scan, and no drawing at all.
- */
-export interface CutEvent {
-  type: "cut";
-  id: string;
-  plane: SurfacePlane;
-  // RGBA, `wide` × `tall`, a voxel of the scan a sample.
-  pixels: ArrayBuffer;
-  wide: number;
-  tall: number;
-  // Whether more of it is still being filled in.
-  loading: boolean;
-  // The distance along the walk at the first and last sample across the sheets, in voxels, and how
-  // much papyrus the other axis covers.
-  lo: number;
-  hi: number;
-  along: number;
-  // The walk itself, in the card's own windings: enough to turn a winding into a distance and back.
-  sheets: ArrayBuffer;
-  walked: ArrayBuffer;
-}
-
 /**
  * The march, packed for the GPU, and the chunks the sheet lands in.
  *
@@ -207,6 +176,15 @@ export interface FieldEvent {
 export interface WantEvent {
   type: "want";
   id: string;
+  /*
+   * The sheet actually reached, and whether that is short of the one asked for.
+   *
+   * They ride here because this is the one message sent once per sheet shown: the sheets can only be
+   * followed so far — the papyrus runs out, or the prediction does — and a card never told goes on
+   * counting from a sheet it never got to.
+   */
+  w: number;
+  limited: boolean;
   wanted: { level: number; factor: number; chunks: ArrayBuffer }[];
 }
 
@@ -242,35 +220,6 @@ export interface StatusEvent {
   message?: string;
 }
 
-// The sheet, drawn.  Sent again as finer data arrives.
-export interface FrameEvent {
-  type: "frame";
-  id: string;
-  // The sheet and plane drawn; the sheet is the one asked for unless the sheets could not be
-  // followed that far, which `limited` says.
-  w: number;
-  plane: SurfacePlane;
-  limited: boolean;
-  // The card's own size in pixels, which the canvas keeps whatever size a frame arrives at.
-  width: number;
-  height: number;
-  /*
-   * How much smaller the frame was drawn than the card: 1 is the whole thing, more is the quick look
-   * that is sent while a hand is still moving.  It is scaled up smoothly rather than drawn in blocks,
-   * which reads as an out-of-focus picture instead of a pattern of its own.
-   */
-  scale: number;
-  // RGBA, ⌈width / scale⌉ × ⌈height / scale⌉; transparent where there is no sheet or nothing yet.
-  pixels: ArrayBuffer;
-  // Whether finer data is still on its way.
-  loading: boolean;
-  // How long the drawing took.
-  drew: number;
-  // And where each equal step across a cut falls, in sheets: the picture is spread by distance and
-  // not by winding (`acrossSheets`), so the card must use the same map to put a place in the frame.
-  spread: number[];
-}
-
 /**
  * Where the sheet being shown is, for the slice cards to draw its line.  Sent when the card moves to
  * another sheet, not with every frame: the picture is redrawn as chunks arrive, but the sheet itself
@@ -302,7 +251,4 @@ export interface PlaceEvent {
   token?: string;
 }
 
-export type SurfaceEvent = StatusEvent | FrameEvent | SheetEvent | PlaceEvent
-  | CutEvent
-  | FieldEvent
-  | WantEvent;
+export type SurfaceEvent = StatusEvent | SheetEvent | PlaceEvent | FieldEvent | WantEvent;

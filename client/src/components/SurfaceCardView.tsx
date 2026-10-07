@@ -21,7 +21,7 @@ import type { SurfaceView } from "viewer";
 import type { Session } from "../board/session";
 import { farOf, sheetOf } from "../surface/render";
 import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
-import type { ChainSaid, FrameEvent, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
+import type { ChainSaid, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 
 import type { WindChain } from "../surface/windings";
 import { chainColour, chainsOf, watchChains } from "../surface/windings";
@@ -184,18 +184,11 @@ export function SurfaceCardView({
   behind,
 }: SurfaceCardViewProps) {
   const body = useRef<HTMLDivElement>(null);
-  const canvas = useRef<HTMLCanvasElement>(null);
   // The sheets drawn over a cut across them, and what is being pulled.
   const lines = useRef<HTMLCanvasElement>(null);
   const pulling = useRef<
     { from: number; zoomed: number; pin: number; perPixel: number } | undefined
   >(undefined);
-  // Kept between frames: a frame is copied into it rather than a new one being made each time.
-  const image = useRef<ImageData>(undefined);
-  // And for the quick looks, which come smaller than the card: somewhere to put one before it is
-  // scaled up onto the card.
-  const sketch = useRef<HTMLCanvasElement>(undefined);
-  const sketched = useRef<ImageData>(undefined);
   // The sheet last drawn, which is not the one asked for while a frame for it is on its way.
   const shown = useRef<number>(undefined);
   // Where the group's mark falls on this piece, null when the piece does not reach it.
@@ -255,34 +248,13 @@ export function SurfaceCardView({
   const density = Math.min(MAX_DENSITY, window.devicePixelRatio || 1);
 
   /*
-   * The whole of this cut as one picture, as the worker carved it (`flatCut`).
-   *
-   * Everything a cut card could show is in here, for every sheet: asking for another one only moves
-   * the window on it.  So a hand pulling the sheets is answered on this thread by a `drawImage` with
-   * a different source rectangle — nothing is computed, nothing crosses into the worker, and nothing
-   * reads the scan.  That is what makes a pull keep up with a hand.
-   */
-  const cut = useRef<
-    | {
-        plane: SurfacePlane;
-        picture: HTMLCanvasElement;
-        wide: number;
-        tall: number;
-        lo: number;
-        hi: number;
-        along: number;
-        walk: { sheets: number[]; walked: number[] };
-      }
-    | undefined
-  >(undefined);
-  /*
    * Where the card is looking, as a DISTANCE through the papyrus in voxels.
    *
    * This is the one authority while a cut is in hand, and `w` is derived from it — not the other way
    * round.  A hand moves in pixels and a picture is in voxels; going through windings in between is
-   * what let the two come apart, and they came apart badly: the rate was read from a field only a
-   * `FrameEvent` ever set, and a cut card is sent no frames, so it fell back to a constant and the
-   * papyrus moved at a quarter of hand speed.  In distance there is no constant to get wrong.
+   * what let the two come apart, and they came apart badly: the rate was read from a frame, and a
+   * cut card was sent none, so it fell back to a constant and the papyrus moved at a quarter of hand
+   * speed.  In distance there is no constant to get wrong.
    *
    * `undefined` means "wherever `w` says", which is what any ask from outside the card leaves it as.
    */
@@ -300,15 +272,14 @@ export function SurfaceCardView({
   /*
    * Drawn on the GPU, where the march is a texture and a pixel of the card is two texture reads.
    *
-   * The way a cut is drawn now; `?gpu=no` is the old path, kept until this one has been lived with.
-   * Held against each other on the same sheet of the same piece, they differ by a median of 3 parts
-   * in 255 — and in the GPU's favour: the CPU one works a position out at every eighth pixel and
-   * interpolates the rest, where this one does it per pixel.
+   * The only way a card is drawn.  There was a path that drew on this thread, out of the scan, in
+   * the worker; held against this one on the same sheet of the same piece they differed by a median
+   * of 3 parts in 255, in the GPU's favour — the old one worked a position out at every eighth pixel
+   * and interpolated the rest, where this does it per pixel — and it is gone.
    *
-   * Only this path can be pulled ALONG the papyrus.  The old one would have to carve a whole new
-   * picture for every row of the grid a hand passes, which is the cost this replaces.
+   * Only this one can be pulled ALONG the papyrus.  The old one would have had to resample a whole
+   * new picture for every row of the grid a hand passes, which is the cost this replaces.
    */
-  const onGpu = new URLSearchParams(window.location.search).get("gpu") !== "no";
   const gpuShow = Number(new URLSearchParams(window.location.search).get("show") ?? 0);
   const gpuRef = useRef<SurfaceView | undefined>(undefined);
   const gpuBox = useRef<HTMLDivElement>(null);
@@ -322,55 +293,6 @@ export function SurfaceCardView({
   >(undefined);
   // Both are set up once, in handlers that must still reach the ones of the render they run in.
   const glideRef = useRef<() => void>(() => {});
-  const onCutRef = useRef<() => ReturnType<typeof onCut>>(() => undefined);
-  /*
-   * What the card shows of the cut: the distances through the papyrus at its two edges.
-   *
-   * Taken from the card's own shape — the along-the-sheet axis covers the whole piece, so a pixel of
-   * it is worth so many voxels, and across the sheets a pixel is worth the same.  That is what makes
-   * a square of papyrus square, and it does not move while a hand does.
-   */
-  const onCut = () => {
-    const have = cut.current;
-    const element = canvas.current;
-    if (have === undefined || element === null) return undefined;
-    if (wantedPlane.current === "uv" || have.plane !== wantedPlane.current) return undefined;
-    /*
-     * The card's own size, set here because nothing else does it any more: a frame used to carry the
-     * size it was drawn at, and a cut card is sent no frames.  Left at the canvas default of 300×150
-     * every length below is read off the wrong shape — which is what squashed one cut and stretched
-     * the other.
-     */
-    const density = Math.min(2, window.devicePixelRatio || 1);
-    const width = Math.max(1, Math.round(element.clientWidth * density));
-    const height = Math.max(1, Math.round(element.clientHeight * density));
-    if (element.width !== width || element.height !== height) {
-      element.width = width;
-      element.height = height;
-    }
-    // Voxels of papyrus a pixel of the card is worth.  The along-the-sheet axis covers the whole
-    // piece across the card, and down it a pixel is worth the same — that is a square of papyrus
-    // drawn square, and it is the only number a pull needs.
-    const perPixel = have.along / element.width;
-    const across = perPixel * element.height;
-    const middle = far.current ?? farOf(have.walk, wanted.current);
-    if (!(across > 0) || !Number.isFinite(middle)) return undefined;
-    /*
-     * Held inside the picture.  Past its end there is nothing to show, and letting the window go
-     * there anyway is what made the card read as dead while the number in the corner kept counting.
-     */
-    const room = Math.max(have.lo, have.hi - across);
-    const start = Math.min(room, Math.max(have.lo, middle - across / 2));
-    return { have, across, perPixel, from: start, middle: start + across / 2 };
-  };
-
-  /*
-   * What the card is showing across the sheets, whichever way it is drawn: the walk to read windings
-   * against, the distance at its near edge, and how much of it.
-   *
-   * One answer for both paths, because the winding points are placed against it — and a dot placed
-   * against a different window from the papyrus under it is a dot in the wrong place.
-   */
   /*
    * How much papyrus a pixel of a cut card is worth.
    *
@@ -397,46 +319,13 @@ export function SurfaceCardView({
   const shownAcross = () => {
     const have = piece.current;
     const box = gpuBox.current;
-    if (onGpu) {
-      const scale = cutScale();
-      if (have === undefined || box === null || scale === undefined) return undefined;
-      const wide = scale.wide * box.clientHeight;
-      const middle = far.current ?? farOf(have.walk, wanted.current - baseW.current);
-      // A point's winding is counted from where the card was opened; this window is in the piece's
-      // own, so the base comes off a winding before it is looked up.
-      return { walk: have.walk, from: middle - wide / 2, wide, base: baseW.current };
-    }
-    const held = onCut();
-    if (held === undefined) return undefined;
-    return { walk: held.have.walk, from: held.from, wide: held.across, base: 0 };
-  };
-
-  // The cut, where the hand has got to.  One `drawImage`, which is the whole of what a pull costs.
-  const sliceOut = () => {
-    const at = onCut();
-    const element = canvas.current;
-    const context = element?.getContext("2d");
-    if (at === undefined || element == null || context == null) return false;
-    const { have, across, from } = at;
-    const run = have.hi - have.lo;
-    if (!(run > 0)) return false;
-    // Samples of the picture per voxel of papyrus, down the axis that crosses the sheets.
-    const per = (have.tall - 1) / run;
-    const start = (from - have.lo) * per;
-    const size = across * per;
-    context.clearRect(0, 0, element.width, element.height);
-    context.imageSmoothingEnabled = true;
-    context.imageSmoothingQuality = "low";
-    context.drawImage(have.picture, 0, start, have.wide, size, 0, 0, element.width, element.height);
-    /*
-     * And the card now says it is where the picture is, not where the hand asked for.  Derived from
-     * the window that was actually drawn, so the number in the corner and the papyrus can never
-     * disagree.
-     */
-    far.current = at.middle;
-    wanted.current = Math.round(sheetOf(have.walk, at.middle) * 1000) / 1000;
-    shown.current = wanted.current;
-    return true;
+    const scale = cutScale();
+    if (have === undefined || box === null || scale === undefined) return undefined;
+    const wide = scale.wide * box.clientHeight;
+    const middle = far.current ?? farOf(have.walk, wanted.current - baseW.current);
+    // A point's winding is counted from where the card was opened; this window is in the piece's
+    // own, so the base comes off a winding before it is looked up.
+    return { walk: have.walk, from: middle - wide / 2, wide, base: baseW.current };
   };
 
   /*
@@ -460,114 +349,43 @@ export function SurfaceCardView({
     if (scale === undefined) return;
     const across = scale.wide * element.clientHeight;
     const middle = far.current ?? farOf(have.walk, own);
-    view.show({
+    const window_ = {
       plane: wantedPlane.current,
       w: own,
       from: middle - across / 2,
       across,
       pin: pin.current,
       show: gpuShow,
-    });
+    };
+    view.show(window_);
+    /*
+     * The window, kept where a measurement can read it.
+     *
+     * This is the only place the picture's position exists any more: it used to be the source
+     * rectangle of a `drawImage`, which a harness could watch, and now it is two uniforms inside the
+     * GPU.  A pull that does not move the papyrus as far as the hand is the one fault a cut card can
+     * have that nothing else shows, so it is worth three lines to keep it measurable.
+     */
+    if (DEBUG) {
+      // With the scale it was worked out from, so that a measurement can say whether the papyrus
+      // moved as far as the hand without having to guess at the piece's size.
+      ((window as unknown as { __shown?: unknown[] }).__shown ??= []).push({
+        at: performance.now(),
+        perPixel: scale.wide / scale.reach,
+        ...window_,
+      });
+    }
     // What the card is showing, which is what the sheet line and the winding points are drawn against.
     shown.current = wanted.current;
   };
 
   // The picture where the hand has got to.
   const glide = () => {
-    if (onGpu) {
-      showOnGpu();
-      markSheets();
-      return;
-    }
-    sliceOut();
+    showOnGpu();
     markSheets();
   };
 
   glideRef.current = glide;
-  onCutRef.current = onCut;
-
-  const paint = (frame: FrameEvent) => {
-    const element = canvas.current;
-    const context = element?.getContext("2d");
-    if (element == null || context == null) return;
-    if (DEBUG) {
-      const kept = ((window as unknown as { __frames?: unknown[] }).__frames ??= []);
-      kept.push({
-        drew: Math.round(frame.drew),
-        step: frame.scale,
-        w: frame.w,
-        loading: frame.loading,
-        limited: frame.limited,
-      });
-      if (kept.length > 200) kept.shift();
-    }
-    /*
-     * The canvas is sized only when the size actually changes: setting `width` or `height`, even to
-     * the value it already has, makes the browser throw the canvas away and allocate another, which
-     * on every frame is work for nothing and churns the memory the GPU draws from.
-     */
-    if (element.width !== frame.width || element.height !== frame.height) {
-      element.width = frame.width;
-      element.height = frame.height;
-      image.current = undefined;
-    }
-    const across = Math.max(1, Math.ceil(frame.width / frame.scale));
-    const down = Math.max(1, Math.ceil(frame.height / frame.scale));
-    /*
-     * A quick look comes smaller than the card and is drawn onto it scaled, which the browser does
-     * smoothly: an out-of-focus picture while the sheets go by, rather than a pattern of squares of
-     * its own that the eye reads as part of the papyrus.
-     */
-    if (frame.scale !== 1) {
-      const small = (sketch.current ??= document.createElement("canvas"));
-      if (small.width !== across || small.height !== down) {
-        small.width = across;
-        small.height = down;
-        sketched.current = undefined;
-      }
-      const into = (sketched.current ??= small.getContext("2d")!.createImageData(across, down));
-      into.data.set(new Uint8ClampedArray(frame.pixels));
-      small.getContext("2d")!.putImageData(into, 0, 0);
-      context.clearRect(0, 0, element.width, element.height);
-      context.imageSmoothingEnabled = true;
-      context.imageSmoothingQuality = "high";
-      context.drawImage(small, 0, 0, element.width, element.height);
-      shown.current = frame.w;
-      markSheets();
-      setDrawn(true);
-      return;
-    }
-    const into = (image.current ??= context.createImageData(frame.width, frame.height));
-    into.data.set(new Uint8ClampedArray(frame.pixels));
-    context.putImageData(into, 0, 0);
-    shown.current = frame.w;
-    markSheets();
-    setDrawn(true);
-    // Still loading while this is not the sheet and plane asked for last, or not all of it.
-    const more =
-      frame.loading || frame.plane !== wantedPlane.current || (!frame.limited && frame.w !== wanted.current);
-    if (!more) clearTimeout(waiting.current);
-    setLoading(more);
-  };
-
-  /*
-   * The browser's GPU process can die under the page — on an Intel Mac, Brave 152 does it to itself
-   * through a bug of its own — and it takes the canvas's pixels with it, leaving the card blank until
-   * something happens to draw it again.  The frame last drawn is still here, so it is put back as
-   * soon as the canvas has somewhere to put it.  A slice card comes back by itself: the viewer
-   * already listens for its WebGL context being lost.
-   */
-  useEffect(() => {
-    const element = canvas.current;
-    if (element === null) return;
-    const repaint = () => {
-      const context = element.getContext("2d");
-      const last = image.current;
-      if (context !== null && last !== undefined) context.putImageData(last, 0, 0);
-    };
-    element.addEventListener("contextrestored", repaint);
-    return () => element.removeEventListener("contextrestored", repaint);
-  }, []);
 
   useEffect(() => {
     if (sourceId === null) {
@@ -599,8 +417,6 @@ export function SurfaceCardView({
          * prediction, which is how the two are held against each other.
          */
         const asked = new URLSearchParams(window.location.search).get("normals");
-        // Another piece, so the cut carved for the last one is of somewhere else.
-        cut.current = undefined;
         engine.open(
           {
             id,
@@ -610,7 +426,6 @@ export function SurfaceCardView({
             lasagna,
             normals: lasagna === null || asked === "scan" ? "scan" : "prediction",
             charts: new URLSearchParams(window.location.search).get("charts") !== "no",
-            gpu: onGpu,
             seed,
             w: wanted.current,
             plane,
@@ -621,12 +436,6 @@ export function SurfaceCardView({
             density,
           },
           (event) => {
-            if (event.type === "frame") {
-              paint(event);
-              // The sheets could not be followed as far as the wheel went.
-              if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
-              return;
-            }
             // Where the sheet is goes straight to the slice cards, not through this one.
             if (event.type === "sheet") return;
             if (event.type === "field") {
@@ -665,6 +474,9 @@ export function SurfaceCardView({
             }
             if (event.type === "want") {
               if (DEBUG) console.info(`${id}: want ${event.wanted.map((o) => `level ${o.level}: ${new Float32Array(o.chunks).length / 3} chunks`).join(", ")}`);
+              // The sheets could not be followed as far as the wheel went, so the board is told where
+              // the card really came to rest.
+              if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
               gpuRef.current?.want(
                 event.wanted.map((one) => ({
                   level: one.level,
@@ -672,39 +484,6 @@ export function SurfaceCardView({
                   chunks: new Float32Array(one.chunks),
                 })),
               );
-              return;
-            }
-            if (event.type === "cut") {
-              const picture = cut.current?.picture ?? document.createElement("canvas");
-              if (picture.width !== event.wide || picture.height !== event.tall) {
-                picture.width = event.wide;
-                picture.height = event.tall;
-              }
-              const context = picture.getContext("2d");
-              if (context === null) return;
-              context.putImageData(
-                new ImageData(new Uint8ClampedArray(event.pixels), event.wide, event.tall),
-                0,
-                0,
-              );
-              cut.current = {
-                plane: event.plane,
-                picture,
-                wide: event.wide,
-                tall: event.tall,
-                lo: event.lo,
-                hi: event.hi,
-                along: event.along,
-                walk: {
-                  sheets: Array.from(new Float32Array(event.sheets)),
-                  walked: Array.from(new Float32Array(event.walked)),
-                },
-              };
-              if (sliceOut()) {
-                markSheets();
-                setDrawn(true);
-                setLoading(event.loading);
-              }
               return;
             }
             if (event.type === "place") {
@@ -1074,16 +853,26 @@ export function SurfaceCardView({
    * two kinds of card cost one GPU context between them and read the same chunk textures.
    */
   useEffect(() => {
-    if (!onGpu || session === null || sourceId === null || gpuBox.current === null) return;
+    if (session === null || sourceId === null || gpuBox.current === null) return;
     const volume = session.volumes.get(sourceId);
     const view = session.viewer.addSurfaceView(gpuBox.current, { volume });
+    /*
+     * Whether the card is still waiting, answered by the one thing that knows.
+     *
+     * It used to come from the worker, which drew the papyrus and so could say when it had drawn all
+     * of it.  The papyrus is drawn on the GPU now, so what is left to wait for is chunks arriving —
+     * which only the view can see, because the view is what asked for them.
+     */
+    view.onSettled = (settled) => {
+      if (!settled) return;
+      clearTimeout(waiting.current);
+      setLoading(false);
+    };
     gpuRef.current = view;
     return () => {
       gpuRef.current = undefined;
       view.dispose();
     };
-    // `onGpu` is read from the address and does not change while the page is open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, sourceId]);
 
   /*
@@ -1323,11 +1112,11 @@ export function SurfaceCardView({
         data-loading={loading}
         /*
          * Double-clicking the papyrus marks the voxel there for the whole group, as it does on a
-         * slice card: the worker is asked which voxel this point of the frame is, and the answer
+         * slice card: the worker is asked which voxel this point of the card is, and the answer
          * goes to the board.
          */
         onDoubleClick={(event) => {
-          const element = canvas.current;
+          const element = gpuBox.current;
           if (element === null) return;
           const box = element.getBoundingClientRect();
           const fx = (event.clientX - box.left) / box.width;
@@ -1336,7 +1125,6 @@ export function SurfaceCardView({
           surfaceEngine().where(id, fx, fy);
         }}
       >
-        <canvas className="card-surface" ref={canvas} />
         <div className="card-gpu" ref={gpuBox} />
         <canvas className="card-lines card-sheets" ref={lines} />
         {message !== undefined && (

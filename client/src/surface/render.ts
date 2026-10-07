@@ -1,8 +1,11 @@
 /**
- * @file Drawing a plane of a piece of sheet: every pixel is a point of the piece (`patch.ts`), and
- * its grey is the scan there (trilinear).  Where the chunks of the level asked for have not arrived,
- * a coarser level that has them is used, so that a card shows something at once and sharpens as the
- * data comes in.
+ * @file Where a plane of a piece of sheet falls in the scan: the geometry of the three surface
+ * planes, and nothing that draws.
+ *
+ * The pixels are the card's own business now — it holds the march as a texture and works each one
+ * out on the GPU (`gpu/field.ts`, `viewer/render/surface_layer.ts`).  What is left here is what only
+ * this side knows: how a pixel maps to a point of the piece, how far across the sheets a cut
+ * reaches and how that is spread, and which chunks of the scan a plane lands in.
  *
  * The three planes are the sheet's own, as XY, XZ and YZ are the scan's:
  *
@@ -15,7 +18,6 @@
  * winding (`acrossSheets`), so that the papyrus is drawn at one scale all the way across.
  */
 
-import type { Vec3 } from "./field";
 import type { Patch } from "./patch";
 import { coverageAt, positionAt } from "./patch";
 import type { ZarrLevel } from "./store";
@@ -169,22 +171,6 @@ export function acrossSheets(walk: Walked, w: number, wanted: number) {
 }
 
 /**
- * And the other way: where a sheet falls across a cut, 0 to 1.  The card needs it to put a place in
- * the frame, and it has to be the same map the picture was drawn with.
- */
-export function acrossAt(spread: number[], w: number) {
-  if (spread.length < 2) return 0.5;
-  if (w <= spread[0]) return 0;
-  if (w >= spread[spread.length - 1]) return 1;
-  for (let i = 0; i + 1 < spread.length; i++) {
-    if (w > spread[i + 1]) continue;
-    const run = spread[i + 1] - spread[i];
-    return (i + (run > 0 ? (w - spread[i]) / run : 0)) / (spread.length - 1);
-  }
-  return 1;
-}
-
-/**
  * How many sheets either side of its own a cut should show, so that it is drawn at the same scale
  * both ways: a square of papyrus as a square, and the grain of it running true.
  *
@@ -235,280 +221,6 @@ export function pieceAt(
  * everywhere, and a picture uniform in windings would be pre-stretched by exactly the amount
  * `acrossSheets` exists to undo.
  */
-export interface FlatCut {
-  points: Float32Array;
-  wide: number;
-  tall: number;
-  // The distance along the walk at the first and last sample of the across-the-sheets axis.
-  lo: number;
-  hi: number;
-  // How much papyrus the along-the-sheet axis covers, in voxels.
-  along: number;
-  step: number;
-}
-
-export function flatCut(patch: Patch, walk: Walked, plane: SurfacePlane, step: number): FlatCut {
-  const along = plane === "uw" ? (patch.nu - 1) * patch.hu : (patch.nv - 1) * patch.hv;
-  const lo = walk.walked[0], hi = walk.walked[walk.walked.length - 1];
-  const n = Math.max(2, Math.min(4096, Math.round(along / step)));
-  const across = Math.max(2, Math.min(4096, Math.round((hi - lo) / step)));
-  // Along the papyrus across the card, through it down the card — the same on both cuts.
-  const [wide, tall] = [n, across];
-  const points = new Float32Array(wide * tall * 3).fill(NaN);
-  const out = new Float64Array(3);
-  const middle = plane === "uw" ? (patch.nv - 1) / 2 : (patch.nu - 1) / 2;
-  for (let k = 0; k < across; k++) {
-    const sheet = sheetOf(walk, lo + ((hi - lo) * k) / (across - 1));
-    for (let t = 0; t < n; t++) {
-      const at = ((plane === "uw" ? patch.nu - 1 : patch.nv - 1) * t) / (n - 1);
-      const gi = plane === "uw" ? middle : at;
-      const gj = plane === "uw" ? at : middle;
-      if (!positionAt(patch, sheet, gi, gj, out)) continue;
-      const o = (k * wide + t) * 3;
-      points[o] = out[0];
-      points[o + 1] = out[1];
-      points[o + 2] = out[2];
-    }
-  }
-  return { points, wide, tall, lo, hi, along, step };
-}
-
-// The chunks a cut reads, by the box each patch of it falls in.
-export function cutChunks(cut: FlatCut, level: ZarrLevel) {
-  const f = level.factor;
-  const keys = new Map<string, [number, number, number]>();
-  const lo = [0, 0, 0], hi = [0, 0, 0];
-  const BLOCK = 16;
-  for (let y = 0; y < cut.tall; y += BLOCK)
-    for (let x = 0; x < cut.wide; x += BLOCK) {
-      lo.fill(Infinity);
-      hi.fill(-Infinity);
-      let any = false;
-      for (let j = y; j < Math.min(y + BLOCK + 1, cut.tall); j++)
-        for (let i = x; i < Math.min(x + BLOCK + 1, cut.wide); i++) {
-          const o = (j * cut.wide + i) * 3;
-          if (Number.isNaN(cut.points[o])) continue;
-          any = true;
-          for (let c = 0; c < 3; c++) {
-            const at = (cut.points[o + c] + 0.5) / f - 0.5;
-            lo[c] = Math.min(lo[c], Math.floor(at));
-            hi[c] = Math.max(hi[c], Math.floor(at) + 1);
-          }
-        }
-      if (!any) continue;
-      for (const chunk of level.chunksBetween(lo, hi)) keys.set(chunk.join("/"), chunk);
-    }
-  return [...keys.values()];
-}
-
-/**
- * The scan read along a cut, a band of rows at a time.
- *
- * In bands because resampling the whole of it is tens of milliseconds and the worker owes the hand
- * an answer sooner than that; and because the rows at the far end are the ones nobody is looking at
- * yet.  Writes straight to RGBA, so the page has nothing to do but hand it to `drawImage`.
- */
-export function fillCut(cut: FlatCut, level: ZarrLevel, into: Uint8ClampedArray, from: number, to: number) {
-  const f = level.factor;
-  const reader = new LevelReader(level);
-  const words = new Uint32Array(into.buffer);
-  for (let y = from; y < Math.min(to, cut.tall); y++)
-    for (let x = 0; x < cut.wide; x++) {
-      const o = (y * cut.wide + x) * 3;
-      if (Number.isNaN(cut.points[o])) continue;
-      const value = reader.sample(
-        (cut.points[o] + 0.5) / f - 0.5,
-        (cut.points[o + 1] + 0.5) / f - 0.5,
-        (cut.points[o + 2] + 0.5) / f - 0.5,
-      );
-      // Little-endian ABGR: one write instead of four into a clamped array.
-      if (value >= 0) words[y * cut.wide + x] = (255 << 24) | (value << 16) | (value << 8) | value;
-    }
-}
-
-// The box of the scan a piece lies in, which is what has to be fetched before it can be resampled.
-export function patchBox(patch: Patch): [Vec3, Vec3] {
-  const lo: Vec3 = [Infinity, Infinity, Infinity], hi: Vec3 = [-Infinity, -Infinity, -Infinity];
-  const { P } = patch;
-  for (let o = 0; o < P.length; o += 3) {
-    if (Number.isNaN(P[o])) continue;
-    for (let c = 0; c < 3; c++) {
-      if (P[o + c] < lo[c]) lo[c] = P[o + c];
-      if (P[o + c] > hi[c]) hi[c] = P[o + c];
-    }
-  }
-  return [lo, hi];
-}
-
-// Reads voxels of one level, remembering the chunks it has looked up during one drawing.
-export class LevelReader {
-  private cache = new Map<number, Uint8Array | null | undefined>();
-  // The chunk looked up last, kept beside the rest: a sheet crosses a handful of chunks and runs
-  // along each of them for thousands of pixels in a row, so nearly every look-up is the last one
-  // again — and a map look-up for every pixel of every frame was most of what drawing cost.
-  private lastId = -1;
-  private lastChunk: Uint8Array | null | undefined;
-  private kz: number;
-  private ky: number;
-  private kx: number;
-
-  constructor(readonly level: ZarrLevel) {
-    [this.kz, this.ky, this.kx] = level.meta.chunks;
-  }
-
-  private chunk(cz: number, cy: number, cx: number) {
-    const id = (cz * 4096 + cy) * 4096 + cx;
-    if (id === this.lastId) return this.lastChunk;
-    let data = this.cache.get(id);
-    if (data === undefined && !this.cache.has(id)) {
-      data = this.level.inside(cz, cy, cx) ? this.level.get(cz, cy, cx) : null;
-      this.cache.set(id, data);
-    }
-    this.lastId = id;
-    this.lastChunk = data;
-    return data;
-  }
-
-  // The trilinear value at level voxel coordinates, or -1 if a chunk it needs is not loaded.
-  sample(lz: number, ly: number, lx: number) {
-    const z0 = Math.floor(lz), y0 = Math.floor(ly), x0 = Math.floor(lx);
-    const tz = lz - z0, ty = ly - y0, tx = lx - x0;
-    const { kz, ky, kx } = this;
-    const cz = Math.floor(z0 / kz), cy = Math.floor(y0 / ky), cx = Math.floor(x0 / kx);
-    const iz = z0 - cz * kz, iy = y0 - cy * ky, ix = x0 - cx * kx;
-    if (z0 >= 0 && y0 >= 0 && x0 >= 0 && iz + 1 < kz && iy + 1 < ky && ix + 1 < kx) {
-      // All eight corners in one chunk, which is nearly always.
-      const data = this.chunk(cz, cy, cx);
-      if (data === undefined) return -1;
-      if (data === null) return 0;
-      const i = (iz * ky + iy) * kx + ix, sy = kx, sz = ky * kx;
-      const c00 = data[i] + (data[i + 1] - data[i]) * tx;
-      const c01 = data[i + sy] + (data[i + sy + 1] - data[i + sy]) * tx;
-      const c10 = data[i + sz] + (data[i + sz + 1] - data[i + sz]) * tx;
-      const c11 = data[i + sz + sy] + (data[i + sz + sy + 1] - data[i + sz + sy]) * tx;
-      const c0 = c00 + (c01 - c00) * ty, c1 = c10 + (c11 - c10) * ty;
-      return c0 + (c1 - c0) * tz;
-    }
-    let v = 0;
-    for (let c = 0; c < 8; c++) {
-      const dz = c >> 2, dy = (c >> 1) & 1, dx = c & 1;
-      const weight = (dz ? tz : 1 - tz) * (dy ? ty : 1 - ty) * (dx ? tx : 1 - tx);
-      if (weight === 0) continue;
-      const z = z0 + dz, y = y0 + dy, x = x0 + dx;
-      if (z < 0 || y < 0 || x < 0) continue;
-      const qz = Math.floor(z / kz), qy = Math.floor(y / ky), qx = Math.floor(x / kx);
-      const data = this.chunk(qz, qy, qx);
-      if (data === undefined) return -1;
-      if (data === null) continue;
-      v += weight * data[((z - qz * kz) * ky + (y - qy * ky)) * kx + (x - qx * kx)];
-    }
-    return v;
-  }
-}
-
-// Pixels between the points whose place in the scan is worked out exactly.  A piece is smooth over a
-// few pixels, so the ones in between are interpolated, which is most of the drawing's cost saved.
-const STEP = 8;
-
-/**
- * Draws a plane of `patch` into `out` (RGBA, width × height), reading `levels[level]` and coarser
- * levels where it is missing.  Pixels the piece does not reach are left transparent.  A quick look is
- * drawn by asking for fewer pixels — the same view, smaller — and scaling it up where it is shown.
- * Returns how many pixels came from a coarser level than asked for, and how many were drawn at all.
- */
-export function drawPlane(
-  patch: Patch,
-  plane: SurfacePlane,
-  w: number,
-  width: number,
-  height: number,
-  levels: ZarrLevel[],
-  level: number,
-  out: Uint8ClampedArray,
-  // Where each equal step across the picture falls, in sheets (`acrossSheets`).
-  spread: number[],
-) {
-  /*
-   * Written a whole pixel at a time.  Four writes into a clamped array — which rounds and clamps
-   * each one — came to as much as reaching into the scan did; as one 32-bit word there is nothing
-   * to clamp and a quarter of the stores.  Little-endian, so the bytes fall as red, green, blue,
-   * alpha in memory.
-   */
-  const words = new Uint32Array(out.buffer);
-  const readers = levels.map((one) => new LevelReader(one));
-  const where = mapping(patch, plane, w, width, height, spread);
-  const point = new Float64Array(3);
-
-  // Where the piece is, at every STEP-th pixel across and down, whether it is there at all, and how
-  // much of a sheet is there — which the pixels in between are shaded by, so that the edge of a hole
-  // is a fade and not a staircase of grid cells.
-  const across = Math.ceil(width / STEP) + 1, down = Math.ceil(height / STEP) + 1;
-  const places = new Float64Array(across * down * 3);
-  const cover = new Float32Array(across * down);
-  const there = new Uint8Array(across * down);
-  for (let i = 0; i < down; i++)
-    for (let j = 0; j < across; j++) {
-      const [sheet, gi, gj] = where(Math.min(i * STEP, height - 1), Math.min(j * STEP, width - 1));
-      if (!positionAt(patch, sheet, gi, gj, point)) continue;
-      places.set(point, (i * across + j) * 3);
-      cover[i * across + j] = coverageAt(patch, sheet, gi, gj);
-      there[i * across + j] = 1;
-    }
-
-  let coarser = 0, drawn = 0;
-  for (let r = 0; r < height; r++) {
-    const i0 = Math.min(Math.floor(r / STEP), down - 2), ti = (r - i0 * STEP) / STEP;
-    for (let c = 0; c < width; c++) {
-      const j0 = Math.min(Math.floor(c / STEP), across - 2), tj = (c - j0 * STEP) / STEP;
-      const topLeft = i0 * across + j0, bottomLeft = topLeft + across;
-      let alpha = 0;
-      if (there[topLeft] && there[topLeft + 1] && there[bottomLeft] && there[bottomLeft + 1]) {
-        const a = topLeft * 3, b = a + 3, d = bottomLeft * 3, e = d + 3;
-        for (let axis = 0; axis < 3; axis++) {
-          const top = places[a + axis] * (1 - tj) + places[b + axis] * tj;
-          const bottom = places[d + axis] * (1 - tj) + places[e + axis] * tj;
-          point[axis] = top * (1 - ti) + bottom * ti;
-        }
-        const top = cover[topLeft] * (1 - tj) + cover[topLeft + 1] * tj;
-        const bottom = cover[bottomLeft] * (1 - tj) + cover[bottomLeft + 1] * tj;
-        alpha = top * (1 - ti) + bottom * ti;
-      } else {
-        // Near the edge of what the piece reaches, where interpolating would round it off.
-        const [sheet, gi, gj] = where(r, c);
-        if (!positionAt(patch, sheet, gi, gj, point)) {
-          words[r * width + c] = 0;
-          continue;
-        }
-        alpha = coverageAt(patch, sheet, gi, gj);
-      }
-      if (alpha <= 0.02) {
-        words[r * width + c] = 0;
-        continue;
-      }
-      let value = -1, l = level;
-      for (; l < readers.length; l++) {
-        const f = levels[l].factor;
-        value = readers[l].sample(
-          (point[0] + 0.5) / f - 0.5,
-          (point[1] + 0.5) / f - 0.5,
-          (point[2] + 0.5) / f - 0.5,
-        );
-        if (value >= 0) break;
-      }
-      if (l > level) coarser++;
-      if (value < 0) {
-        words[r * width + c] = 0;
-        continue;
-      }
-      const grey = value < 0 ? 0 : value > 255 ? 255 : value | 0;
-      const shade = Math.round(255 * (alpha > 1 ? 1 : alpha)) * 0x1000000 + grey * 0x10101;
-      words[r * width + c] = shade;
-      drawn++;
-    }
-  }
-  return { coarser, drawn };
-}
-
 /*
  * How many points across the image the chunks are worked out from.  At least as many as the piece has
  * points across it: a coarser net than the piece's own can step over a run of sheet between two of
