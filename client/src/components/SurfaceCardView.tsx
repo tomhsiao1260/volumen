@@ -124,7 +124,7 @@ function describe(facts: SurfaceFacts) {
     `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
     `grid ${facts.across} × ${facts.down}, ${facts.step} voxels apart · ` +
     `${facts.kept ? "march read back" : "prediction read"} in ${facts.read} ms · ` +
-    `piece built in ${facts.built} ms\n` +
+    `marched in ${facts.walked} ms · table built in ${facts.built} ms\n` +
     `   ${facts.said} places said, each reaching ${facts.reach.toFixed(0)} voxels\n` +
     `   wraps ${facts.apart} voxels apart · holes ${facts.holes}` +
     ` · torn ${facts.torn} · stretch ×${facts.stretch}`
@@ -426,6 +426,7 @@ export function SurfaceCardView({
             lasagna,
             normals: lasagna === null || asked === "scan" ? "scan" : "prediction",
             charts: new URLSearchParams(window.location.search).get("charts") !== "no",
+            march: new URLSearchParams(window.location.search).get("march") !== "cpu",
             seed,
             w: wanted.current,
             plane,
@@ -448,7 +449,7 @@ export function SurfaceCardView({
                     ` a ${look[middle + 3]}`,
                 );
               }
-              gpuRef.current?.take({
+              const field = {
                 nu: event.nu,
                 nv: event.nv,
                 layers: event.layers,
@@ -458,7 +459,11 @@ export function SurfaceCardView({
                 walk: new Float32Array(event.walk),
                 lo: event.lo,
                 hi: event.hi,
-              });
+              };
+              // Kept where a measurement can reach it: this is the march itself, and the one way to
+              // know that running it elsewhere gave the same answer is to hold the two side by side.
+              if (DEBUG) ((window as unknown as { __march?: unknown[] }).__march ??= []).push(field);
+              gpuRef.current?.take(field);
               baseW.current = event.baseW;
               piece.current = {
                 alongU: event.alongU,

@@ -199,7 +199,7 @@ function baseSurface(field: NormalField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
  * samples to a sheet, so a twelfth is a step and a half to each sample — enough for the midpoint
  * rule, which is second order, and no more.
  */
-const STEP_OF_WRAP = 1 / 12;
+export const STEP_OF_WRAP = 1 / 12;
 /*
  * And how much of the way each node is moved towards the middle of its neighbours after every sample.
  *
@@ -314,6 +314,15 @@ const bump = (r: number) => {
  * Together and not one after another, because a sheet is a sheet: the nodes are not independent
  * walkers that happen to be drawn as a grid, and marching each to the end before starting the next
  * is what lets them drift apart (`HOLD`).
+ */
+/**
+ * The march: the grid carried out through the sheets, one sample at a time, both ways.
+ *
+ * Two and a half million node-steps for a card-sized piece, each reading the normal field twice at
+ * eight corners, and the one second a card waits before it shows anything.  Every node within a step
+ * is independent of every other and the smoothing between steps reads a whole grid and writes
+ * another, so this is also what runs on the GPU when there is one — `gpu/march.wgsl.ts` is a port of
+ * this function and of `hold` below, and the two are held against each other node by node.
  */
 function walk(
   field: NormalField,
@@ -834,7 +843,7 @@ function spacingSaid(field: NormalField, chains: ChainSaid[], n0: Vec3, fallback
 // piece needs, which is the room a correction slides into.
 export const walkReach = (K: number, per: number) => (K + MARGIN) * per;
 
-export function walkOut(
+export async function walkOut(
   field: NormalField,
   seed: Vec3,
   towards: Vec3,
@@ -849,7 +858,23 @@ export function walkOut(
    * drawing one does not make a kept march stale.
    */
   chains: ChainSaid[] = [],
-): Walk | undefined {
+  /*
+   * Somewhere else to run the march.
+   *
+   * Handed exactly what `walk` is handed and answering exactly what `walk` answers, so that the two
+   * are swappable and comparable; `undefined` back means it could not, and the march is walked here.
+   * The only caller is the GPU (`gpu/march.ts`), and the grid this starts from is not offered to it
+   * — `baseSurface` solves for the starting height by Gauss-Seidel, which is sequential by
+   * construction, and in parallel it would be a different answer rather than a faster one.
+   */
+  elsewhere?: (
+    X: Float64Array,
+    n0: Vec3,
+    reach: number,
+    per: number,
+    apart: number,
+  ) => Promise<{ P: Float32Array; A: Float32Array } | undefined>,
+): Promise<Walk | undefined> {
   // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
   // about which sheet they meant, and this fit makes no such decisions.
   const n0 = normalAt(field, seed, towards);
@@ -862,7 +887,9 @@ export function walkOut(
    * into.
    */
   const reach = walkReach(K, per);
-  return { ...grid, ...walk(field, X, n0, grid, reach, per, apart), reach, per, apart, n0, right, down };
+  const marched =
+    (await elsewhere?.(X, n0, reach, per, apart)) ?? walk(field, X, n0, grid, reach, per, apart);
+  return { ...grid, ...marched, reach, per, apart, n0, right, down };
 }
 
 /**

@@ -3,6 +3,8 @@
     "target": "ES2020",
     "module": "ESNext",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // WebGPU, for the march (`surface/gpu/march.ts`); not in TypeScript's own DOM yet.
+    "types": ["@webgpu/types"],
     "skipLibCheck": true,
     "experimentalDecorators": true,
     "useDefineForClassFields": false,

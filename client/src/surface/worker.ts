@@ -20,6 +20,7 @@ import type { SurfacePlane } from "./render";
 import { acrossSheets, acrossWalk, acrossWanted, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
 import { fieldOf } from "./gpu/field";
+import { marchOnGpu } from "./gpu/march";
 import type { ChainSaid, OpenRequest, PieceSpot, SurfaceEvent, SurfaceRequest } from "./types";
 
 
@@ -68,7 +69,7 @@ const dataUrl = (sourceId: string) => `${SERVER_DATA_ENDPOINT}/api/data/${source
  * holds 128 MB, and the chunks of one card's box are dropped to make room for another's before it
  * has copied them out — which leaves cards saying there is no sheet where there plainly is one.
  */
-type Piece = { patch: Patch; spacing: number; read: number; fitted: number; kept: boolean };
+type Piece = { patch: Patch; spacing: number; read: number; walked: number; fitted: number; kept: boolean };
 const pieces = new Map<string, Promise<Piece | "too-coarse" | undefined>>();
 const PIECES_KEPT = 6;
 let building: Promise<unknown> = Promise.resolve();
@@ -367,6 +368,7 @@ class Card {
           down: built.patch.nv,
           step: Math.round(Math.max(built.patch.hu, built.patch.hv)),
           read: Math.round(built.read),
+          walked: Math.round(built.walked),
           built: Math.round(built.fitted),
           kept: built.kept,
           ...patchFacts(built.patch),
@@ -420,7 +422,7 @@ class Card {
       return made;
     }
     // Only the card that started it did the work; the others were handed the answer.
-    return fresh ? made : { ...made, read: 0, fitted: 0 };
+    return fresh ? made : { ...made, read: 0, walked: 0, fitted: 0 };
   }
 
   // Reads what the piece needs and fits it; `build` is what says whether it has to be done at all.
@@ -465,7 +467,7 @@ class Card {
       const read = performance.now() - started;
       const patch = buildPatch(kept, K, this.request.chains, micron);
       const gap = wrapGap(patch);
-      return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted: performance.now() - started - read, kept: true };
+      return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, walked: 0, fitted: performance.now() - started - read, kept: true };
     }
 
     /*
@@ -516,26 +518,42 @@ class Card {
     while (which + 1 < scan.length && !fits(scan[which].factor)) which++;
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     const read = performance.now() - started;
-    const walked = walkOut(field, seed, n, grid, K, PER, spacing, this.request.chains);
+    /*
+     * Marched on the GPU where there is one and the prediction is what is being read: the box is
+     * already in hand as bytes, and the march is two and a half million node-steps that each read it
+     * twice.  Working the normals out of the scan itself (`ScanField`) has no box to hand over, so it
+     * marches here, as it always has.
+     */
+    const box =
+      this.request.march && field instanceof LasagnaField
+        ? { data: field.packed, dims: field.dims, origin: field.origin, factor: field.factor }
+        : undefined;
+    const walked = await walkOut(
+      field,
+      seed,
+      n,
+      grid,
+      K,
+      PER,
+      spacing,
+      this.request.chains,
+      box === undefined
+        ? undefined
+        : (X, n0, reach, per, apart) => marchOnGpu(box, X, n0, grid, reach, per, apart),
+    );
     if (walked === undefined) return undefined;
+    const marched = performance.now() - started - read;
     const patch = buildPatch(walked, K, this.request.chains, micron);
-    const fitted = performance.now() - started - read;
+    const fitted = performance.now() - started - read - marched;
     // Kept for the next time this is asked for, which is every reload, every winding taken in, and
     // every pull that reaches this far out again.  Nothing waits for it.
     writeChart(name, walked, of, seed).catch((error) => console.warn("Could not keep the march:", error));
     // The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
     // would be: it is what sets the card's scale, and what a point on a slice is faded by.
     const gap = wrapGap(patch);
-    return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted, kept: false };
+    return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, walked: marched, fitted, kept: false };
   }
 
-  /**
-   * The sheet this piece can show of the one asked for, building further out first where it has to.
-   *
-   * Building is synchronous work on this thread, so while it happens nothing else here runs — no line
-   * is sent and no frame is drawn.  Measured, a build is 650 to 870 ms, which is why nothing should
-   * ask for a sheet many wraps away once per frame.
-   */
   /**
    * Hands the march to the card as something a GPU can read, once per piece.
    *
@@ -627,6 +645,15 @@ class Card {
     );
   }
 
+  /**
+   * The sheet this piece can show of the one asked for, building further out first where it has to.
+   *
+   * What a build costs, measured: a march read back from the server is 120 to 200 ms and the table
+   * on top of it another 200 to 470; a piece nobody has walked before is 170 to 260 ms of marching on
+   * the GPU, or 840 to 1190 on this thread where there is no GPU to run it on (`gpu/march.ts`).  The
+   * table is work on THIS thread whichever way the march went, so while it happens nothing else here
+   * runs — no line is sent, and no chunks are asked for.
+   */
   private async reach(w: number) {
     let left = 4;
     /*

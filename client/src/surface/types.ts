@@ -72,6 +72,10 @@ export interface OpenRequest {
    * and the page says which it wants rather than the worker guessing.
    */
   normals: "prediction" | "scan";
+  // Whether the march may be run on the GPU (`gpu/march.ts`).  Off with `?march=cpu`, which is how
+  // the two are held against each other: the same piece marched both ways has to come out the same
+  // node for node, or the shader is not the port it claims to be.
+  march: boolean;
   // Whether a march already walked may be read back from the server (`chart.ts`).  Off with
   // `?charts=no`, which is how the fit is held against itself: the same board drawn both ways has
   // to come out the same, or a chart is not the march it claims to be.
@@ -194,8 +198,11 @@ export interface SurfaceFacts {
   across: number;
   down: number;
   step: number;
-  // How long it took to read the prediction, and to walk the piece out of it.
+  // How long it took to read the prediction, to walk the piece out of it, and to turn the walk into
+  // a table with the annotations in it.  The two halves are measured apart because only the first
+  // reads the prediction, and only the first is worth moving anywhere.
   read: number;
+  walked: number;
   built: number;
   // Whether the march was read back from a chart instead of walked (`chart.ts`).
   kept: boolean;

@@ -50,6 +50,19 @@ export class LasagnaField implements NormalField {
   private gm: Float32Array;
   // Where `normal` writes its answer.
   readonly out = new Float64Array(3);
+  /*
+   * The same box again, packed the way a GPU wants it: four bytes a voxel, `nx` and `ny` raw as they
+   * came and 255 in the alpha where the network had something to say.
+   *
+   * Built here rather than asked for later because the bytes it is built from are read here and
+   * nowhere else — `copyBox` hands them over once.  Eight megabytes against the twenty-four the three
+   * arrays above already are, and it is what lets the march run somewhere other than this thread
+   * (`gpu/march.ts`).
+   */
+  readonly packed: Uint8Array;
+  readonly dims: [number, number, number];
+  readonly origin: [number, number, number];
+  readonly factor: number;
 
   /**
    * `lo` and `hi` bound the full-resolution box the field is needed in; the channels' chunks covering
@@ -66,11 +79,18 @@ export class LasagnaField implements NormalField {
     this.nx = new Float32Array(n);
     this.ny = new Float32Array(n);
     this.gm = new Float32Array(n);
+    this.packed = new Uint8Array(n * 4);
+    this.dims = [this.d[0], this.d[1], this.d[2]];
+    this.origin = [this.o[0], this.o[1], this.o[2]];
+    this.factor = this.f;
     for (let k = 0; k < n; k++) {
       if (g.data[k] === 0) continue;
       this.nx[k] = (a.data[k] - 128) / 127;
       this.ny[k] = (b.data[k] - 128) / 127;
       this.gm[k] = g.data[k] / 4000;
+      this.packed[k * 4] = a.data[k];
+      this.packed[k * 4 + 1] = b.data[k];
+      this.packed[k * 4 + 3] = 255;
     }
   }
 
