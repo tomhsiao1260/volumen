@@ -6,4 +6,5 @@
 /db/json/board.json
 /db/json/windings
 /db/cache
+/db/charts
 /dist

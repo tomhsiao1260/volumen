@@ -83,6 +83,27 @@ export interface PatchGrid {
   hv: number;
 }
 
+/**
+ * A march, kept whole: for every node of the grid, where that node is in the scan on each of the
+ * layers it was walked through — `P[((k + reach)·nu·nv + i·nu + j)·3]` = (z, y, x), `NaN` where the
+ * march never got there, and `A` 1 where it did.  `reach` layers each way of the base, `per` of them
+ * to a sheet, so the layer `k` is the winding `k / per` from the base.
+ *
+ * This is what `chart.ts` writes to disk and reads back, so every number in it has to be here: the
+ * frame it was laid out on, and `apart` — what one sheet came to be worth in voxels — without which
+ * a winding cannot be turned back into a distance.
+ */
+export interface Walk extends PatchGrid {
+  P: Float32Array;
+  A: Float32Array;
+  reach: number;
+  per: number;
+  apart: number;
+  n0: Vec3;
+  right: Vec3;
+  down: Vec3;
+}
+
 export interface Patch extends PatchGrid {
   // Whole sheets on each side of the base in the table, and table layers per sheet.
   K: number;
@@ -798,7 +819,22 @@ function spacingSaid(field: NormalField, chains: ChainSaid[], n0: Vec3, fallback
   return gaps[gaps.length >> 1];
 }
 
-export function buildPatch(
+/**
+ * The march itself: every node of a grid laid out at `seed` walked out to `K + MARGIN` sheets each
+ * way, with how far apart the sheets came to be and the frame it was laid out on.
+ *
+ * This is the half of a piece that nobody's annotations can touch.  A `relative` winding reaches it
+ * — through `apart`, which is the step the march takes — but a `same` winding never does, and the
+ * whole of what either says is applied afterwards by resampling each node's own path (`buildPatch`).
+ * It is also the ONLY half that reads the normal field, and reading the field is what a piece costs:
+ * a march is some `384 · nodes` samples and the structure tensor behind them is fifty megabytes.  So
+ * this is the thing worth keeping, and `chart.ts` is where it is kept.
+ */
+// How many layers each way a march covers for a table of `K` sheets: one sheet further than the
+// piece needs, which is the room a correction slides into.
+export const walkReach = (K: number, per: number) => (K + MARGIN) * per;
+
+export function walkOut(
   field: NormalField,
   seed: Vec3,
   towards: Vec3,
@@ -807,6 +843,38 @@ export function buildPatch(
   per = 8,
   // What one sheet is worth in voxels when nobody has said; a relative winding says it properly.
   spacing = 40,
+  /*
+   * What a person has said about the sheets here — but only the `relative` windings are read, and only
+   * to measure `apart` (`spacingSaid`).  A `same` winding cannot reach the march at all, which is why
+   * drawing one does not make a kept march stale.
+   */
+  chains: ChainSaid[] = [],
+): Walk | undefined {
+  // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
+  // about which sheet they meant, and this fit makes no such decisions.
+  const n0 = normalAt(field, seed, towards);
+  if (n0 === null) return undefined;
+
+  const apart = spacingSaid(field, chains, n0, spacing);
+  const { X, right, down } = baseSurface(field, seed, n0, grid);
+  /*
+   * Walked once, and further than the piece needs: the room either side is what a correction slides
+   * into.
+   */
+  const reach = walkReach(K, per);
+  return { ...grid, ...walk(field, X, n0, grid, reach, per, apart), reach, per, apart, n0, right, down };
+}
+
+/**
+ * The piece: a march resampled into a table of whole sheets, with what a person said about the
+ * sheets held exactly.
+ *
+ * Reads no field and downloads nothing — everything it needs is in the `Walk` and in the chains.
+ * That is why a winding can be taken in without the second and a half a march costs.
+ */
+export function buildPatch(
+  walked: Walk,
+  K = 3,
   // What a person has said about the sheets here.
   chains: ChainSaid[] = [],
   /*
@@ -819,24 +887,11 @@ export function buildPatch(
    * any resolution.
    */
   micron = 2.4,
-): Patch | undefined {
-  // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
-  // about which sheet they meant, and this fit makes no such decisions.
-  const n0 = normalAt(field, seed, towards);
-  if (n0 === null) return undefined;
-
-  const { nu, nv } = grid;
+): Patch {
+  const { nu, nv, hu, hv, reach, per, apart, n0, right, down } = walked;
+  const grid: PatchGrid = { nu, nv, hu, hv };
   const count = nu * nv;
-  const apart = spacingSaid(field, chains, n0, spacing);
-  const { X, right, down } = baseSurface(field, seed, n0, grid);
-
-  const from = (start: Float64Array): Patch => {
-  /*
-   * Walked once, and further than the piece needs: the room either side is what a correction slides
-   * into.
-   */
-  const reach = (K + MARGIN) * per;
-  const walked = walk(field, start, n0, grid, reach, per, apart);
+  {
   const table = (R: number, Q: { P: Float32Array; A: Float32Array }, shift?: Shift) => {
     const layers = 2 * K * per + 1;
     const P = new Float32Array(layers * count * 3).fill(NaN);
@@ -913,22 +968,7 @@ export function buildPatch(
   said.reach = apart * REACH_OF_WRAP;
   const shift = bend(grid, want, said.reach, apart, micron);
   return { ...grid, K, per, ...table(reach, walked, shift), right, down, normal: n0, said };
-  };
-
-  /*
-   * Built twice, the second time from a base spread so that the sheet comes out evenly sampled.
-   *
-   * Moving a sheet inward through a curved stack really does make it smaller — that is geometry, not
-   * a fault — and the nodes, each walking its own path, come along with it.  So where a correction
-   * moves the sheet a long way the grid bunches up, and the card draws that patch of papyrus larger
-   * than the rest: measured on a real board, neighbouring nodes came out at 0.63 of the spacing they
-   * were laid out on, which is that stretch of papyrus drawn half as big again.
-   *
-   * Nothing can stop a sheet shrinking.  What can be fixed is WHERE the nodes sit on it: the first
-   * piece says how the sheet came out, the base is re-spread so that the second comes out even, and
-   * the outline is untouched because only the inside of each row and column is moved.
-   */
-  return from(X);
+  }
 }
 
 

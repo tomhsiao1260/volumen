@@ -72,6 +72,10 @@ export interface OpenRequest {
    * and the page says which it wants rather than the worker guessing.
    */
   normals: "prediction" | "scan";
+  // Whether a march already walked may be read back from the server (`chart.ts`).  Off with
+  // `?charts=no`, which is how the fit is held against itself: the same board drawn both ways has
+  // to come out the same, or a chart is not the march it claims to be.
+  charts: boolean;
   // The voxel the card was opened on, in voxels of the full-resolution scan.
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.
@@ -144,6 +148,8 @@ export interface SurfaceFacts {
   // How long it took to read the prediction, and to walk the piece out of it.
   read: number;
   built: number;
+  // Whether the march was read back from a chart instead of walked (`chart.ts`).
+  kept: boolean;
   // How many places the annotations came to once each chain's clicks were joined into a line, and how
   // far one of them reached sideways, in voxels.
   said: number;

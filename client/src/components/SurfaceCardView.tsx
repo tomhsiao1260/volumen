@@ -114,7 +114,8 @@ function describe(facts: SurfaceFacts) {
   return (
     `wraps ${facts.spacing.toFixed(0)} voxels apart at the seed · ` +
     `grid ${facts.across} × ${facts.down}, ${facts.step} voxels apart · ` +
-    `prediction read in ${facts.read} ms · piece built in ${facts.built} ms\n` +
+    `${facts.kept ? "march read back" : "prediction read"} in ${facts.read} ms · ` +
+    `piece built in ${facts.built} ms\n` +
     `   ${facts.said} places said, each reaching ${facts.reach.toFixed(0)} voxels\n` +
     `   wraps ${facts.apart} voxels apart · holes ${facts.holes}` +
     ` · torn ${facts.torn} · stretch ×${facts.stretch}`
@@ -381,6 +382,7 @@ export function SurfaceCardView({
             chains,
             lasagna,
             normals: lasagna === null || asked === "scan" ? "scan" : "prediction",
+            charts: new URLSearchParams(window.location.search).get("charts") !== "no",
             seed,
             w: wanted.current,
             plane,

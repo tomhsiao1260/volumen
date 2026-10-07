@@ -10,10 +10,12 @@
  */
 
 import { SERVER_API_ENDPOINT, SERVER_DATA_ENDPOINT } from "../config";
+import type { ChartOf } from "./chart";
+import { chartId, readChart, writeChart } from "./chart";
 import { chunksFor, LasagnaField, normalLevel, ScanField, scanChunksFor } from "./field";
 import type { Vec3 } from "./field";
 import type { Patch, PatchGrid } from "./patch";
-import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, wrapGap } from "./patch";
+import { buildPatch, coverageAt, layerGrid, nearestOn, outward, patchFacts, positionAt, walkOut, walkReach, wrapGap } from "./patch";
 import type { SurfacePlane } from "./render";
 import { acrossSheets, acrossWalk, acrossWanted, drawPlane, LevelReader, pieceAt, planeChunks } from "./render";
 import { ZarrLevel } from "./store";
@@ -52,7 +54,7 @@ const dataUrl = (sourceId: string) => `${SERVER_DATA_ENDPOINT}/api/data/${source
  * holds 128 MB, and the chunks of one card's box are dropped to make room for another's before it
  * has copied them out — which leaves cards saying there is no sheet where there plainly is one.
  */
-type Piece = { patch: Patch; spacing: number; read: number; fitted: number };
+type Piece = { patch: Patch; spacing: number; read: number; fitted: number; kept: boolean };
 const pieces = new Map<string, Promise<Piece | "too-coarse" | undefined>>();
 const PIECES_KEPT = 6;
 let building: Promise<unknown> = Promise.resolve();
@@ -346,6 +348,7 @@ class Card {
           step: Math.round(Math.max(built.patch.hu, built.patch.hv)),
           read: Math.round(built.read),
           built: Math.round(built.fitted),
+          kept: built.kept,
           ...patchFacts(built.patch),
         },
       });
@@ -406,6 +409,45 @@ class Card {
     const across = width / density, down = height / density;
     const micron = this.request.micron;
     const started = performance.now();
+    const spacing = SPACING_UM / micron;
+    if (spacing < SPACING_LEAST) return "too-coarse";
+
+    /*
+     * The march first, if this one has already been walked.
+     *
+     * Looked for before anything is read, because a chart that answers means nothing has to be read
+     * at all: the normal field is what the march needs, and it is the only thing that needs it.  The
+     * name is asked of the REQUESTED direction rather than the one the field gives back, so that the
+     * question can be put before the field exists; the two agree, since the field is itself decided
+     * by the scan, the resolution and the level, all of which are in the name.
+     */
+    const of: ChartOf = {
+      source: this.request.scanSourceId,
+      micron,
+      normals: this.request.normals,
+      seed,
+      towards: towards ?? [0, 1, 0],
+      zoom,
+      nu: grid.nu,
+      nv: grid.nv,
+      hu: grid.hu,
+      hv: grid.hv,
+      reach: walkReach(K, PER),
+      per: PER,
+      spacing,
+      steps: this.request.chains
+        .filter((chain) => chain.kind === "step")
+        .map((chain) => `${chain.id}.${chain.rev}`),
+    };
+    const name = await chartId(of);
+    const kept = this.request.charts ? await readChart(name).catch(() => undefined) : undefined;
+    if (kept !== undefined) {
+      const read = performance.now() - started;
+      const patch = buildPatch(kept, K, this.request.chains, micron);
+      const gap = wrapGap(patch);
+      return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted: performance.now() - started - read, kept: true };
+    }
+
     /*
      * Only the normal field is read: `nx`, `ny` for the direction and `grad_mag` for how much of a
      * winding a voxel of it is worth.  The phase and the surface mask are not downloaded at all —
@@ -443,8 +485,6 @@ class Card {
       return undefined;
     }
     const n: Vec3 = [near.out[0], near.out[1], near.out[2]];
-    const spacing = SPACING_UM / micron;
-    if (spacing < SPACING_LEAST) return "too-coarse";
 
     // The whole box: the card on the tangent plane, and the depth the streamlines may reach along
     // the normal, with room for the sheet to curve.
@@ -456,13 +496,17 @@ class Card {
     while (which + 1 < scan.length && !fits(scan[which].factor)) which++;
     const field = await load(seed.map((v, i) => v - half[i]) as Vec3, seed.map((v, i) => v + half[i]) as Vec3);
     const read = performance.now() - started;
-    const patch = buildPatch(field, seed, n, grid, K, PER, spacing, this.request.chains, micron);
+    const walked = walkOut(field, seed, n, grid, K, PER, spacing, this.request.chains);
+    if (walked === undefined) return undefined;
+    const patch = buildPatch(walked, K, this.request.chains, micron);
     const fitted = performance.now() - started - read;
-    if (patch === undefined) return undefined;
+    // Kept for the next time this is asked for, which is every reload, every winding taken in, and
+    // every pull that reaches this far out again.  Nothing waits for it.
+    writeChart(name, walked, of, seed).catch((error) => console.warn("Could not keep the march:", error));
     // The card is told how far apart the wraps CAME OUT, not how far apart the prediction said they
     // would be: it is what sets the card's scale, and what a point on a slice is faded by.
     const gap = wrapGap(patch);
-    return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted };
+    return { patch, spacing: Number.isNaN(gap) ? spacing : gap, read, fitted, kept: false };
   }
 
   /**

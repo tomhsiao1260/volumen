@@ -7,7 +7,8 @@
  * It also lists what the Vesuvius Challenge data bucket holds (`utils/scrolls.ts`) and this
  * machine's folders (`utils/folders.ts`), so that a card's source can be chosen by clicking.
  *
- * The board itself is kept in `db/json/board.json` and the sources in `db/json/sources.json`.
+ * The board itself is kept in `db/json/board.json` and the sources in `db/json/sources.json`, and
+ * the marches the surface cards have walked in `db/charts` (`utils/charts.ts`).
  */
 
 import express from "express";
@@ -20,6 +21,7 @@ import scrollsRouter from "./routes/scrolls";
 import foldersRouter from "./routes/folders";
 import dataRouter from "./routes/data";
 import windingsRouter from "./routes/windings";
+import chartsRouter from "./routes/charts";
 import { createSettingsFileIfMissing } from "./utils/settings";
 
 dotenv.config();
@@ -45,6 +47,7 @@ app.use("/api/scrolls", scrollsRouter);
 app.use("/api/folders", foldersRouter);
 app.use("/api/data", dataRouter);
 app.use("/api/windings", windingsRouter);
+app.use("/api/charts", chartsRouter);
 
 // For the same reason, the server listens on this machine only.
 app.listen(Number(PORT), "127.0.0.1", async () => {
