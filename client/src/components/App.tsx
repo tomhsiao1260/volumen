@@ -217,6 +217,9 @@ export function App() {
         sheets: (sourceId: string) => sheetsOf(sourceId),
         // Where each winding point falls on a card's piece, as the card itself has it.
         spots: (cardId: string) => Object.fromEntries(spotsOf(cardId)),
+        // And which of them the card actually drew, which is not the same question: a point can be on
+        // the piece and still be nowhere near the cut the card is showing.
+        dots: (cardId: string) => drawnDotsOf(cardId),
         /*
          * And the winding store itself, which is how a harness lays a case out: through the same door
          * the drawing goes through, and without a page reload.  That is the whole cost of a test — a

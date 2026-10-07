@@ -1,0 +1,24 @@
+<!doctype html>
+<!--
+  Stage 0 of the WebGPU/TSL rewrite: four things the design rests on, asked of the real libraries
+  rather than of the documentation.  Throwaway — delete it once the answers are in the plan.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>spike</title>
+    <style>
+      body { background: #111; color: #ddd; font: 13px ui-monospace, monospace; padding: 16px; }
+      table { border-collapse: collapse; margin-bottom: 16px; }
+      td { padding: 3px 10px 3px 0; vertical-align: top; }
+      .ok { color: #7c7; }
+      .no { color: #e77; }
+      canvas { image-rendering: pixelated; border: 1px solid #333; margin-right: 6px; }
+    </style>
+  </head>
+  <body>
+    <div id="out">running…</div>
+    <div id="shots"></div>
+    <script type="module" src="/src/spike/main.ts"></script>
+  </body>
+</html>

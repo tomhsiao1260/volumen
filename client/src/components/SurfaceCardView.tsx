@@ -57,6 +57,15 @@ const PER_PIXEL = 1 / 960;
 const NOTCH = 1 / 8;
 const NOTCH_PIXELS = NOTCH / PER_PIXEL;
 /*
+ * And on a cut, where the same eighth is an eighth of what the card SHOWS rather than of a sheet.
+ *
+ * It used to borrow the flat card's two sizes, and 960 pixels to a sheet is 360 to a gesture — which
+ * on a cut is most of the papyrus the piece has along the axis being swept.  So one flick crossed it
+ * and then nothing moved, which is exactly how it read: a jump, and then a wall.
+ */
+const CUT_NOTCH = 1 / 8;
+const CUT_GESTURE = 3 / 8;
+/*
  * A gap this long starts a new scroll.  What tells the hand from the trackpad coasting after it:
  * the coasting only ever fades, so a push that has grown smaller this many times in a row is not a
  * hand any more — a hand's pushes wander up and down.  Falling well below the gesture's strongest
@@ -325,7 +334,7 @@ export function SurfaceCardView({
     const middle = far.current ?? farOf(have.walk, wanted.current - baseW.current);
     // A point's winding is counted from where the card was opened; this window is in the piece's
     // own, so the base comes off a winding before it is looked up.
-    return { walk: have.walk, from: middle - wide / 2, wide, base: baseW.current };
+    return { walk: have.walk, from: middle - wide / 2, wide, base: baseW.current, reach: scale.reach };
   };
 
   /*
@@ -482,6 +491,26 @@ export function SurfaceCardView({
               // The sheets could not be followed as far as the wheel went, so the board is told where
               // the card really came to rest.
               if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
+              /*
+               * And where the cut is taken, if the piece moved along the papyrus to meet it
+               * (`along` in the worker): the row the card was asking for is the middle of the new
+               * piece, so it counts from there now.
+               *
+               * A hand may still be down while that happens.  A pull reads from where it took hold,
+               * so that base is carried by the same amount — the papyrus goes on following the hand
+               * across the join instead of snapping back to where the hand started.
+               */
+              if (Math.abs(event.pin - pin.current) > 1e-6) {
+                if (pulling.current !== undefined) {
+                  pulling.current.pin += event.pin - pin.current;
+                  const scale = cutScale();
+                  if (scale !== undefined) pulling.current.perPixel = scale.wide / scale.reach;
+                }
+                pin.current = event.pin;
+                far.current = undefined;
+                showOnGpu();
+                markSheets();
+              }
               gpuRef.current?.want(
                 event.wanted.map((one) => ({
                   level: one.level,
@@ -665,12 +694,19 @@ export function SurfaceCardView({
        * the row of the grid it is taken at is the one thing it cannot show.  Both are the same
        * gesture of the same size; what they mean is the plane's.
        */
-      let by = pixels ? delta : Math.sign(delta) * NOTCH_PIXELS;
-      const left = GESTURE_PIXELS - scroll.spent;
+      // A notch, and the most one gesture may move: a sheet's worth on the flat card, and the card's
+      // own worth on a cut.  A trackpad is left at one for one either way, which is what makes it
+      // read as the same gesture as taking hold of the line.
+      const tall = gpuBox.current?.clientHeight ?? 0;
+      const cut = wantedPlane.current !== "uv";
+      const notch = cut ? CUT_NOTCH * tall : NOTCH_PIXELS;
+      const cap = cut ? CUT_GESTURE * tall : GESTURE_PIXELS;
+      let by = pixels ? delta : Math.sign(delta) * notch;
+      const left = cap - scroll.spent;
       if (left <= 0) return;
       by = Math.sign(by) * Math.min(Math.abs(by), left);
       scroll.spent += Math.abs(by);
-      if (wantedPlane.current === "uv") {
+      if (!cut) {
         askFor(Math.round((wanted.current + by * PER_PIXEL) * 1000) / 1000);
         return;
       }
@@ -739,6 +775,25 @@ export function SurfaceCardView({
                 : [found.fv, sideways];
           if (at[0] < 0 || at[0] > 1 || at[1] < 0 || at[1] > 1) continue;
           /*
+           * How far along the papyrus the place is from the cut itself, in voxels.
+           *
+           * A cut shows one row of the grid and nothing either side of it, so where a place sits
+           * along the row it does NOT show is the one thing its two coordinates on the card cannot
+           * say — and a place a hundred voxels along the papyrus drawn as though it were on the cut
+           * is a place drawn somewhere it is not.  It was: the coordinate was dropped, and every
+           * point of every chain on the piece was drawn on every cut of it.
+           *
+           * So it fades with that distance and goes beyond half a card's worth of it.  Half a
+           * CARD's, because a cut draws a square of papyrus square: the same amount of papyrus the
+           * other way would be half off the picture.
+           */
+          let off = 0;
+          if (held !== undefined) {
+            const hidden = wantedPlane.current === "uw" ? found.fv : found.fu;
+            off = Math.abs(hidden - pin.current) * held.reach;
+            if (off > held.wide / 2) continue;
+          }
+          /*
            * On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
            * But never to nothing: a point on another wrap is still a point, and a person looking at
            * one wrap needs to see the annotations on the others — to press one and join it, to see
@@ -747,7 +802,10 @@ export function SurfaceCardView({
            * points are on different wraps, which is the whole of what it says.
            */
           const away = Math.max(0, 1 - Math.abs(found.w - sheet) / 0.5);
-          const near = wantedPlane.current !== "uv" ? 1 : Math.max(apart ? GHOST_APART : GHOST, away);
+          const near =
+            wantedPlane.current !== "uv"
+              ? Math.max(apart ? GHOST_APART : GHOST, held === undefined ? 1 : 1 - off / (held.wide / 2))
+              : Math.max(apart ? GHOST_APART : GHOST, away);
           const here = away > 0;
           const x = at[0] * width, y = at[1] * height;
           drawnDots.current.push({ chain: one.id, point: point.id, x: x / density, y: y / density, near: away });

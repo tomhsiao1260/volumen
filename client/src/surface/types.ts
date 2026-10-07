@@ -189,6 +189,15 @@ export interface WantEvent {
    */
   w: number;
   limited: boolean;
+  /*
+   * And where along the papyrus the cut is taken, 0 to 1 across the grid.
+   *
+   * Normally the card's own, handed straight back.  But a cut swept past the row its piece was built
+   * around is answered by building the piece again around the row it is now at (`along`), and then
+   * this is the middle — so the card has to be told, or it would go on counting from a row of a
+   * piece that no longer exists.
+   */
+  pin: number;
   wanted: { level: number; factor: number; chunks: ArrayBuffer }[];
 }
 

@@ -132,6 +132,24 @@ function channelLevel(sourceId: string, level: number) {
  */
 const REBASE_AT = K - 5;
 /*
+ * And how far from the middle a cut may be taken before the piece is moved ALONG the papyrus to meet
+ * it.
+ *
+ * The same bargain as `REBASE_AT`, in the other direction.  A cut shows one row of the grid, and the
+ * grid is about one card long, so sweeping a cut runs out of piece in roughly one card's worth of
+ * movement — which read as the card simply refusing to go further.  Past this the piece is built
+ * again, at the far end of the row being swept, and the rest of the piece is what the card goes on
+ * drawing from while that happens.
+ *
+ * It cannot be less than a quarter, and that is arithmetic rather than taste.  The next piece stands
+ * at the end of the row, so a cut panned at half plus this lands at this, measured from the start —
+ * and for the new piece not to ask to be panned again the moment it arrives, this has to be the
+ * further of the two from the middle.  A quarter is where they meet; below it a sweep would build
+ * pieces back and forth for ever.  Just above it is where the margin is widest: a fifth of a piece
+ * left to draw from, which at a hand's pace is about the half second a build takes.
+ */
+const PAN_AT = 0.3;
+/*
  * How far from the piece a voxel may be and still be a place on it, in voxels.  A point inside the
  * slab of papyrus the piece covers comes back a fraction of a voxel away; one outside comes back as
  * far away as the edge it was measured to, which is the answer "not on this piece".
@@ -254,6 +272,75 @@ class Card {
     // Walked once for the piece and kept: a lookup afterwards, however often it is asked.
     if (this.walked?.patch !== patch) this.walked = { patch, walk: acrossWalk(patch) };
     return acrossSheets(this.walked.walk, sheet, acrossWanted(patch, plane, this.request.width, this.request.height));
+  }
+
+  /**
+   * The piece moved along the papyrus, so that a cut can be swept past the row it was built around.
+   *
+   * The seed is the grid node the cut is now taken at, on the sheet being shown — and, as in `reach`,
+   * the next piece is solved afresh from the tangent plane there rather than carried on from this
+   * one's grid, which is what keeps the nodes from creeping together over a long sweep.
+   */
+  private async along(plane: SurfacePlane, sheet: number) {
+    let left = 2;
+    while (
+      this.patch !== undefined &&
+      plane !== "uv" &&
+      left-- > 0 &&
+      Math.abs(this.pin - 0.5) > PAN_AT
+    ) {
+      const patch = this.patch;
+      const grid = layerGrid(patch, sheet);
+      const along = plane === "uw" ? patch.nv - 1 : patch.nu - 1;
+      const other = Math.round((plane === "uw" ? patch.nu - 1 : patch.nv - 1) / 2);
+      const node = (at: number) =>
+        (plane === "uw" ? at * patch.nu + other : other * patch.nu + at) * 3;
+      // Where the cut is taken now, which is the place that has to stay under the card.
+      const was = node(Math.round(this.pin * along));
+      if (Number.isNaN(grid[was])) break;
+      const here: Vec3 = [grid[was], grid[was + 1], grid[was + 2]];
+      /*
+       * The next piece is stood at the END of the row the sweep is heading for, not at the row the
+       * cut is on.
+       *
+       * Standing it where the cut already is centres it there, which leaves half a piece ahead and
+       * buys a quarter of one before the next build — and a build is half a second, so a sweep
+       * spends most of its time waiting.  At the end of the row it is half a piece further on, so
+       * the same half second buys twice the papyrus; the cut then sits somewhere off the middle of
+       * the new piece rather than in it, which is what `nearestOn` below is for.
+       *
+       * Or the nearest row back towards the middle that the march reached: the outermost row of a
+       * grid is the one most likely to have been given up on, and it is exactly the row wanted here.
+       */
+      const towards = this.pin > 0.5 ? along : 0;
+      let seed = -1;
+      for (let at = towards; seed < 0; at += towards === 0 ? 1 : -1) {
+        if (!Number.isNaN(grid[node(at)])) seed = node(at);
+        if (Math.abs(at - along / 2) <= 1) break;
+      }
+      if (seed < 0) break;
+      const next = await this.build([grid[seed], grid[seed + 1], grid[seed + 2]], patch.normal);
+      if (this.closed || next === undefined || next === "too-coarse") break;
+      this.patch = next.patch;
+      this.spacing = next.spacing;
+      /*
+       * And where the old cut landed in the new piece, found rather than worked out.
+       *
+       * The two grids are solved afresh from different tangent planes, so one does not map onto the
+       * other by arithmetic — the only honest answer is to look the place up.  Failing that the piece
+       * is taken as centred on the cut, which is what standing it there would have given.
+       */
+      const found = nearestOn(next.patch, here);
+      if (found !== undefined && found.away <= ON_PIECE) {
+        this.pin = plane === "uw" ? found.gi / (next.patch.nv - 1) : found.gj / (next.patch.nu - 1);
+        this.baseW += sheet - found.w;
+        sheet = found.w;
+      } else {
+        this.pin = 0.5;
+        this.baseW += sheet;
+        sheet = 0;
+      }
+    }
   }
 
   show(w: number, plane: SurfacePlane, pin = 0.5) {
@@ -640,7 +727,7 @@ class Card {
       wanted.push({ level, factor: scan[level].factor, chunks: flat.buffer as ArrayBuffer });
     }
     this.post(
-      { type: "want", id: this.request.id, w: reached, limited, wanted },
+      { type: "want", id: this.request.id, w: reached, limited, pin: this.pin, wanted },
       wanted.map((one) => one.chunks),
     );
   }
@@ -718,13 +805,20 @@ class Card {
     this.drawing = true;
     try {
       let drawn: string | undefined;
-      while (!this.closed && drawn !== `${this.wanted} ${this.plane}`) {
+      // The cut is taken somewhere as much as it is on a sheet, so moving it is as much a reason to
+      // come round again — a cut taken elsewhere lands in other chunks, and may be off the piece.
+      const here = () => `${this.wanted} ${this.plane} ${this.pin}`;
+      while (!this.closed && drawn !== here()) {
         const w = this.wanted, plane = this.plane;
-        const asked = `${w} ${plane}`;
+        const asked = here();
         const reached = await this.reach(w);
+        if (this.closed) return;
+        await this.along(plane, reached - this.baseW);
         if (this.closed) return;
         const patch = this.patch!;
         const { id } = this.request;
+        // After a pan the piece stands on this very sheet, so this is 0; it is worked out again
+        // rather than carried, because `along` is what moved the ground under it.
         const sheet = reached - this.baseW;
         // Where each equal step across a cut falls, which the chunks are worked out from: once per
         // sheet shown, not once per anything else.
