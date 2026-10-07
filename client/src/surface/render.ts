@@ -36,6 +36,14 @@ function mapping(
   height: number,
   // Where each equal step across the picture falls, in sheets (`acrossSheets`).
   spread: number[],
+  /*
+   * Where along the axis a cut does NOT show it is taken, 0 to 1 across the grid.
+   *
+   * A cut along u is one row of the grid and a cut along v one column, and until there was a way to
+   * say which, it was always the middle one: the card could be moved through the stack, which it
+   * already shows the whole of, and never along the papyrus, which it cannot show at all.
+   */
+  pin = 0.5,
 ) {
   const lastU = patch.nu - 1, lastV = patch.nv - 1;
   const alongU = (c: number) => ((c + 0.5) / width) * lastU;
@@ -46,10 +54,19 @@ function mapping(
     const i = Math.min(spread.length - 2, Math.floor(at));
     return spread[i] + (at - i) * (spread[i + 1] - spread[i]);
   };
+  /*
+   * On a cut the sheets always stack DOWNWARDS, whichever way the cut runs along the papyrus.
+   *
+   * They used to stack downwards on one cut and out to the right on the other, which kept u and v
+   * each on the axis they have on the flat card — tidy on paper, and wrong in the hand: the same
+   * movement through the stack was an up-and-down pull on one card and a sideways one on the other.
+   * The axis through the papyrus is the one a person is travelling along, so it is the one that gets
+   * the screen's own direction of travel, on both.
+   */
   const acrossRow = (r: number) => sheetAt((r + 0.5) / height);
-  const acrossColumn = (c: number) => sheetAt((c + 0.5) / width);
-  if (plane === "uw") return (r: number, c: number) => [acrossRow(r), lastV / 2, alongU(c)];
-  if (plane === "vw") return (r: number, c: number) => [acrossColumn(c), alongV(r), lastU / 2];
+  if (plane === "uw") return (r: number, c: number) => [acrossRow(r), pin * lastV, alongU(c)];
+  if (plane === "vw")
+    return (r: number, c: number) => [acrossRow(r), ((c + 0.5) / width) * lastV, pin * lastU];
   return (r: number, c: number) => [w, alongV(r), alongU(c)];
 }
 
@@ -180,8 +197,9 @@ export function acrossAt(spread: number[], w: number) {
 export function acrossWanted(patch: Patch, plane: SurfacePlane, width: number, height: number) {
   if (plane === "uv" || !(width > 0) || !(height > 0)) return Infinity;
   // The voxels one pixel of the along-the-sheet axis is worth, and the pixels the other axis has.
-  const along = plane === "uw" ? ((patch.nu - 1) * patch.hu) / width : ((patch.nv - 1) * patch.hv) / height;
-  return ((plane === "uw" ? height : width) * along) / 2;
+  // Both cuts run their own axis across the card and the sheets down it, so both measure the same way.
+  const along = (plane === "uw" ? (patch.nu - 1) * patch.hu : (patch.nv - 1) * patch.hv) / width;
+  return (height * along) / 2;
 }
 
 /**
@@ -230,21 +248,23 @@ export interface FlatCut {
 }
 
 export function flatCut(patch: Patch, walk: Walked, plane: SurfacePlane, step: number): FlatCut {
-  const down = plane === "uw";
-  const along = down ? (patch.nu - 1) * patch.hu : (patch.nv - 1) * patch.hv;
+  const along = plane === "uw" ? (patch.nu - 1) * patch.hu : (patch.nv - 1) * patch.hv;
   const lo = walk.walked[0], hi = walk.walked[walk.walked.length - 1];
   const n = Math.max(2, Math.min(4096, Math.round(along / step)));
   const across = Math.max(2, Math.min(4096, Math.round((hi - lo) / step)));
-  const [wide, tall] = down ? [n, across] : [across, n];
+  // Along the papyrus across the card, through it down the card — the same on both cuts.
+  const [wide, tall] = [n, across];
   const points = new Float32Array(wide * tall * 3).fill(NaN);
   const out = new Float64Array(3);
-  const middle = down ? (patch.nv - 1) / 2 : (patch.nu - 1) / 2;
+  const middle = plane === "uw" ? (patch.nv - 1) / 2 : (patch.nu - 1) / 2;
   for (let k = 0; k < across; k++) {
     const sheet = sheetOf(walk, lo + ((hi - lo) * k) / (across - 1));
     for (let t = 0; t < n; t++) {
-      const at = ((down ? patch.nu - 1 : patch.nv - 1) * t) / (n - 1);
-      if (!positionAt(patch, sheet, down ? middle : at, down ? at : middle, out)) continue;
-      const o = (down ? k * wide + t : t * wide + k) * 3;
+      const at = ((plane === "uw" ? patch.nu - 1 : patch.nv - 1) * t) / (n - 1);
+      const gi = plane === "uw" ? middle : at;
+      const gj = plane === "uw" ? at : middle;
+      if (!positionAt(patch, sheet, gi, gj, out)) continue;
+      const o = (k * wide + t) * 3;
       points[o] = out[0];
       points[o + 1] = out[1];
       points[o + 2] = out[2];
@@ -511,8 +531,10 @@ export function planeChunks(
   level: ZarrLevel,
   // Where each equal step across the picture falls, in sheets (`acrossSheets`).
   spread: number[],
+  // Where along the axis the cut does not show it is taken (`mapping`).
+  pin = 0.5,
 ): Chunk[] {
-  const where = mapping(patch, plane, w, width, height, spread);
+  const where = mapping(patch, plane, w, width, height, spread, pin);
   const point = new Float64Array(3);
   const lattice = latticeFor(patch);
   const positions = new Float32Array(lattice * lattice * 3).fill(NaN);

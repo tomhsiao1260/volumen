@@ -73,9 +73,18 @@ export interface SurfaceWindow {
   // below and reaches this only through the walk.
   w: number;
   // What a cut shows across the sheets: the distance at its near edge, and how much of it, in
-  // voxels of papyrus.  Moving these two is the whole of a pull.
+  // voxels of papyrus.  The whole stack a piece holds fits on a cut, so these two are set once from
+  // the card's own shape and a pull does not touch them.
   from: number;
   across: number;
+  /*
+   * Where along the axis the cut does not show it is taken, 0 to 1 across the grid.
+   *
+   * This is what a pull moves.  A cut already shows the whole stack, so travelling through the stack
+   * shows nothing new; what it cannot show is the rest of the papyrus, one row of the grid at a
+   * time, and that is the direction a hand on a cut is going.
+   */
+  pin: number;
   /*
    * What to draw instead of the papyrus, for finding out where a blank card went wrong.  `?show=N`:
    * 1 how much of the march the pixel found, 2 where in the scan it points, 3 that the quad is
@@ -188,6 +197,7 @@ export class SurfaceLayer extends RefCounted {
         builder.addUniform("highp vec2", "uWalkRange");
         builder.addUniform("highp float", "uWalkSize");
         builder.addUniform("highp int", "uShow");
+        builder.addUniform("highp float", "uPin");
         // Where this chunk sits in the level being drawn, and how many voxels of the scan one of
         // that level's voxels covers.
         builder.addUniform("highp vec3", "uChunkOrigin");
@@ -253,15 +263,16 @@ highp float gi;
 highp float gj;
 highp float w;
 if (uPlane == 1) {
-  // A cut along u: the sheets stack downwards, and v is pinned to the middle of the grid.
+  // A cut along u: u across the card, the sheets down it, v pinned to the middle of the grid.
   w = sheetAcross(vFrame.y);
-  gi = (uFieldSize.y - 1.0) * 0.5;
+  gi = uPin * (uFieldSize.y - 1.0);
   gj = vFrame.x * (uFieldSize.x - 1.0);
 } else if (uPlane == 2) {
-  // A cut along v: the sheets lie out to the right, and u is pinned to the middle.
-  w = sheetAcross(vFrame.x);
-  gi = vFrame.y * (uFieldSize.y - 1.0);
-  gj = (uFieldSize.x - 1.0) * 0.5;
+  // A cut along v: the same, with v across the card and u pinned to the middle.  Both cuts stack
+  // their sheets downwards, so one movement of the hand means one thing on either.
+  w = sheetAcross(vFrame.y);
+  gi = vFrame.x * (uFieldSize.y - 1.0);
+  gj = uPin * (uFieldSize.x - 1.0);
 } else {
   w = uW;
   gi = vFrame.y * (uFieldSize.y - 1.0);
@@ -362,6 +373,7 @@ v4f_fragData0 = vec4(value, value, value, 1.0);
     gl.uniform2f(shader.uniform("uWalkRange"), this.lo, this.hi);
     gl.uniform1f(shader.uniform("uWalkSize"), this.walkSize);
     gl.uniform1i(shader.uniform("uShow"), window.show ?? 0);
+    gl.uniform1f(shader.uniform("uPin"), window.pin);
     gl.activeTexture(WebGL.TEXTURE2);
     gl.bindTexture(WebGL.TEXTURE_2D, this.walk);
 

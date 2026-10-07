@@ -237,6 +237,8 @@ class Card {
   private carved?: { patch: Patch; plane: SurfacePlane };
   // The piece whose march has already been handed to the card as a texture.
   private gave?: Patch;
+  // Where along the axis a cut does not show it is taken (`mapping` in `render.ts`).
+  private pin = 0.5;
   // When the last quick look went out, so that one under a moving hand does not become all of them.
   private sketchedAt = 0;
   // How many voxels apart the sheets are here, as the piece was built with.
@@ -265,9 +267,10 @@ class Card {
     return acrossSheets(this.walked.walk, sheet, acrossWanted(patch, plane, this.request.width, this.request.height));
   }
 
-  show(w: number, plane: SurfacePlane) {
+  show(w: number, plane: SurfacePlane, pin = 0.5) {
     this.wanted = w;
     this.plane = plane;
+    this.pin = pin;
     this.askedAt = performance.now();
     this.changed?.();
     if (!this.drawing) this.run().catch((error) => this.fail(error));
@@ -614,7 +617,7 @@ class Card {
      * everywhere and the fine one is never seen at all.
      */
     for (const level of preview === fine ? [fine] : [fine, preview]) {
-      const chunks = planeChunks(patch, plane, sheet, width, height, scan[level], spread);
+      const chunks = planeChunks(patch, plane, sheet, width, height, scan[level], spread, this.pin);
       const flat = new Float32Array(chunks.length * 3);
       /*
        * Turned round on the way out.  Everything on this side counts (z, y, x) — the order the zarr
@@ -873,7 +876,7 @@ class Card {
         drawn = asked;
         if (send() > 0) {
           for (const level of preview === fine ? [fine] : [preview, fine]) {
-            const chunks = planeChunks(patch, plane, sheet, width, height, scan[level], spread);
+            const chunks = planeChunks(patch, plane, sheet, width, height, scan[level], spread, this.pin);
             let arrived = false, last = performance.now();
             const loads = chunks.map((chunk) =>
               // A chunk that fails to arrive is drawn from a coarser level.
@@ -923,7 +926,7 @@ worker.onmessage = ({ data: request }) => {
       break;
     }
     case "show":
-      cards.get(request.id)?.show(request.w, request.plane);
+      cards.get(request.id)?.show(request.w, request.plane, request.pin);
       break;
     case "point":
       cards.get(request.id)?.point(request.at, request.token);

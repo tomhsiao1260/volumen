@@ -130,6 +130,8 @@ export interface ShowRequest {
   id: string;
   w: number;
   plane: SurfacePlane;
+  // Where along the axis a cut does not show it is taken, 0 to 1 (`mapping` in `render.ts`).
+  pin?: number;
 }
 
 export interface CloseRequest {

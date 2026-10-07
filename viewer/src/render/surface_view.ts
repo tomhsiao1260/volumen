@@ -51,7 +51,7 @@ export class SurfaceView extends RefCounted implements Panel {
   private context: CanvasRenderingContext2D;
   private layer: SurfaceLayer;
   private shared: SharedObject;
-  private window: SurfaceWindow = { plane: "uv", w: 0, from: 0, across: 1 };
+  private window: SurfaceWindow = { plane: "uv", w: 0, from: 0, across: 1, pin: 0.5 };
   private asked: Asked[] = [];
   private boundsGeneration = -1;
   private onScreen = true;
