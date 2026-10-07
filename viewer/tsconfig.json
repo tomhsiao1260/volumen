@@ -3,6 +3,8 @@
     "target": "ES2020",
     "module": "ESNext",
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // WebGPU is not in TypeScript's own DOM yet, and the renderer is built on it.
+    "types": ["@webgpu/types"],
     "skipLibCheck": true,
     "experimentalDecorators": true,
     "useDefineForClassFields": false,

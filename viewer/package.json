@@ -7,9 +7,12 @@
   "dependencies": {
     "es-toolkit": "^1.36.0",
     "gl-matrix": "^3.4.3",
-    "numcodecs": "^0.3.2"
+    "numcodecs": "^0.3.2",
+    "three": "^0.186.1"
   },
   "devDependencies": {
+    "@types/three": "^0.186.0",
+    "@webgpu/types": "^0.1.74",
     "typescript": "~5.7.2"
   },
   "imports": {

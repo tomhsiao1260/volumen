@@ -9,6 +9,7 @@
  * Throwaway.  Delete once the answers are written down.
  */
 import * as THREE from "three/webgpu";
+import { checkAtlas } from "./atlas";
 import {
   Fn,
   float,
@@ -445,6 +446,9 @@ async function run() {
   } catch (error) {
     say("9 · an rgba32float storage texture written by compute, read with hardware filtering", false, String(error));
   }
+
+  // ---- 10. The atlas, end to end — its own device, in its own file ---------------------------
+  await checkAtlas(say, card);
 
   (window as unknown as { __spike: Said[] }).__spike = said;
   (window as unknown as { __spikeDone: boolean }).__spikeDone = true;
