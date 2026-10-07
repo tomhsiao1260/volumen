@@ -107,6 +107,19 @@ export function scanOf(atlas: Atlas) {
       // Into this scale's own voxels, where a page is `PAGE` of them.
       const here = voxel.add(0.5).div(factor).sub(0.5);
       const page = here.div(float(PAGE)).floor();
+      const out = vec2(0, 0).toVar();
+      /*
+       * Outside the keys a page can have, there is nothing to ask about — and asking anyway is not
+       * harmless.  A negative coordinate turned into a `u32` wraps to an enormous one, and ten bits
+       * of it are kept, so it lands on some OTHER page's key: a card reaching past the edge of a
+       * scroll would draw a piece of somewhere else entirely, confidently.  Measured on a card one
+       * border-width too wide, which is how this was found.
+       */
+      const inRange = page
+        .greaterThanEqual(vec3(0))
+        .all()
+        .and(page.lessThan(vec3(1024)).all());
+      If(inRange, () => {
       const slot = pageAt(
         source,
         level,
@@ -114,7 +127,6 @@ export function scanOf(atlas: Atlas) {
         page.y.toUint(),
         page.z.toUint(),
       ).toVar();
-      const out = vec2(0, 0).toVar();
       If(slot.notEqual(uint(EMPTY)), () => {
         /*
          * Where that page went, unpacked from its number: pages are laid out x fastest, then y,
@@ -127,13 +139,24 @@ export function scanOf(atlas: Atlas) {
           n.div(across * across).floor(),
         ).mul(float(PAGE));
         /*
-         * Half a voxel in from the page's own edges.  Without it the filter reaches into the page
-         * next door in the atlas, which is some unrelated part of the scroll — the one way this
-         * scheme can draw a seam, and it draws a bright one.
+         * Where in the page, and then where that is in the texture.
+         *
+         * The half is the texel's own middle: a 3-D texture's coordinate `i / side` is the EDGE
+         * between texel `i-1` and texel `i`, so sampling there mixes the two.  Left out, the whole
+         * picture is half a voxel off in every direction — which looks perfectly reasonable and is
+         * simply the wrong place.  Found by checking a linear volume pixel by pixel; nothing less
+         * exact would have shown it.
+         *
+         * The clamp keeps both texels the filter touches inside this page.  Without it the filter
+         * reaches into whatever page sits next door in the ATLAS, which is some unrelated part of
+         * the scroll — the one way this scheme can draw a seam, and it draws a bright one.  The cost
+         * is half a voxel of error at a page's own edge, which is the same bargain the renderer
+         * before this one made at a chunk's.
          */
-        const inside = here.sub(page.mul(float(PAGE))).clamp(0.5, PAGE - 0.5);
-        const got = texture3D(atlas.texture, corner.add(inside).div(side));
+        const inside = here.sub(page.mul(float(PAGE))).clamp(0, PAGE - 1);
+        const got = texture3D(atlas.texture, corner.add(inside).add(0.5).div(side));
         out.assign(vec2(got.r, 1));
+      });
       });
       return out;
     },

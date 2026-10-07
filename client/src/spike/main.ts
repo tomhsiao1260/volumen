@@ -10,6 +10,7 @@
  */
 import * as THREE from "three/webgpu";
 import { checkAtlas } from "./atlas";
+import { checkSlice } from "./slice";
 import {
   Fn,
   float,
@@ -447,8 +448,9 @@ async function run() {
     say("9 · an rgba32float storage texture written by compute, read with hardware filtering", false, String(error));
   }
 
-  // ---- 10. The atlas, end to end — its own device, in its own file ---------------------------
+  // ---- 10/11. The atlas and a cross-section, each with its own device, in their own files -----
   await checkAtlas(say, card);
+  await checkSlice(say);
 
   (window as unknown as { __spike: Said[] }).__spike = said;
   (window as unknown as { __spikeDone: boolean }).__spikeDone = true;
