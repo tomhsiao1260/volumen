@@ -46,13 +46,6 @@ export interface Card {
   draw(): void;
 }
 
-/*
- * The surface is left alone while it is within twice the size needed, because reallocating a
- * drawing buffer is not free — but it does have to come back down, or a board zoomed far in leaves
- * tens of megapixels allocated, which is how a device is lost.
- */
-const ROOM = 2;
-
 export class Device extends RefCounted {
   /** Where the cards are drawn before being copied into their own canvases.  Never in the page. */
   readonly surface: HTMLCanvasElement;
@@ -217,7 +210,8 @@ export class Device extends RefCounted {
       height = Math.max(height, seen.height);
     }
     if (drawing.length === 0) return;
-    this.fit(width, height);
+    void width;
+    void height;
     for (const card of drawing) card.draw();
     this.drawn?.();
   }
@@ -225,14 +219,10 @@ export class Device extends RefCounted {
   /** Called once every frame, after every card has been drawn and copied out. */
   drawn: (() => void) | undefined;
 
-  private fit(width: number, height: number) {
+  /** Makes the surface exactly this size, if it is not already.  Called by a card before it draws. */
+  sizeFor(width: number, height: number) {
     const { surface } = this;
-    const enough =
-      surface.width >= width &&
-      surface.height >= height &&
-      surface.width <= width * ROOM &&
-      surface.height <= height * ROOM;
-    if (enough) return;
+    if (surface.width === width && surface.height === height) return;
     surface.width = width;
     surface.height = height;
     this.renderer.setSize(width, height, false);

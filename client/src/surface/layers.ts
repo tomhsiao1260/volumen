@@ -28,6 +28,39 @@ export interface Sheet {
   spacing: number;
 }
 
+/**
+ * Where a cut card is taking its cut, so that the flat card of the same piece can show the line.
+ *
+ * Sweeping a cut moves it along the papyrus, and until now nothing said where it had got to — the
+ * card showed papyrus that could have come from anywhere on the piece.  The flat card is the one
+ * place that shows the whole sheet at once, so the line belongs on it.
+ */
+export interface Cut {
+  cardId: string;
+  // The piece, as the engine names it: cards of one piece share a march and so share coordinates.
+  piece: string;
+  plane: "uw" | "vw";
+  // Where along the axis the cut does NOT show it is taken, 0 to 1 across the grid.
+  pin: number;
+}
+
+const cuts = new Map<string, Cut>();
+
+export function setCut(cut: Cut) {
+  cuts.set(cut.cardId, cut);
+  changed();
+}
+
+export function forgetCut(cardId: string) {
+  if (cuts.delete(cardId)) changed();
+}
+
+/** The cuts being taken of one piece, which is what a flat card of it draws lines for. */
+export function cutsOf(piece: string | undefined) {
+  if (piece === undefined) return [];
+  return [...cuts.values()].filter((cut) => cut.piece === piece);
+}
+
 const sheets = new Map<string, Sheet>();
 const listeners = new Set<() => void>();
 let telling: number | undefined;

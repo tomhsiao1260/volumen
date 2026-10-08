@@ -42,7 +42,13 @@ const AXES: Record<ViewOrientation, [number, number, number]> = {
   yz: [0, 1, 2],
 };
 
-// Whether this session draws its cross-sections with the renderer being built to replace the old one.
+/*
+ * Whether this session draws with the renderer being built to replace the old one: `?gpu2=yes`.
+ *
+ * Both at once is not a state to be in — two devices, two surfaces, and a card of each kind drawing
+ * into a canvas the other also writes.  So the flag is one flag for the whole page, and it is off
+ * until the new renderer draws every kind of card correctly.
+ */
 const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") === "yes";
 
 /*

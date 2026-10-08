@@ -28,13 +28,14 @@ import {
   Fn,
   If,
   float,
-  instancedArray,
   ivec3,
+  texture,
   texture3D,
   texture3DLoad,
   uint,
   uniform,
   uv,
+  vec2,
   vec3,
   vec4,
 } from "three/tsl";
@@ -88,6 +89,12 @@ export const TELL = {
   card: 3,
   /** Where the pixel is on the march: red along u, green along v, blue the sheet. */
   grid: 4,
+  /*
+   * The walk itself: red how far down the card as a fraction of the walk, green and blue two fixed
+   * entries of it.  For telling "the lookup is reading the wrong place" from "the thing it is
+   * reading is wrong", which nothing about the picture can.
+   */
+  walk: 5,
 } as const;
 
 export function surfaceOf(
@@ -114,10 +121,8 @@ export function surfaceOf(
   const build = () => {
     const held = field.now;
     if (held === undefined) return;
-    const { said, texture } = held;
+    const { said, texture: table, walk } = held;
     const size = vec3(said.nu, said.nv, said.layers);
-    const walk = instancedArray(said.walk, "float");
-    const steps = said.walk.length;
 
     /**
      * The winding at a distance through the papyrus — the march's own path, inverted.
@@ -128,11 +133,12 @@ export function surfaceOf(
     const windingAt = Fn(([b]: Num[]) => {
       const far = from.add(b.mul(across));
       const t = far.sub(said.lo).div(Math.max(1e-6, said.hi - said.lo));
-      const texel = t.mul(steps - 1).clamp(0, steps - 1);
-      const i = texel.floor();
-      const j = i.add(1).min(steps - 1);
-      return walk.element(i.toUint()).mix(walk.element(j.toUint()), texel.sub(i));
+      return texture(walk, vec2(t.clamp(0, 1), 0.5)).r;
     });
+    /** The same fraction, for the mode that shows what the walk holds. */
+    const fractionAt = Fn(([b]: Num[]) =>
+      from.add(b.mul(across)).sub(said.lo).div(Math.max(1e-6, said.hi - said.lo)),
+    );
 
     /**
      * The march, read where the card is looking — one texture read where the device will filter
@@ -143,7 +149,7 @@ export function surfaceOf(
      * reached: an alpha short of 1 is exactly "there is no sheet here", whichever way it was read.
      */
     const marchAt = Fn(([p]: Num[]) => {
-      if (device.filtersFloats) return texture3D(texture, p.add(0.5).div(size));
+      if (device.filtersFloats) return texture3D(table, p.add(0.5).div(size));
       const base = p.floor();
       const t = p.sub(base);
       const top = size.sub(1);
@@ -157,7 +163,7 @@ export function surfaceOf(
             const corner = base.add(vec3(dj, di, dk)).clamp(vec3(0), top);
             total.addAssign(
               texture3DLoad(
-                texture,
+                table,
                 ivec3(corner.x.toInt(), corner.y.toInt(), corner.z.toInt()),
                 0,
               ).mul(weight),
@@ -232,6 +238,16 @@ export function surfaceOf(
       If(show.equal(TELL.reached), () =>
         out.assign(vec4(reached, float(1).sub(reached).mul(100), float(0), float(1))),
       );
+      If(show.equal(TELL.walk), () =>
+        out.assign(
+          vec4(
+            fractionAt(b),
+            texture(walk, vec2(0.5, 0.5)).r.add(said.K).div(said.K * 2),
+            texture(walk, vec2(0, 0.5)).r.add(said.K).div(said.K * 2),
+            float(1),
+          ),
+        ),
+      );
       If(show.equal(TELL.place), () =>
         out.assign(
           vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), float(1)),
@@ -247,6 +263,10 @@ export function surfaceOf(
     material,
     show(window: Window) {
       want = window;
+      // Kept where a measurement can read it: what the card asked for, as the shader received it.
+      const where = globalThis as unknown as { __window?: Window[] };
+      (where.__window ??= []).push(window);
+      if (where.__window.length > 8) where.__window.shift();
     },
     before() {
       if (field.generation !== built) build();

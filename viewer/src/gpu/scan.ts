@@ -25,6 +25,12 @@ import type {
 import type { Volume } from "#src/viewer.js";
 import { RefCounted } from "#src/util/disposable.js";
 
+/*
+ * From this many full-resolution voxels to a voxel, a scale is held whole rather than a page at a
+ * time.  Eight is three levels down, where a card's worth of scroll is a handful of chunks.
+ */
+const EAGER = 8;
+
 export class Scan extends RefCounted {
   /** Finest first, as the renderer wants them. */
   readonly scales: Scale[] = [];
@@ -48,10 +54,18 @@ export class Scan extends RefCounted {
       const from = one.chunkSource as VolumeChunkSource;
       this.levels.push(from);
       /*
-       * A chunk arriving puts nothing anywhere; it is in memory now, which is all the queue above
-       * means by its GPU tier.  What it holds goes up a page at a time, when a page is asked for.
+       * A fine chunk arriving puts nothing anywhere: it is in memory now, and what it holds goes up
+       * a page at a time, when a page is asked for.
+       *
+       * A COARSE one goes up whole, at once.  Asking first and uploading after costs a frame, and
+       * while that frame passes the pixel has nothing to show — measured on a swept cut, a third of
+       * the card was empty at any moment, because what it needed next was always one frame away.
+       * The coarse scales cost almost nothing to hold (a chunk of them is one page) and they are
+       * what the shader falls back to, so holding all of them gives every pixel something to show
+       * while the page it really wants is fetched.  Detail then arrives on top.
        */
-      from.feed = () => {};
+      const eager = this.scales[level].factor >= EAGER;
+      from.feed = eager ? (chunk) => this.all(level, from, chunk) : () => {};
       /*
        * A chunk leaving takes its pages with it.  One eviction policy, and it is the queue's: it
        * knows what every card wants, at what priority, and how visible each card is.  The atlas
@@ -96,6 +110,27 @@ export class Scan extends RefCounted {
       if (putPage(this.atlas, this.source, level, at, grid, size, bytes)) put++;
     }
     return put;
+  }
+
+  /** Every page of a chunk, for the coarse scales that are worth holding whole. */
+  private all(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
+    const data = chunk.data;
+    if (data == null) return;
+    const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    const size = from.spec.chunkDataSize;
+    const pages = [size[0] / PAGE, size[1] / PAGE, size[2] / PAGE];
+    const grid = chunk.chunkGridPosition;
+    for (let pz = 0; pz < pages[2]; pz++)
+      for (let py = 0; py < pages[1]; py++)
+        for (let px = 0; px < pages[0]; px++) {
+          const at: [number, number, number] = [
+            grid[0] * pages[0] + px,
+            grid[1] * pages[1] + py,
+            grid[2] * pages[2] + pz,
+          ];
+          if (this.atlas.has({ source: this.source, level, at })) continue;
+          putPage(this.atlas, this.source, level, at, grid, size, bytes);
+        }
   }
 
   private give(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {

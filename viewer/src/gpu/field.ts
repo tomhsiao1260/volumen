@@ -55,17 +55,17 @@ const PATIENCE_MS = 4000;
 
 export class Field extends RefCounted {
   /** What is being drawn.  Undefined until the first march arrives. */
-  private held: { said: Said; texture: THREE.Data3DTexture } | undefined;
+  private held: Made | undefined;
   /** What will be drawn once the scan behind it is there. */
-  private coming: { said: Said; texture: THREE.Data3DTexture; since: number } | undefined;
+  private coming: (Made & { since: number }) | undefined;
   /** Bumped whenever what is being drawn changes, so a view knows to rebuild its uniforms. */
   generation = 0;
 
   constructor(private device: Device) {
     super();
     this.registerDisposer(() => {
-      this.held?.texture.dispose();
-      this.coming?.texture.dispose();
+      free(this.held);
+      free(this.coming);
     });
   }
 
@@ -83,15 +83,15 @@ export class Field extends RefCounted {
    * since a blank card has nothing to lose by taking it.
    */
   take(said: Said) {
-    this.coming?.texture.dispose();
-    const texture = this.make(said);
+    free(this.coming);
+    const made = this.make(said);
     if (this.held === undefined) {
-      this.held = { said, texture };
+      this.held = made;
       this.coming = undefined;
       this.generation++;
       return;
     }
-    this.coming = { said, texture, since: performance.now() };
+    this.coming = { ...made, since: performance.now() };
   }
 
   /**
@@ -104,14 +104,14 @@ export class Field extends RefCounted {
     // Or it has waited long enough.  A piece over a hole in the scan would otherwise never arrive,
     // and a card showing somewhere it has left is worse than a card showing what little it has.
     if (!ready && performance.now() - coming.since < PATIENCE_MS) return;
-    this.held?.texture.dispose();
-    this.held = { said: coming.said, texture: coming.texture };
+    free(this.held);
+    this.held = { said: coming.said, texture: coming.texture, walk: coming.walk };
     this.coming = undefined;
     this.generation++;
     this.device.redraw();
   }
 
-  private make(said: Said) {
+  private make(said: Said): Made {
     const texture = new THREE.Data3DTexture(
       said.data as unknown as Uint8Array,
       said.nu,
@@ -132,6 +132,39 @@ export class Field extends RefCounted {
     texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.wrapR = THREE.ClampToEdgeWrapping;
     texture.needsUpdate = true;
-    return texture;
+
+    /*
+     * And the walk as a one-dimensional texture rather than a buffer the shader indexes.
+     *
+     * It is a lookup with an interpolation, which is exactly what a texture unit is: one sample does
+     * both and there is no index arithmetic to get wrong.  There was — a storage buffer of two
+     * thousand entries read correctly at a constant index and wrongly at a computed one above about
+     * half its length, and the winding it gave down a cut was not even monotonic (`?show=5`).
+     */
+    const walk = new THREE.DataTexture(
+      said.walk as unknown as Uint8Array,
+      said.walk.length,
+      1,
+      THREE.RedFormat,
+      THREE.FloatType,
+    );
+    walk.minFilter = smooth ? THREE.LinearFilter : THREE.NearestFilter;
+    walk.magFilter = smooth ? THREE.LinearFilter : THREE.NearestFilter;
+    walk.wrapS = THREE.ClampToEdgeWrapping;
+    walk.wrapT = THREE.ClampToEdgeWrapping;
+    walk.needsUpdate = true;
+    return { said, texture, walk };
   }
+}
+
+/** A march ready to draw: the table, and the walk that spreads a cut by distance. */
+interface Made {
+  said: Said;
+  texture: THREE.Data3DTexture;
+  walk: THREE.DataTexture;
+}
+
+function free(made: { texture: THREE.Texture; walk: THREE.Texture } | undefined) {
+  made?.texture.dispose();
+  made?.walk.dispose();
 }

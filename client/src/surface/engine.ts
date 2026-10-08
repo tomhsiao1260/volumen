@@ -55,6 +55,11 @@ class SurfaceEngine {
     this.post({ type: "open", ...request });
   }
 
+  /** Which piece a card is on, so that cards of one piece can draw each other's lines. */
+  pieceOf(id: string) {
+    return this.pieces.get(id);
+  }
+
   show(id: string, w: number, plane: SurfacePlane, pin?: number) {
     this.planes.set(id, plane);
     this.post({ type: "show", id, w, plane, pin });

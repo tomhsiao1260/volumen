@@ -123,12 +123,15 @@ export class CardView extends RefCounted implements Drawn {
     if (width === 0 || height === 0) return;
     this.view.before?.(width, height);
     /*
-     * The surface may be larger than this card — it is sized to the largest — so the card is drawn
-     * in its corner and that corner is what the copy reads.
+     * The surface is made this card's size, and the card fills it.
+     *
+     * Drawing each card into a corner of one larger surface would save the resizing, and it is what
+     * the renderer this replaces did — but three.js's WebGPU backend does not honour a viewport or a
+     * scissor set before `render`, and the card came out covering about two thirds of what it had
+     * asked for, in every frame, whatever was loaded.  A canvas the right size needs no viewport at
+     * all, and the copy below then has no corner to find.
      */
-    device.renderer.setViewport(0, 0, width, height);
-    device.renderer.setScissor(0, 0, width, height);
-    device.renderer.setScissorTest(true);
+    device.sizeFor(width, height);
     device.renderer.render(this.scene, this.camera);
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
@@ -139,16 +142,16 @@ export class CardView extends RefCounted implements Drawn {
      * copy after an await would be copying a canvas that has already gone.
      */
     context.clearRect(0, 0, width, height);
-    context.drawImage(
-      device.surface,
-      0,
-      device.surface.height - height,
-      width,
-      height,
-      0,
-      0,
-      width,
-      height,
-    );
+    /*
+     * From the top-left of the surface, which is where the card was just drawn.
+     *
+     * The renderer this replaces read from `surface.height - height` instead, because WebGL counts
+     * its rows from the bottom and a viewport at the origin therefore lands at the TOP of the
+     * canvas.  WebGPU's canvas has its origin at the top-left, so a card smaller than the surface —
+     * which is sized to the largest card on the board — was being copied out of a region it had
+     * never drawn into.  Measured: two thirds of a cut card had papyrus on it and the rest was
+     * empty, in every frame, whatever was loaded.
+     */
+    context.drawImage(device.surface, 0, 0);
   }
 }

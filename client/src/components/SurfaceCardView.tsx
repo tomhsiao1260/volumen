@@ -20,7 +20,15 @@ import { surfaceEngine } from "../surface/engine";
 import type { Flat } from "viewer";
 import type { Session } from "../board/session";
 import { farOf, sheetOf } from "../surface/render";
-import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
+import {
+  cutsOf,
+  forgetCut,
+  setCut,
+  setDrawnDots,
+  setSpots,
+  watchSheets,
+  type DrawnDot,
+} from "../surface/layers";
 import type { ChainSaid, PieceSpot, SurfacePlane, SurfaceFacts, SurfaceStatus } from "../surface/types";
 
 import type { WindChain } from "../surface/windings";
@@ -53,8 +61,17 @@ const PATIENCE_MS = 8000;
  * card share — what the pixels then mean is the plane's, and only the flat card turns them into
  * sheets.  So the two sizes below are said in pixels and `PER_PIXEL` is what converts.
  */
-// Whether this session draws its papyrus with the renderer being built to replace the old one.
-const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") === "yes";
+/*
+ * Which renderer draws the papyrus.
+ *
+ * The WebGPU one only when `?gpu2=yes` asks for it.  It draws the flat card well and keeps the march
+ * it is showing until the next can be drawn — which is what a card going blank for half a second
+ * was — but a CUT drawn by it covers only about two thirds of its own card, for a reason not yet
+ * found: `reached` is 1 down to four fifths of the way and 0 below, and the window the card asks for
+ * is comfortably inside the walk it is asking of.  Until that is understood the papyrus is drawn by
+ * the renderer that gets it right, and the new one is reached for on purpose.
+ */
+const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") !== "no";
 
 const PER_PIXEL = 1 / 960;
 const NOTCH = 1 / 8;
@@ -106,6 +123,16 @@ const TELL_MS = 150;
  * see the drawing below.
  */
 const GHOST = 0.28;
+/*
+ * How far a winding point may be before it is not about this card any more: whole wraps on the flat
+ * card, and this much of a card's own height of papyrus along a cut.
+ *
+ * Both used to be far more generous — a point ghosted on for ever through the sheets, and a cut
+ * showed anything within half its own height.  A board with a few chains then draws hundreds of
+ * points on every card, and the handful that are actually where you are looking are lost in them.
+ */
+const FAR = 1;
+const NEAR_CUT = 1 / 8;
 const GHOST_APART = 0.45;
 
 const PLANE_TITLES: Record<SurfacePlane, string> = {
@@ -311,15 +338,18 @@ export function SurfaceCardView({
     {
       alongU: number;
       alongV: number;
-      // The grid the march was walked on, which is what a window on it is said in.
+      // The grid the march was walked on, which is what a window on it is said in, and how many
+      // whole sheets each way of it the table holds.
       nu: number;
       nv: number;
+      K: number;
       walk: { sheets: number[]; walked: number[] };
     }
     | undefined
   >(undefined);
   // Both are set up once, in handlers that must still reach the ones of the render they run in.
   const glideRef = useRef<() => void>(() => {});
+  const markSheetsRef = useRef<() => void>(() => {});
   /*
    * How much papyrus a pixel of a cut card is worth.
    *
@@ -393,8 +423,20 @@ export function SurfaceCardView({
     }
     const scale = cutScale();
     if (scale === undefined) return;
-    const across = scale.wide * element.clientHeight;
-    const middle = far.current ?? farOf(have.walk, own);
+    /*
+     * How much of the papyrus the card shows across the sheets, held under what the table holds.
+     *
+     * A pixel is worth the same in both directions, which is what draws a square of papyrus square —
+     * but a tall card can want more sheets than were ever walked, and past the end of the table
+     * there is nothing at all to draw.  Left unheld, the bottom third of a cut came out blank:
+     * measured, `reached` was 1 for two thirds of the card and 0 below that.
+     */
+    const edge = [farOf(have.walk, -have.K), farOf(have.walk, have.K)];
+    const across = Math.min(scale.wide * element.clientHeight, edge[1] - edge[0]);
+    const middle = Math.min(
+      edge[1] - across / 2,
+      Math.max(edge[0] + across / 2, far.current ?? farOf(have.walk, own)),
+    );
     if (ON_GPU2) {
       // A cut: one axis of the grid across the card, the sheets down it by distance, the other axis
       // held where the pin says.
@@ -439,6 +481,13 @@ export function SurfaceCardView({
     }
     // What the card is showing, which is what the sheet line and the winding points are drawn against.
     shown.current = wanted.current;
+    // And where it is taking its cut, for the flat card of the same piece to draw a line at.
+    setCut({
+      cardId: id,
+      piece: surfaceEngine().pieceOf(id) ?? id,
+      plane: wantedPlane.current,
+      pin: pin.current,
+    });
   };
 
   // The picture where the hand has got to.
@@ -533,6 +582,7 @@ export function SurfaceCardView({
                 alongV: event.alongV,
                 nu: event.nu,
                 nv: event.nv,
+                K: event.K,
                 walk: {
                   sheets: Array.from(new Float32Array(event.sheets)),
                   walked: Array.from(new Float32Array(event.walked)),
@@ -847,7 +897,7 @@ export function SurfaceCardView({
           if (held !== undefined) {
             const hidden = wantedPlane.current === "uw" ? found.fv : found.fu;
             off = Math.abs(hidden - pin.current) * held.reach;
-            if (off > held.wide / 2) continue;
+            if (off > held.wide * NEAR_CUT) continue;
           }
           /*
            * On a flat card the sheets are not drawn, so how far away one is has to be said by fading.
@@ -857,10 +907,19 @@ export function SurfaceCardView({
            * "on this wrap" is said by the ones that are solid.  A relative winding ghosts less: its
            * points are on different wraps, which is the whole of what it says.
            */
+          /*
+           * And how far away through the sheets, which on the flat card is the whole question.
+           *
+           * Beyond `FAR` wraps a point is not about what is on this card at all.  It used to ghost
+           * on for ever at `GHOST`, on the reasoning that a point on another wrap is still a point —
+           * true, but a board with a few chains on it then shows a few hundred of them, and what is
+           * on THIS wrap is lost among what is not.
+           */
+          if (Math.abs(found.w - sheet) > FAR) continue;
           const away = Math.max(0, 1 - Math.abs(found.w - sheet) / 0.5);
           const near =
             wantedPlane.current !== "uv"
-              ? Math.max(apart ? GHOST_APART : GHOST, held === undefined ? 1 : 1 - off / (held.wide / 2))
+              ? Math.max(apart ? GHOST_APART : GHOST, held === undefined ? 1 : 1 - off / (held.wide * NEAR_CUT))
               : Math.max(apart ? GHOST_APART : GHOST, away);
           const here = away > 0;
           const x = at[0] * width, y = at[1] * height;
@@ -909,7 +968,39 @@ export function SurfaceCardView({
       }
       setDrawnDots(id, drawnDots.current);
     }
-    if (wantedPlane.current === "uv" || shown.current === undefined) return;
+    if (wantedPlane.current === "uv") {
+      /*
+       * Where the cuts of this piece are being taken.
+       *
+       * A cut shows one row of the grid and says nothing about which, so sweeping one was a walk
+       * with no map: the papyrus moved and there was no telling where it had got to.  The flat card
+       * is the one place the whole sheet is visible at once, so the line belongs here — a cut along
+       * u is a row, a cut along v is a column.
+       */
+      for (const cut of cutsOf(surfaceEngine().pieceOf(id))) {
+        if (cut.cardId === id) continue;
+        const across = cut.plane === "uw";
+        const at = Math.round((across ? cut.pin * height : cut.pin * width)) + 0.5;
+        context.beginPath();
+        if (across) {
+          context.moveTo(0, at);
+          context.lineTo(width, at);
+        } else {
+          context.moveTo(at, 0);
+          context.lineTo(at, height);
+        }
+        context.setLineDash([6 * density, 5 * density]);
+        context.strokeStyle = SHEET_LINE_EDGE;
+        context.lineWidth = 3 * density;
+        context.stroke();
+        context.strokeStyle = SHEET_LINE;
+        context.lineWidth = 1.2 * density;
+        context.stroke();
+        context.setLineDash([]);
+      }
+      return;
+    }
+    if (shown.current === undefined) return;
     /*
      * One line: where the card itself is in the stack, which is the middle of a cut.  Its neighbours
      * are only a ruler, and a ruler over the papyrus is in the way of reading it.
@@ -928,7 +1019,14 @@ export function SurfaceCardView({
     context.stroke();
   };
 
+  // Redrawn from a listener registered once, which must still reach the one of the render it runs in.
+  markSheetsRef.current = markSheets;
   useEffect(markSheets, [plane, card.width, card.height, drawn, spotted, lit, picked, over]);
+  /*
+   * And again when any card of this piece moves, which is how the flat card's guide lines follow the
+   * cuts.  Coalesced to one frame by `layers.ts`, however many cards move at once.
+   */
+  useEffect(() => watchSheets(() => markSheetsRef.current()));
 
 
   /*
@@ -1018,6 +1116,7 @@ export function SurfaceCardView({
     return () => {
       current = false;
       gpuRef.current = undefined;
+      forgetCut(id);
       view?.dispose();
     };
   }, [session, sourceId]);
