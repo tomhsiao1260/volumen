@@ -24,15 +24,21 @@ export interface Scale {
   factor: number;
 }
 
-/** Where a cross-section is looking, in full-resolution scan voxels. */
+/**
+ * Where a cross-section is looking, in full-resolution scan voxels, counted (x, y, z).
+ *
+ * The axes carry the zoom: they are how far one PIXEL of the drawing moves in the scroll, which is
+ * exactly what the view matrix the chunks are asked for holds (`NavigationState.toMat4`).  Taking
+ * both from the same matrix is the point — a view drawn from one place while its chunks are fetched
+ * for another draws whatever happens to be resident, confidently, and that is not a thing anyone
+ * would notice by looking.
+ */
 export interface Looking {
   // The middle of the card.
   at: [number, number, number];
-  // The card's own axes, as unit vectors in scan space.
+  // One pixel to the right, and one pixel down.
   right: [number, number, number];
   down: [number, number, number];
-  // Scan voxels to one of the card's own pixels.
-  zoom: number;
 }
 
 const MISSING = 0.5;
@@ -51,9 +57,8 @@ export function sliceOf(
   const at = uniform(new THREE.Vector3());
   const right = uniform(new THREE.Vector3(1, 0, 0));
   const down = uniform(new THREE.Vector3(0, 1, 0));
-  // Half the card in scan voxels, so a pixel is `at + right·x + down·y` with x, y in ±this.
+  // Half the card in pixels, so a place is `at + right·x + down·y` with x, y in ±this.
   const half = uniform(new THREE.Vector2());
-  let zoom = 1;
 
   const material = new THREE.MeshBasicNodeMaterial();
   material.transparent = false;
@@ -83,11 +88,10 @@ export function sliceOf(
       at.value.set(looking.at[0], looking.at[1], looking.at[2]);
       right.value.set(looking.right[0], looking.right[1], looking.right[2]);
       down.value.set(looking.down[0], looking.down[1], looking.down[2]);
-      zoom = looking.zoom;
     },
     before(width: number, height: number) {
       // Worked out here because only now is the size the card is actually drawn at known.
-      half.value.set((width * zoom) / 2, (height * zoom) / 2);
+      half.value.set(width / 2, height / 2);
       scan.update();
     },
     dispose() {

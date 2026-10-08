@@ -34,6 +34,7 @@ import { loadZarrVolume } from "#src/datasource/zarr/frontend.js";
 import type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";
 import { DisplayContext, SliceViewPanel } from "#src/render/panel.js";
 import type { RenderLayer } from "#src/render/renderlayer.js";
+import { SliceView } from "#src/render/frontend.js";
 import { SurfaceView } from "#src/render/surface_view.js";
 import { Atlas } from "#src/gpu/atlas.js";
 import { CardView } from "#src/gpu/card.js";
@@ -416,15 +417,67 @@ export class Viewer extends RefCounted {
     return scan;
   }
 
-  /** A cross-section drawn by the new renderer. */
-  addSliceView(element: HTMLElement, { volume }: { volume: Volume }) {
+  /**
+   * A cross-section drawn by the new renderer.
+   *
+   * Two halves that must not come apart: a `SliceView` that asks for chunks — the plane-against-box
+   * geometry, the priorities, the prefetch, all of which is the library as it was and none of which
+   * knows what a GPU is — and a TSL function that draws.  Both read the SAME view matrix, so they
+   * cannot disagree about where the card is looking.
+   *
+   * Getting that wrong is quiet: the first time this was wired, nothing asked for anything and the
+   * card drew a perfectly convincing picture out of chunks some other card had fetched.
+   */
+  addSliceView(
+    element: HTMLElement,
+    { volume, orientation, navigation }: ViewOptions,
+  ) {
     const { gpu } = this;
     if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
     const scan = this.scanOf(volume);
     const view = sliceOf(gpu.scan, scan.source, scan.scales);
-    const card = new CardView(element, gpu.device, view);
+
+    const seen = new WatchableValue(Number.POSITIVE_INFINITY);
+    const asking = new SliceView(
+      this.chunkManager,
+      volume.renderLayer,
+      navigation.makeNavigationState(viewRotations[orientation]()),
+      seen,
+    );
+    const matrix = () => asking.projectionParameters.value.invViewMatrix;
+
+    const card: CardView = new CardView(element, gpu.device, {
+      material: view.material,
+      before: (width, height) => {
+        /*
+         * The size the card is drawn at is the size its chunks are asked for — and `pixelScale`
+         * goes with it, because the matrix below divides the zoom by it.  Getting that one number
+         * wrong would leave the drawing and the fetching a factor of two apart.
+         */
+        asking.projectionParameters.setViewport(card.renderViewport);
+        asking.flushBackendProjectionParameters();
+        /*
+         * And where it is looking, out of the same matrix: its columns are the view's own axes with
+         * the zoom in them, and its last is the middle.  All of it is the viewer's (z, y, x), which
+         * the drawing counts the other way round.
+         */
+        const m = matrix();
+        view.show({
+          at: [m[14], m[13], m[12]],
+          right: [m[2], m[1], m[0]],
+          down: [m[6], m[5], m[4]],
+        });
+        view.before?.(width, height);
+      },
+      dispose: () => view.dispose?.(),
+    });
+    card.registerDisposer(asking);
+    card.registerDisposer(
+      card.visibility.changed.add(() => (seen.value = card.visibility.value)),
+    );
+    card.registerDisposer(asking.viewChanged.add(() => card.changed()));
     this.registerDisposer(card);
-    return Object.assign(card, { show: view.show });
+    return card;
   }
 
   addSurfaceView(element: HTMLElement, { volume }: { volume: Volume }): SurfaceView {

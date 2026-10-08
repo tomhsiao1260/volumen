@@ -55,7 +55,12 @@ export async function checkSlice(say: Say) {
     const view = sliceOf(scan, 0, [{ level: 0, factor: 1 }]);
     const card = new CardView(where, device, view);
     // Looking down z, the card's own axes along x and y, two voxels to a pixel.
-    view.show({ at: [SPAN / 2, SPAN / 2, SPAN / 2], right: [1, 0, 0], down: [0, 1, 0], zoom: PAGES });
+    // The axes carry the zoom: one pixel is `PAGES` voxels to the right and `PAGES` down.
+    view.show({
+      at: [SPAN / 2, SPAN / 2, SPAN / 2],
+      right: [PAGES, 0, 0],
+      down: [0, PAGES, 0],
+    });
 
     // One frame first, so three.js has made the atlas texture; nothing can be written before that.
     device.resized();
