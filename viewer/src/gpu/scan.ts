@@ -7,6 +7,7 @@
  * texture of its own becomes some pages of the one atlas.
  */
 import type { Atlas } from "#src/gpu/atlas.js";
+import { PAGE } from "#src/gpu/atlas.js";
 import { putChunk } from "#src/gpu/feed.js";
 import type { Arrived } from "#src/gpu/feed.js";
 import type { Scale } from "#src/gpu/slice.js";
@@ -55,14 +56,16 @@ export class Scan extends RefCounted {
       });
       const from = one.chunkSource as VolumeChunkSource;
       from.feed = (chunk) => this.take(level, from, chunk);
-      from.drop = () => {
-        /*
-         * Nothing.  The atlas keeps its own count of what has been read recently and drops the
-         * least wanted page when it needs the room, so a chunk leaving the queue above need not
-         * take its pages with it — and often should not, since the queue drops by its own budget
-         * and the atlas by its own.
-         */
-      };
+      /*
+       * A chunk leaving the queue takes its pages with it.
+       *
+       * One eviction policy, and it is the queue's: it knows what every card wants, at what
+       * priority, and how visible each card is.  Letting the atlas decide as well meant two
+       * policies disagreeing — and since the lookup happens on the GPU, the atlas cannot see what
+       * is being read and was dropping by age, so a card sitting still lost its pages to a card
+       * streaming past it.
+       */
+      from.drop = (chunk) => this.give(level, from, chunk);
       this.registerDisposer(() => {
         from.feed = undefined;
         from.drop = undefined;
@@ -81,6 +84,21 @@ export class Scan extends RefCounted {
       data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
     };
     if (!putChunk(this.atlas, arrived)) this.waiting.push(arrived);
+  }
+
+  private give(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
+    const size = from.spec.chunkDataSize;
+    const pages = [size[0] / PAGE, size[1] / PAGE, size[2] / PAGE];
+    const grid = chunk.chunkGridPosition;
+    for (let pz = 0; pz < pages[2]; pz++)
+      for (let py = 0; py < pages[1]; py++)
+        for (let px = 0; px < pages[0]; px++) {
+          this.atlas.remove({
+            source: this.source,
+            level,
+            at: [grid[0] * pages[0] + px, grid[1] * pages[1] + py, grid[2] * pages[2] + pz],
+          });
+        }
   }
 
   /** Offers again whatever could not be written yet.  Called once a frame; usually does nothing. */

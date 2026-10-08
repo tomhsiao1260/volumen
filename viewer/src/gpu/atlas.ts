@@ -29,6 +29,17 @@ import { RefCounted } from "#src/util/disposable.js";
 /** The side of a page, in voxels of its own scale. */
 export const PAGE = 64;
 /*
+ * The side of the atlas in voxels, and what that costs.
+ *
+ * A thousand pages of 64³, 262 MB — rather less than the 400 MB the chunk queue was given when every
+ * chunk had a texture of its own.  The queue is given this same number (`Viewer`), so that the two
+ * cannot come to disagree about how much room there is: a queue believing it has more would hand
+ * over pages the atlas must immediately drop, and a card would lose what it is looking at to a chunk
+ * nobody asked to see.
+ */
+export const SIDE = 640;
+export const BYTES = SIDE ** 3;
+/*
  * How many entries the table holds.  It is open addressing, so it wants to be comfortably larger
  * than the number of pages — at a load factor near a half the probe is one read nearly always.
  */
@@ -81,8 +92,7 @@ export class Atlas extends RefCounted {
 
   constructor(
     private device: Device,
-    // The side of the atlas in voxels; 512 is 512 pages and 134 MB.
-    side = 512,
+    side = SIDE,
   ) {
     super();
     this.across = Math.max(1, Math.floor(side / PAGE));
@@ -120,12 +130,24 @@ export class Atlas extends RefCounted {
     return { pages: this.pages, used: this.where.size };
   }
 
-  /** Where a page sits in the atlas, in voxels, or `undefined` if it is not here. */
-  find(page: Page): [number, number, number] | undefined {
-    const slot = this.where.get(`${page.source}/${page.level}/${page.at.join(",")}`);
-    if (slot === undefined) return undefined;
-    this.used[slot] = ++this.clock;
-    return this.cornerOf(slot);
+  /**
+   * Gives a page's room back.
+   *
+   * This is how room is really made.  The atlas's own count of what was written recently is a
+   * backstop and not a policy: the lookup happens on the GPU, so nothing here can see what is
+   * actually being read, and an atlas left to decide for itself drops by age — which is to say it
+   * drops whatever a card has been looking at longest while another card streams past it.  The
+   * chunk queue above already knows what every card wants, at what priority and how visible it is,
+   * and it already drops accordingly.  So it decides, and this does as it is told.
+   */
+  remove(page: Page) {
+    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
+    const slot = this.where.get(name);
+    if (slot === undefined) return;
+    this.where.delete(name);
+    this.held[slot] = undefined;
+    this.used[slot] = 0;
+    this.forget(page);
   }
 
   private cornerOf(slot: number): [number, number, number] {

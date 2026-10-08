@@ -17,7 +17,7 @@ import { sourceLabel, sourceMicron } from "../api/sources";
 import type { BoardAction, CardState, PickedPoint, Tool } from "../board/state";
 import type { Point } from "viewer";
 import { surfaceEngine } from "../surface/engine";
-import type { SurfaceView } from "viewer";
+import type { Flat } from "viewer";
 import type { Session } from "../board/session";
 import { farOf, sheetOf } from "../surface/render";
 import { setDrawnDots, setSpots, type DrawnDot } from "../surface/layers";
@@ -53,6 +53,9 @@ const PATIENCE_MS = 8000;
  * card share — what the pixels then mean is the plane's, and only the flat card turns them into
  * sheets.  So the two sizes below are said in pixels and `PER_PIXEL` is what converts.
  */
+// Whether this session draws its papyrus with the renderer being built to replace the old one.
+const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") === "yes";
+
 const PER_PIXEL = 1 / 960;
 const NOTCH = 1 / 8;
 const NOTCH_PIXELS = NOTCH / PER_PIXEL;
@@ -290,7 +293,14 @@ export function SurfaceCardView({
    * new picture for every row of the grid a hand passes, which is the cost this replaces.
    */
   const gpuShow = Number(new URLSearchParams(window.location.search).get("show") ?? 0);
-  const gpuRef = useRef<SurfaceView | undefined>(undefined);
+  const gpuRef = useRef<Flat | undefined>(undefined);
+  /*
+   * The last march and chunk list the worker sent, kept so that a view attached afterwards can be
+   * given them.  Both are sent once per piece and never again, so a view that missed them would
+   * draw nothing for as long as the card stayed on that piece.
+   */
+  const lastField = useRef<Parameters<Flat["take"]>[0] | undefined>(undefined);
+  const lastWant = useRef<Parameters<Flat["want"]>[0] | undefined>(undefined);
   const gpuBox = useRef<HTMLDivElement>(null);
   // The sheet the piece was based on, in the card's own windings: the card counts from where it was
   // opened and the field counts from the piece's base.
@@ -298,7 +308,15 @@ export function SurfaceCardView({
   // What the card needs of the piece to work its own window out: how much papyrus the grid covers
   // each way, and the walk, for turning a winding into a distance through it.
   const piece = useRef<
-    { alongU: number; alongV: number; walk: { sheets: number[]; walked: number[] } } | undefined
+    {
+      alongU: number;
+      alongV: number;
+      // The grid the march was walked on, which is what a window on it is said in.
+      nu: number;
+      nv: number;
+      walk: { sheets: number[]; walked: number[] };
+    }
+    | undefined
   >(undefined);
   // Both are set up once, in handlers that must still reach the ones of the render they run in.
   const glideRef = useRef<() => void>(() => {});
@@ -349,8 +367,27 @@ export function SurfaceCardView({
     const have = piece.current;
     if (view === undefined || element === null || have === undefined) return;
     const own = wanted.current - baseW.current;
+    /*
+     * The new renderer is told an affine window on the flattening rather than which of three planes.
+     *
+     * The three planes are then three sets of constants, which is what they always were: the old
+     * `mapping` worked them out a pixel at a time because the drawing was a pixel at a time.  A
+     * fourth way of cutting the piece — oblique, or along a chain — needs no new code here and none
+     * at all in the shader.
+     */
+    const lastU = have.nu - 1;
+    const lastV = have.nv - 1;
     if (wantedPlane.current === "uv") {
-      view.show({ plane: "uv", w: own, from: 0, across: 1, pin: pin.current, show: gpuShow });
+      if (ON_GPU2) {
+        view.show({
+          at: [0, 0, own],
+          right: [lastU, 0, 0],
+          down: [0, lastV, 0],
+          show: gpuShow,
+        });
+      } else {
+        view.show({ plane: "uv", w: own, from: 0, across: 1, pin: pin.current, show: gpuShow });
+      }
       shown.current = wanted.current;
       return;
     }
@@ -358,15 +395,27 @@ export function SurfaceCardView({
     if (scale === undefined) return;
     const across = scale.wide * element.clientHeight;
     const middle = far.current ?? farOf(have.walk, own);
-    const window_ = {
-      plane: wantedPlane.current,
-      w: own,
-      from: middle - across / 2,
-      across,
-      pin: pin.current,
-      show: gpuShow,
-    };
-    view.show(window_);
+    if (ON_GPU2) {
+      // A cut: one axis of the grid across the card, the sheets down it by distance, the other axis
+      // held where the pin says.
+      const alongU = wantedPlane.current === "uw";
+      view.show({
+        at: [alongU ? 0 : pin.current * lastU, alongU ? pin.current * lastV : 0, 0],
+        right: alongU ? [lastU, 0, 0] : [0, lastV, 0],
+        down: [0, 0, 0],
+        through: { from: middle - across / 2, across },
+        show: gpuShow,
+      });
+    } else {
+      view.show({
+        plane: wantedPlane.current,
+        w: own,
+        from: middle - across / 2,
+        across,
+        pin: pin.current,
+        show: gpuShow,
+      });
+    }
     /*
      * The window, kept where a measurement can read it.
      *
@@ -381,7 +430,11 @@ export function SurfaceCardView({
       ((window as unknown as { __shown?: unknown[] }).__shown ??= []).push({
         at: performance.now(),
         perPixel: scale.wide / scale.reach,
-        ...window_,
+        plane: wantedPlane.current,
+        w: own,
+        pin: pin.current,
+        from: middle - across / 2,
+        across,
       });
     }
     // What the card is showing, which is what the sheet line and the winding points are drawn against.
@@ -472,11 +525,14 @@ export function SurfaceCardView({
               // Kept where a measurement can reach it: this is the march itself, and the one way to
               // know that running it elsewhere gave the same answer is to hold the two side by side.
               if (DEBUG) ((window as unknown as { __march?: unknown[] }).__march ??= []).push(field);
+              lastField.current = field;
               gpuRef.current?.take(field);
               baseW.current = event.baseW;
               piece.current = {
                 alongU: event.alongU,
                 alongV: event.alongV,
+                nu: event.nu,
+                nv: event.nv,
                 walk: {
                   sheets: Array.from(new Float32Array(event.sheets)),
                   walked: Array.from(new Float32Array(event.walked)),
@@ -511,13 +567,13 @@ export function SurfaceCardView({
                 showOnGpu();
                 markSheets();
               }
-              gpuRef.current?.want(
-                event.wanted.map((one) => ({
-                  level: one.level,
-                  factor: one.factor,
-                  chunks: new Float32Array(one.chunks),
-                })),
-              );
+              const wanted = event.wanted.map((one) => ({
+                level: one.level,
+                factor: one.factor,
+                chunks: new Float32Array(one.chunks),
+              }));
+              lastWant.current = wanted;
+              gpuRef.current?.want(wanted);
               return;
             }
             if (event.type === "place") {
@@ -918,7 +974,11 @@ export function SurfaceCardView({
   useEffect(() => {
     if (session === null || sourceId === null || gpuBox.current === null) return;
     const volume = session.volumes.get(sourceId);
-    const view = session.viewer.addSurfaceView(gpuBox.current, { volume });
+    /*
+     * The renderer being built to replace the one below (`?gpu2=yes`): one atlas, a TSL function,
+     * and — the part that matters here — a march that is not let go of until the one replacing it
+     * can be drawn, which is what a card going blank for half a second was.
+     */
     /*
      * Whether the card is still waiting, answered by the one thing that knows.
      *
@@ -926,15 +986,39 @@ export function SurfaceCardView({
      * of it.  The papyrus is drawn on the GPU now, so what is left to wait for is chunks arriving —
      * which only the view can see, because the view is what asked for them.
      */
-    view.onSettled = (settled) => {
-      if (!settled) return;
-      clearTimeout(waiting.current);
-      setLoading(false);
+    const attach = (view: Flat) => {
+      view.onSettled = (settled) => {
+        if (!settled) return;
+        clearTimeout(waiting.current);
+        setLoading(false);
+      };
+      gpuRef.current = view;
     };
-    gpuRef.current = view;
+    if (!ON_GPU2) {
+      const view = session.viewer.addSurfaceView(gpuBox.current, { volume });
+      attach(view);
+      return () => {
+        gpuRef.current = undefined;
+        view.dispose();
+      };
+    }
+    // The WebGPU device is started once for the page and awaited by whichever card gets there first.
+    let current = true;
+    let view: Flat | undefined;
+    // Both: the device has to be there, and the volume's scales have to be known.
+    Promise.all([session.viewer.startGpu(), volume.loaded]).then(([could]) => {
+      if (!current || !could || gpuBox.current === null) return;
+      view = session.viewer.addFlatView(gpuBox.current, { volume });
+      attach(view);
+      // Whatever the worker said while the device was starting is said again now.
+      if (lastField.current !== undefined) view.take(lastField.current);
+      if (lastWant.current !== undefined) view.want(lastWant.current);
+      showOnGpu();
+    });
     return () => {
+      current = false;
       gpuRef.current = undefined;
-      view.dispose();
+      view?.dispose();
     };
   }, [session, sourceId]);
 

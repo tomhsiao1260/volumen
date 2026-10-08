@@ -36,12 +36,18 @@ import { DisplayContext, SliceViewPanel } from "#src/render/panel.js";
 import type { RenderLayer } from "#src/render/renderlayer.js";
 import { SliceView } from "#src/render/frontend.js";
 import { SurfaceView } from "#src/render/surface_view.js";
-import { Atlas } from "#src/gpu/atlas.js";
+import { Atlas, BYTES as ATLAS_BYTES } from "#src/gpu/atlas.js";
 import { CardView } from "#src/gpu/card.js";
 import { Device } from "#src/gpu/device.js";
 import { scanOf } from "#src/gpu/sample.js";
 import { Scan } from "#src/gpu/scan.js";
 import { sliceOf } from "#src/gpu/slice.js";
+import { Field } from "#src/gpu/field.js";
+import type { Said } from "#src/gpu/field.js";
+import { surfaceOf } from "#src/gpu/surface.js";
+import type { Window as FlatWindow } from "#src/gpu/surface.js";
+import { Wanting } from "#src/gpu/wanting.js";
+import type { Wanted } from "#src/gpu/wanting.js";
 import { ImageRenderLayer } from "#src/render/renderlayer.js";
 import {
   makeCoordinateSpace,
@@ -323,7 +329,12 @@ export class Viewer extends RefCounted {
       // dropped from the GPU are still decoded in system memory, so getting one back is a re-upload
       // rather than a download.
       new ChunkQueueManager(rpc, this.display.gl, {
-        gpuMemory: { itemLimit: 1e4, sizeLimit: 4e8 },
+        /*
+         * The GPU's share is the atlas's own size, because the atlas IS where chunks go now.  Two
+         * numbers here would be two opinions about how much room there is, and the one that lost
+         * would be the card a person was looking at.
+         */
+        gpuMemory: { itemLimit: 1e4, sizeLimit: ATLAS_BYTES },
         systemMemory: { itemLimit: 1e5, sizeLimit: 1.5e9 },
         download: { itemLimit: 100, sizeLimit: Number.POSITIVE_INFINITY },
       }),
@@ -478,6 +489,68 @@ export class Viewer extends RefCounted {
     card.registerDisposer(asking.viewChanged.add(() => card.changed()));
     this.registerDisposer(card);
     return card;
+  }
+
+  /**
+   * Papyrus laid flat, drawn by the new renderer.
+   *
+   * Three things are pushed in from the page's own worker, because only it knows them: the march
+   * (`take`), where the card is looking (`show`), and which chunks the sheet lands in (`want`).
+   * Everything else — whether those chunks have arrived, and therefore whether the march that is
+   * waiting may replace the one being drawn — is decided here, where both are known.
+   */
+  addFlatView(element: HTMLElement, { volume }: { volume: Volume }) {
+    const { gpu } = this;
+    if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
+    const scan = this.scanOf(volume);
+    const field = new Field(gpu.device);
+    const view = surfaceOf(gpu.device, gpu.scan, scan.source, scan.scales, field);
+    const seen = new WatchableValue(Number.POSITIVE_INFINITY);
+    const wanting = new Wanting(this.chunkManager, volume.renderLayer, seen);
+    let settled = false;
+    let onSettled: ((settled: boolean) => void) | undefined;
+
+    const card = new CardView(element, gpu.device, {
+      material: view.material,
+      before: (width, height) => {
+        /*
+         * Asked once a frame, because a chunk arrives long after it was asked for.  This is both
+         * what lets the waiting march through and what tells the card to stop saying it is loading.
+         */
+        const now = wanting.settled();
+        field.settled(now);
+        if (now !== settled) {
+          settled = now;
+          onSettled?.(now);
+        }
+        view.before?.(width, height);
+      },
+      dispose: () => view.dispose?.(),
+    });
+    card.registerDisposer(field);
+    card.registerDisposer(wanting);
+    card.registerDisposer(
+      card.visibility.changed.add(() => (seen.value = card.visibility.value)),
+    );
+    this.registerDisposer(card);
+    return Object.assign(card, {
+      take(said: Said) {
+        field.take(said);
+        card.changed();
+      },
+      show(window: FlatWindow) {
+        view.show(window);
+        card.changed();
+      },
+      want(wanted: Wanted[]) {
+        wanting.want(wanted);
+        card.changed();
+      },
+      /** Told when every chunk of the finest scale asked for has arrived, and when that stops. */
+      set onSettled(said: ((settled: boolean) => void) | undefined) {
+        onSettled = said;
+      },
+    });
   }
 
   addSurfaceView(element: HTMLElement, { volume }: { volume: Volume }): SurfaceView {
