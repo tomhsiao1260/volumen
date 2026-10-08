@@ -556,6 +556,8 @@ export class Viewer extends RefCounted {
     const wanting = new Wanting(this.chunkManager, volume.renderLayer, seen);
     let settled = false;
     let onSettled: ((settled: boolean) => void) | undefined;
+    // What the march being drawn asked for, kept until the one waiting can be drawn instead.
+    let keeping: Wanted[] = [];
 
     const card = new CardView(element, gpu.device, {
       material: view.material,
@@ -590,7 +592,19 @@ export class Viewer extends RefCounted {
         card.changed();
       },
       want(wanted: Wanted[]) {
-        wanting.want(wanted);
+        /*
+         * The chunks the march being drawn needs are asked for alongside the ones the march waiting
+         * needs, until the waiting one takes over.
+         *
+         * Holding the old march is not enough on its own: the moment a new list goes to the queue,
+         * the old chunks stop being wanted, are dropped, and take their pages with them — so the
+         * card keeps a march it can no longer draw and goes blank anyway.  Measured on a swept cut,
+         * two frames in sixty fell to almost nothing, and this is what they were.
+         *
+         * The new list goes first, because `settled` asks about the finest scale of the first.
+         */
+        wanting.want(settled || keeping.length === 0 ? wanted : [...wanted, ...keeping]);
+        keeping = wanted;
         card.changed();
       },
       /** Told when every chunk of the finest scale asked for has arrived, and when that stops. */

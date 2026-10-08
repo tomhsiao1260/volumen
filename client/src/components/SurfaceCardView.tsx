@@ -1108,6 +1108,14 @@ export function SurfaceCardView({
       if (!current || !could || gpuBox.current === null) return;
       view = session.viewer.addFlatView(gpuBox.current, { volume });
       attach(view);
+      /*
+       * And a limit on the waiting, as every other ask has.
+       *
+       * A card says it is loading until its chunks arrive, and nothing promises they will: a chunk
+       * nobody ever asked for is not in the queue to be waited on, so `onSettled` never comes and
+       * the card spins for ever.  Measured the hard way — the fit suite timed out on it.
+       */
+      waitFor();
       // Whatever the worker said while the device was starting is said again now.
       if (lastField.current !== undefined) view.take(lastField.current);
       if (lastWant.current !== undefined) view.want(lastWant.current);
