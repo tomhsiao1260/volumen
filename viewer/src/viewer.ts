@@ -35,6 +35,12 @@ import type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";
 import { DisplayContext, SliceViewPanel } from "#src/render/panel.js";
 import type { RenderLayer } from "#src/render/renderlayer.js";
 import { SurfaceView } from "#src/render/surface_view.js";
+import { Atlas } from "#src/gpu/atlas.js";
+import { CardView } from "#src/gpu/card.js";
+import { Device } from "#src/gpu/device.js";
+import { scanOf } from "#src/gpu/sample.js";
+import { Scan } from "#src/gpu/scan.js";
+import { sliceOf } from "#src/gpu/slice.js";
 import { ImageRenderLayer } from "#src/render/renderlayer.js";
 import {
   makeCoordinateSpace,
@@ -363,6 +369,64 @@ export class Viewer extends RefCounted {
    * What it is NOT given is a navigation: a flattening has coordinates of its own, and where it is
    * looking is said with `show`.  See `render/surface_view.ts`.
    */
+  /*
+   * The renderer being built to replace the one above: one WebGPU device, one atlas, and views
+   * written in TSL (`gpu/`).  It shares this viewer's chunk machinery — the asking, the queueing,
+   * the dropping, the zarr and the decoding, none of which knows what a GPU is — and only changes
+   * where a chunk goes when it arrives.
+   *
+   * Undefined until `startGpu` has been awaited, and undefined for good where there is no WebGPU.
+   */
+  gpu:
+    | { device: Device; atlas: Atlas; scan: ReturnType<typeof scanOf>; scans: Map<Volume, Scan> }
+    | undefined;
+
+  /** Starts the WebGPU side.  Answers whether it could. */
+  async startGpu(): Promise<boolean> {
+    if (this.gpu !== undefined) return true;
+    const device = await Device.start();
+    if (device === undefined) return false;
+    const atlas = this.registerDisposer(new Atlas(device));
+    this.registerDisposer(device);
+    const scans = new Map<Volume, Scan>();
+    this.gpu = { device, atlas, scan: scanOf(atlas), scans };
+    /*
+     * A chunk arriving is the only thing that changes a card without the card asking.  Pages that
+     * could not be written yet are offered again at the same moment, which is the one place both
+     * things are known to have happened.
+     */
+    this.registerDisposer(
+      this.chunkManager.chunkQueueManager.visibleChunksChanged.add(() => {
+        for (const scan of scans.values()) scan.settle();
+        device.redraw();
+      }),
+    );
+    return true;
+  }
+
+  /** This volume's chunks, pointed at the atlas.  One per volume; made on first use. */
+  private scanOf(volume: Volume): Scan {
+    const { gpu } = this;
+    if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
+    let scan = gpu.scans.get(volume);
+    if (scan === undefined) {
+      scan = this.registerDisposer(new Scan(gpu.atlas, gpu.scans.size, volume));
+      gpu.scans.set(volume, scan);
+    }
+    return scan;
+  }
+
+  /** A cross-section drawn by the new renderer. */
+  addSliceView(element: HTMLElement, { volume }: { volume: Volume }) {
+    const { gpu } = this;
+    if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
+    const scan = this.scanOf(volume);
+    const view = sliceOf(gpu.scan, scan.source, scan.scales);
+    const card = new CardView(element, gpu.device, view);
+    this.registerDisposer(card);
+    return Object.assign(card, { show: view.show });
+  }
+
   addSurfaceView(element: HTMLElement, { volume }: { volume: Volume }): SurfaceView {
     const view = new SurfaceView(
       element,

@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { Point, ViewOrientation } from "viewer";
+import type { Looking, Point, ViewOrientation } from "viewer";
 import { getLasagna } from "../api/lasagna";
 import { sourceLabel, sourceMicron } from "../api/sources";
 import type { Source } from "../api/sources";
@@ -41,6 +41,28 @@ const AXES: Record<ViewOrientation, [number, number, number]> = {
   xz: [2, 0, 1],
   yz: [0, 1, 2],
 };
+
+/*
+ * The same three planes said as unit vectors in (x, y, z), which is what the new renderer wants.
+ *
+ * Derived from `AXES` rather than written out again: the two would otherwise be free to disagree,
+ * and a renderer drawing the yz plane where the xz plane is would still look like papyrus.
+ */
+const WAY = (axis: number): [number, number, number] => [
+  axis === 2 ? 1 : 0,
+  axis === 1 ? 1 : 0,
+  axis === 0 ? 1 : 0,
+];
+const FACING: Record<ViewOrientation, { right: [number, number, number]; down: [number, number, number] }> =
+  Object.fromEntries(
+    (Object.keys(AXES) as ViewOrientation[]).map((plane) => [
+      plane,
+      { right: WAY(AXES[plane][0]), down: WAY(AXES[plane][1]) },
+    ]),
+  ) as Record<ViewOrientation, { right: [number, number, number]; down: [number, number, number] }>;
+
+// Whether this session draws its cross-sections with the renderer being built to replace the old one.
+const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") === "yes";
 
 /*
  * The line where a surface card's sheet cuts this slice: a dark stroke under a bright one, so that it
@@ -266,6 +288,51 @@ export function CardView({
     if (sourceId === null || slice.current === null) return;
     const volume = session.volumes.get(sourceId);
     const navigation = session.group(groupId).navigationFor(volume);
+    /*
+     * The renderer being built to replace the one below (`?gpu2=yes`).
+     *
+     * It draws the same scan from the same chunks — the asking and the downloading are shared — but
+     * through one atlas and a TSL function instead of a texture and a draw call per chunk.  Kept
+     * side by side only while the two are being held against each other; the old one goes when they
+     * agree.
+     */
+    if (ON_GPU2) {
+      let card: { dispose(): void; changed(): void; show(looking: Looking): void } | undefined;
+      let current2 = true;
+      const look = () => {
+        const at = navigation.position;
+        if (card === undefined || at === undefined) return;
+        card.show({
+          at: [at.x, at.y, at.z],
+          right: FACING[orientation].right,
+          down: FACING[orientation].down,
+          zoom: navigation.zoom,
+        });
+        card.changed();
+      };
+      session.viewer.startGpu().then((could) => {
+        if (!current2 || !could || slice.current === null) return;
+        volume.loaded.then(() => {
+          if (!current2 || slice.current === null) return;
+          card = session.viewer.addSliceView(slice.current, { volume });
+          setLoaded(true);
+          look();
+        });
+      });
+      setFailed(false);
+      setLoaded(false);
+      setCentre(navigation.position);
+      const off2 = navigation.onViewChanged(() => {
+        setCentre(navigation.position);
+        look();
+        onLooked();
+      });
+      return () => {
+        current2 = false;
+        off2();
+        card?.dispose();
+      };
+    }
     const added = session.viewer.addView(slice.current, {
       volume,
       orientation,

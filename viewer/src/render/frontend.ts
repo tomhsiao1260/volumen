@@ -434,6 +434,16 @@ export function getVolumetricTransformedSources(
 export class VolumeChunkSource extends ChunkSource {
   chunks!: Map<string, VolumeChunk>;
   spec: VolumeChunkSpecification;
+  /*
+   * Where this source's chunks go on the GPU, when something other than a texture each wants them.
+   *
+   * Set by the renderer built on one atlas (`gpu/feed.ts`): a chunk then becomes pages of the one
+   * texture rather than a texture of its own, and the upload below does not happen at all.  Left
+   * unset, everything works as it always did — which is how the two renderers were held against
+   * each other while one replaced the other.
+   */
+  feed: ((chunk: VolumeChunk) => void) | undefined = undefined;
+  drop: ((chunk: VolumeChunk) => void) | undefined = undefined;
   chunkFormat: ChunkFormat;
   // Layout of the texture of each chunk of this source.
   textureLayout: TextureLayout;
@@ -493,6 +503,11 @@ export class VolumeChunk extends Chunk {
   copyToGPU(gl: GL) {
     super.copyToGPU(gl);
     if (this.data === null) return;
+    const { feed } = this.source;
+    if (feed !== undefined) {
+      feed(this);
+      return;
+    }
     const { chunkFormat, textureLayout } = this.source;
     const texture = (this.texture = gl.createTexture());
     gl.bindTexture(WebGL2RenderingContext.TEXTURE_3D, texture);
@@ -504,6 +519,11 @@ export class VolumeChunk extends Chunk {
   freeGPUMemory(gl: GL) {
     super.freeGPUMemory(gl);
     if (this.data === null) return;
+    const { drop } = this.source;
+    if (drop !== undefined) {
+      drop(this);
+      return;
+    }
     gl.deleteTexture(this.texture);
     this.texture = null;
     this.textureLayout = null;

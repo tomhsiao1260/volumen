@@ -18,3 +18,5 @@ export type {
 export type { SurfaceField, SurfaceWindow } from "#src/render/surface_layer.js";
 export type { SurfaceView, SurfaceWant } from "#src/render/surface_view.js";
 export type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";
+// The renderer being built to replace the one above.
+export type { Looking, Scale } from "#src/gpu/slice.js";
