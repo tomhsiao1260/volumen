@@ -1,15 +1,21 @@
 /**
- * @file One scan, feeding the atlas.
+ * @file One scan, answering the atlas.
  *
- * Everything above this — asking for chunks, deciding which are worth having, dropping the ones
- * that are not, reading zarr, decoding blosc — is the library as it was, and none of it knows what
- * a GPU is.  This is where its output is pointed somewhere new: a chunk that used to become a
- * texture of its own becomes some pages of the one atlas.
+ * Everything above this — asking for chunks, deciding which are worth having, dropping the ones that
+ * are not, reading zarr, decoding blosc — is the library as it was, and none of it knows what a GPU
+ * is.  What changed is where a chunk goes, and when.
+ *
+ * It goes nowhere when it arrives.  It sits in memory until the shader says it wanted a page of it
+ * and did not find one, and then that page alone is written.  The reason is arithmetic: a
+ * full-resolution chunk of these scans is 256 voxels a side — sixty-four pages — and a sheet cutting
+ * through one touches two or three of them.  Writing all sixty-four filled the atlas with papyrus
+ * nobody was looking at, and the card a person *was* looking at lost its pages to make the room.
+ *
+ * The shader is the only thing that knows what is really being drawn, so the shader is asked.
  */
-import type { Atlas } from "#src/gpu/atlas.js";
 import { PAGE } from "#src/gpu/atlas.js";
-import { putChunk } from "#src/gpu/feed.js";
-import type { Arrived } from "#src/gpu/feed.js";
+import type { Atlas } from "#src/gpu/atlas.js";
+import { putPage } from "#src/gpu/feed.js";
 import type { Scale } from "#src/gpu/slice.js";
 import type {
   SliceViewSingleResolutionSource,
@@ -22,15 +28,7 @@ import { RefCounted } from "#src/util/disposable.js";
 export class Scan extends RefCounted {
   /** Finest first, as the renderer wants them. */
   readonly scales: Scale[] = [];
-  /*
-   * Chunks that arrived before the atlas's texture existed.
-   *
-   * three.js makes a texture on the GPU when it is first drawn with, so the first chunks of a
-   * session land before there is anywhere to put them.  They are held and offered again rather than
-   * dropped, because a dropped chunk is not asked for twice — the queue above believes it is on the
-   * GPU — and the card would simply never fill in.
-   */
-  private waiting: Arrived[] = [];
+  private readonly levels: VolumeChunkSource[] = [];
 
   constructor(
     private atlas: Atlas,
@@ -39,10 +37,6 @@ export class Scan extends RefCounted {
     volume: Volume,
   ) {
     super();
-    /*
-     * The volume's layer arrives after its metadata does, so a `Scan` is only worth making once
-     * `volume.loaded` has settled — which is also when the scales are known.
-     */
     const layer = volume.renderLayer.value;
     if (layer === undefined) throw new Error("A scan can only be made once its volume has loaded.");
     const sources: SliceViewSingleResolutionSource[] = layer.getSources();
@@ -50,20 +44,18 @@ export class Scan extends RefCounted {
     // is one of these" means.  The transform is column-major and x is the last zarr dimension.
     const finest = sources[0].chunkToMultiscaleTransform[2];
     sources.forEach((one: SliceViewSingleResolutionSource, level: number) => {
-      this.scales.push({
-        level,
-        factor: one.chunkToMultiscaleTransform[2] / finest,
-      });
+      this.scales.push({ level, factor: one.chunkToMultiscaleTransform[2] / finest });
       const from = one.chunkSource as VolumeChunkSource;
-      from.feed = (chunk) => this.take(level, from, chunk);
+      this.levels.push(from);
       /*
-       * A chunk leaving the queue takes its pages with it.
-       *
-       * One eviction policy, and it is the queue's: it knows what every card wants, at what
-       * priority, and how visible each card is.  Letting the atlas decide as well meant two
-       * policies disagreeing — and since the lookup happens on the GPU, the atlas cannot see what
-       * is being read and was dropping by age, so a card sitting still lost its pages to a card
-       * streaming past it.
+       * A chunk arriving puts nothing anywhere; it is in memory now, which is all the queue above
+       * means by its GPU tier.  What it holds goes up a page at a time, when a page is asked for.
+       */
+      from.feed = () => {};
+      /*
+       * A chunk leaving takes its pages with it.  One eviction policy, and it is the queue's: it
+       * knows what every card wants, at what priority, and how visible each card is.  The atlas
+       * cannot see any of that — the lookup happens on the GPU — so it does as it is told.
        */
       from.drop = (chunk) => this.give(level, from, chunk);
       this.registerDisposer(() => {
@@ -73,17 +65,37 @@ export class Scan extends RefCounted {
     });
   }
 
-  private take(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
-    const data = chunk.data;
-    if (data === null) return;
-    const arrived: Arrived = {
-      source: this.source,
-      level,
-      grid: chunk.chunkGridPosition,
-      size: from.spec.chunkDataSize,
-      data: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-    };
-    if (!putChunk(this.atlas, arrived)) this.waiting.push(arrived);
+  /**
+   * Answers the pages the shader said it wanted and could not find.
+   *
+   * `asked` is the whole miss table, two words a key at the key's own hash, zero where nothing was
+   * asked.  A page whose chunk has not been downloaded yet is passed over: the queue above is
+   * already fetching it, and the shader will ask again next frame.
+   */
+  answer(asked: Uint32Array): number {
+    let put = 0;
+    for (let i = 0; i + 1 < asked.length; i += 2) {
+      const lo = asked[i], hi = asked[i + 1];
+      if (lo === 0 && hi === 0) continue;
+      if ((hi & 255) !== this.source) continue;
+      const level = (hi >> 8) & 15;
+      const from = this.levels[level];
+      if (from === undefined) continue;
+      const at: [number, number, number] = [lo & 1023, (lo >> 10) & 1023, (lo >> 20) & 1023];
+      if (this.atlas.has({ source: this.source, level, at })) continue;
+      const size = from.spec.chunkDataSize;
+      const grid = [
+        Math.floor((at[0] * PAGE) / size[0]),
+        Math.floor((at[1] * PAGE) / size[1]),
+        Math.floor((at[2] * PAGE) / size[2]),
+      ];
+      const chunk = from.chunks.get(grid.join(",")) as VolumeChunk | undefined;
+      const data = chunk?.data;
+      if (data == null) continue;
+      const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      if (putPage(this.atlas, this.source, level, at, grid, size, bytes)) put++;
+    }
+    return put;
   }
 
   private give(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
@@ -99,15 +111,5 @@ export class Scan extends RefCounted {
             at: [grid[0] * pages[0] + px, grid[1] * pages[1] + py, grid[2] * pages[2] + pz],
           });
         }
-  }
-
-  /** Offers again whatever could not be written yet.  Called once a frame; usually does nothing. */
-  settle() {
-    if (this.waiting.length === 0) return;
-    const again = this.waiting;
-    this.waiting = [];
-    for (const arrived of again) {
-      if (!putChunk(this.atlas, arrived)) this.waiting.push(arrived);
-    }
   }
 }

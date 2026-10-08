@@ -390,7 +390,14 @@ export class Viewer extends RefCounted {
    * Undefined until `startGpu` has been awaited, and undefined for good where there is no WebGPU.
    */
   gpu:
-    | { device: Device; atlas: Atlas; scan: ReturnType<typeof scanOf>; scans: Map<Volume, Scan> }
+    | {
+        device: Device;
+        atlas: Atlas;
+        scan: ReturnType<typeof scanOf>;
+        scans: Map<Volume, Scan>;
+        // What the shader asked for on the last frame read back, for a measurement to look at.
+        asked?: { by: Record<string, number>; put: number };
+      }
     | undefined;
 
   /** Starts the WebGPU side.  Answers whether it could. */
@@ -408,11 +415,51 @@ export class Viewer extends RefCounted {
      * things are known to have happened.
      */
     this.registerDisposer(
-      this.chunkManager.chunkQueueManager.visibleChunksChanged.add(() => {
-        for (const scan of scans.values()) scan.settle();
-        device.redraw();
-      }),
+      this.chunkManager.chunkQueueManager.visibleChunksChanged.add(() => device.redraw()),
     );
+    /*
+     * And after every frame, the pages the shader said it wanted and could not find.
+     *
+     * Reading a buffer back is not instant, so one is in flight at a time and the rest of the frame
+     * does not wait for it: a page asked for now is written a frame or two later, which is the same
+     * bargain every chunk arriving already makes.  Whatever was asked is then cleared, so a page
+     * that is still missing has to be asked for again — which is what keeps this a statement about
+     * the frame just drawn rather than a list that only grows.
+     */
+    let reading = false;
+    device.drawn = () => {
+      if (reading || this.gpu === undefined) return;
+      reading = true;
+      void (async () => {
+        try {
+          const got = await device.renderer.getArrayBufferAsync(this.gpu!.scan.asked);
+          const asked = new Uint32Array(got);
+          let put = 0;
+          for (const scan of scans.values()) put += scan.answer(asked);
+          /*
+           * What was asked for, kept where a measurement can see it.  A page that is never asked for
+           * and a page that is asked for and cannot be answered look the same from outside — the
+           * card is blank either way — and telling them apart is most of finding out why.
+           */
+          if (this.gpu !== undefined) {
+            const by: Record<string, number> = {};
+            for (let i = 0; i + 1 < asked.length; i += 2) {
+              if (asked[i] === 0 && asked[i + 1] === 0) continue;
+              const name = `source ${asked[i + 1] & 255} level ${(asked[i + 1] >> 8) & 15}`;
+              by[name] = (by[name] ?? 0) + 1;
+            }
+            this.gpu.asked = { by, put };
+          }
+          atlas.asks.fill(0);
+          this.gpu!.scan.asked.needsUpdate = true;
+          if (put > 0) device.redraw();
+        } catch (error) {
+          console.warn("The pages the shader asked for could not be read back:", error);
+        } finally {
+          reading = false;
+        }
+      })();
+    };
     return true;
   }
 

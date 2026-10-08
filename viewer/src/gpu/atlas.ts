@@ -76,6 +76,11 @@ export class Atlas extends RefCounted {
   readonly texture: THREE.Data3DTexture;
   /** The table, as the shader reads it: `SLOTS × (keyLo, keyHi, where, when)`. */
   readonly table = new Uint32Array(SLOTS * WORDS);
+  /*
+   * And where the shader writes the pages it wanted and did not find, two words a key, at the key's
+   * own hash.  Read back and cleared once a frame; see `Scan.answer`.
+   */
+  readonly asks = new Uint32Array(SLOTS * 2);
 
   // Pages across the atlas each way, and how many there are in all.
   private readonly across: number;
@@ -128,6 +133,22 @@ export class Atlas extends RefCounted {
   /** How many pages the atlas holds, and how many are in use. */
   get room() {
     return { pages: this.pages, used: this.where.size };
+  }
+
+  /** What is in it, for a measurement to look at: how many pages of each source and scale. */
+  get kept() {
+    const by = new Map<string, number>();
+    for (const page of this.held) {
+      if (page === undefined) continue;
+      const name = `source ${page.source} level ${page.level}`;
+      by.set(name, (by.get(name) ?? 0) + 1);
+    }
+    return Object.fromEntries(by);
+  }
+
+  /** Whether a page is already here, so that nobody uploads it twice. */
+  has(page: Page) {
+    return this.where.has(`${page.source}/${page.level}/${page.at.join(",")}`);
   }
 
   /**

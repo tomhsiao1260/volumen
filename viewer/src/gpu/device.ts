@@ -219,7 +219,11 @@ export class Device extends RefCounted {
     if (drawing.length === 0) return;
     this.fit(width, height);
     for (const card of drawing) card.draw();
+    this.drawn?.();
   }
+
+  /** Called once every frame, after every card has been drawn and copied out. */
+  drawn: (() => void) | undefined;
 
   private fit(width: number, height: number) {
     const { surface } = this;

@@ -173,12 +173,52 @@ export function surfaceOf(
       const window_ = at.add(right.mul(a)).add(down.mul(b));
       // Along the sheets the window says where directly; across them, distance does.
       const w = across.equal(0).select(window_.z, windingAt(b));
+      // Where that point sits in the table, which holds a sample every eighth of a sheet.
+      const layer = w.add(said.K).mul(said.per);
+      const inside = layer.greaterThanEqual(0).and(layer.lessThanEqual(said.layers - 1));
+      const place = marchAt(vec3(window_.x, window_.y, layer.clamp(0, said.layers - 1))).toVar();
 
-      const out = vec4(0).toVar();
-      If(show.equal(TELL.card), () => {
-        out.assign(vec4(a, b, float(0.5), float(1)));
+      /*
+       * The papyrus, worked out straight through with nothing nested in anything.
+       *
+       * `reached` is how much of the march got here: the fourth channel is 0 or 1 and the eight
+       * weights of a trilinear read sum to one, so short of the whole weight means a corner was
+       * never walked to and there is no sheet at this pixel.  The threshold is not 0.999, and that
+       * is the price of letting the texture unit do the filtering — it carries the weights in a few
+       * bits of fixed point, so a pixel every corner of which WAS reached comes back a little under.
+       */
+      const reached = inside.select(place.w, float(0));
+      const grey = float(0).toVar();
+      const found = float(0).toVar();
+      If(reached.greaterThan(0.99), () => {
+        /*
+         * The march holds (z, y, x), which is how the scan's array and the fit are both written; the
+         * atlas is asked (x, y, z), because the data source turns the axes round when it places a
+         * volume in the world.  Measured once, the hard way: a place asked the wrong way round sat
+         * at chunk (74, 15, 38) where it belonged at (38, 15, 74) — empty space on the far side of
+         * the scroll, drawn with complete confidence.
+         */
+        const voxel = vec3(place.z, place.y, place.x);
+        for (const scale of scales) {
+          If(found.equal(0), () => {
+            const got = scan.at(uint(source), uint(scale.level), float(scale.factor), voxel);
+            If(got.y.greaterThan(0), () => {
+              grey.assign(got.x);
+              found.assign(1);
+            });
+          });
+        }
       });
-      If(show.equal(TELL.grid), () => {
+
+      /*
+       * And then what to say about it.  The debug modes OVERRIDE the answer rather than being
+       * branched around it: nesting them inside the drawing is what let a card be black for a
+       * reason none of them could show, because the mode that would have shown it sat inside a
+       * branch that was not taken.
+       */
+      const out = vec4(grey, grey, grey, found).toVar();
+      If(show.equal(TELL.card), () => out.assign(vec4(a, b, float(0.5), float(1))));
+      If(show.equal(TELL.grid), () =>
         out.assign(
           vec4(
             window_.x.div(Math.max(1, said.nu - 1)),
@@ -186,47 +226,17 @@ export function surfaceOf(
             w.div(said.K).mul(0.5).add(0.5),
             float(1),
           ),
-        );
-      });
-      If(show.lessThan(TELL.card), () => {
-        // Where that point sits in the table, which holds a sample every eighth of a sheet.
-        const layer = w.add(said.K).mul(said.per);
-        If(layer.greaterThanEqual(0).and(layer.lessThanEqual(said.layers - 1)), () => {
-          const place = marchAt(vec3(window_.x, window_.y, layer));
-          If(show.equal(TELL.reached), () => {
-            out.assign(vec4(place.w, place.w, place.w, float(1)));
-          });
-          If(show.equal(TELL.place), () => {
-            out.assign(
-              vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), float(1)),
-            );
-          });
-          If(show.equal(0).and(place.w.greaterThan(0.999)), () => {
-            /*
-             * The march holds (z, y, x), which is how the scan's array and the fit are both written;
-             * the atlas is asked (x, y, z), because the data source turns the axes round when it
-             * places a volume in the world.  Measured once, the hard way: a place asked the wrong
-             * way round sat at chunk (74, 15, 38) where it belonged at (38, 15, 74) — empty space on
-             * the far side of the scroll, drawn with complete confidence.
-             */
-            const voxel = vec3(place.z, place.y, place.x);
-            const grey = float(0).toVar();
-            const found = float(0).toVar();
-            for (const scale of scales) {
-              If(found.equal(0), () => {
-                const got = scan.at(uint(source), uint(scale.level), float(scale.factor), voxel);
-                If(got.y.greaterThan(0), () => {
-                  grey.assign(got.x);
-                  found.assign(1);
-                });
-              });
-            }
-            // Where there is papyrus but no scan yet, nothing is claimed: the card's own background
-            // shows through rather than a grey that could be read as a reading.
-            out.assign(vec4(grey, grey, grey, found));
-          });
-        });
-      });
+        ),
+      );
+      // Amplified a hundredfold, because what matters is how far SHORT of one it is.
+      If(show.equal(TELL.reached), () =>
+        out.assign(vec4(reached, float(1).sub(reached).mul(100), float(0), float(1))),
+      );
+      If(show.equal(TELL.place), () =>
+        out.assign(
+          vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), float(1)),
+        ),
+      );
       return out;
     })();
     material.needsUpdate = true;

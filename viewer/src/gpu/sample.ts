@@ -14,6 +14,7 @@
 import * as THREE from "three/webgpu";
 import {
   Break,
+  atomicStore,
   Fn,
   If,
   Loop,
@@ -21,7 +22,6 @@ import {
   instancedArray,
   texture3D,
   uint,
-  uvec2,
   vec2,
   vec3,
 } from "three/tsl";
@@ -53,6 +53,23 @@ const EMPTY = 0xffffffff;
  */
 export function scanOf(atlas: Atlas) {
   const table = instancedArray(atlas.table, "uvec4");
+  /*
+   * Where the shader says which page it wanted and did not find.
+   *
+   * This is the whole of how the atlas learns what to hold.  The lookup happens here, so here is the
+   * only place that knows what is actually being drawn — a list worked out on the other thread can
+   * only be a guess at it, and the guess was wrong by a factor of sixty: a chunk of this scan is
+   * 256 voxels a side, sixty-four pages, and a sheet cutting through one touches two or three of
+   * them.  Uploading all sixty-four filled the atlas with papyrus nobody was looking at.
+   *
+   * Written at the key's own hash, two words a key, and atomically — not for the atomicity but
+   * because three.js will not give a fragment shader a writable storage buffer any other way (its
+   * `getNodeAccess` returns read-only outside compute unless the buffer is atomic, since WGSL does
+   * allow atomics there).  Two misses landing on one slot can still interleave their halves, which
+   * makes a key for a page that does not exist; it is passed over on the way back in and the one
+   * that lost asks again next frame.
+   */
+  const asks = instancedArray(atlas.asks, "uint").toAtomic();
   // What the table looked like when it was last sent; the atlas bumps its own on every change.
   let sent = -1;
 
@@ -72,12 +89,7 @@ export function scanOf(atlas: Atlas) {
   );
 
   /** Where a page sits in the atlas, in voxels, or `-1` in `w` when it is not resident. */
-  const pageAt = Fn(([source, level, px, py, pz]: Num[]) => {
-      const lo = px
-        .bitAnd(uint(1023))
-        .bitOr(py.bitAnd(uint(1023)).shiftLeft(uint(10)))
-        .bitOr(pz.bitAnd(uint(1023)).shiftLeft(uint(20)));
-      const hi = source.bitAnd(uint(255)).bitOr(level.bitAnd(uint(15)).shiftLeft(uint(8)));
+  const pageAt = Fn(([lo, hi]: Num[]) => {
       const at = hashOf(lo, hi).toVar();
       const slot = uint(EMPTY).toVar();
       Loop(PROBES, () => {
@@ -108,6 +120,7 @@ export function scanOf(atlas: Atlas) {
       const here = voxel.add(0.5).div(factor).sub(0.5);
       const page = here.div(float(PAGE)).floor();
       const out = vec2(0, 0).toVar();
+      const asked = uint(0).toVar();
       /*
        * Outside the keys a page can have, there is nothing to ask about — and asking anyway is not
        * harmless.  A negative coordinate turned into a `u32` wraps to an enormous one, and ten bits
@@ -120,13 +133,20 @@ export function scanOf(atlas: Atlas) {
         .all()
         .and(page.lessThan(vec3(1024)).all());
       If(inRange, () => {
-      const slot = pageAt(
-        source,
-        level,
-        page.x.toUint(),
-        page.y.toUint(),
-        page.z.toUint(),
-      ).toVar();
+      const lo = page.x
+        .toUint()
+        .bitAnd(uint(1023))
+        .bitOr(page.y.toUint().bitAnd(uint(1023)).shiftLeft(uint(10)))
+        .bitOr(page.z.toUint().bitAnd(uint(1023)).shiftLeft(uint(20)));
+      const hi = source.bitAnd(uint(255)).bitOr(level.bitAnd(uint(15)).shiftLeft(uint(8)));
+      const slot = pageAt(lo, hi).toVar();
+      // Not here: say so, once, where whoever fills the atlas will see it.
+      If(slot.equal(uint(EMPTY)), () => {
+        asked.assign(1);
+        const where = hashOf(lo, hi).mul(uint(2));
+        atomicStore(asks.element(where), lo);
+        atomicStore(asks.element(where.add(uint(1))), hi);
+      });
       If(slot.notEqual(uint(EMPTY)), () => {
         /*
          * Where that page went, unpacked from its number: pages are laid out x fastest, then y,
@@ -170,6 +190,10 @@ export function scanOf(atlas: Atlas) {
       sent = atlas.generation;
       const attribute = (table as unknown as { value: THREE.BufferAttribute }).value;
       attribute.needsUpdate = true;
+    },
+    /** The buffer the shader writes its misses into, for whoever reads them back. */
+    get asked() {
+      return (asks as unknown as { value: THREE.BufferAttribute }).value;
     },
   };
 }
