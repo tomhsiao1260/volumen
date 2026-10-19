@@ -1,22 +1,36 @@
 /**
- * @file One scan, answering the atlas.
+ * @file One scan, feeding the atlas.
  *
  * Everything above this — asking for chunks, deciding which are worth having, dropping the ones that
  * are not, reading zarr, decoding blosc — is the library as it was, and none of it knows what a GPU
  * is.  What changed is where a chunk goes, and when.
  *
- * It goes nowhere when it arrives.  It sits in memory until the shader says it wanted a page of it
- * and did not find one, and then that page alone is written.  The reason is arithmetic: a
- * full-resolution chunk of these scans is 256 voxels a side — sixty-four pages — and a sheet cutting
- * through one touches two or three of them.  Writing all sixty-four filled the atlas with papyrus
- * nobody was looking at, and the card a person *was* looking at lost its pages to make the room.
+ * A chunk arriving goes up as PAGES, and only the pages somebody is looking at.  The reason is
+ * arithmetic: a full-resolution chunk of these scans is 256 voxels a side — sixty-four pages — and a
+ * sheet or a slice cutting through one touches a handful of them.  Writing all sixty-four filled the
+ * atlas with papyrus nobody was looking at, and the card a person *was* looking at lost its pages to
+ * make the room.
  *
- * The shader is the only thing that knows what is really being drawn, so the shader is asked.
+ * Who is looking is said two ways:
+ *
+ *   - A view whose geometry is known on this thread — a cross-section is a rectangle — places an
+ *     ORDER for the pages it cuts (`pages.ts`).  Those go up the moment they can: when the order is
+ *     placed, if the chunk is here, and when the chunk arrives, if the order is.  A view's first frame
+ *     after a move has its pages, and a chunk that has just arrived is on the card in the same tick.
+ *   - A view whose geometry only a worker knows — papyrus laid flat is a march of a couple of hundred
+ *     thousand positions — is drawn, and the shader says which pages it wanted and did not find
+ *     (`sample.ts`).  Those are read back and ANSWERED a frame or two later.
+ *
+ * The coarse scales are held whole: a chunk of them is one page, and they are what every pixel falls
+ * back to while the page it really wants is on its way.
  */
 import { PAGE } from "#src/gpu/atlas.js";
 import type { Atlas, Page } from "#src/gpu/atlas.js";
 import { putPage } from "#src/gpu/feed.js";
+import type { Order } from "#src/gpu/pages.js";
+import { unpackPage } from "#src/gpu/pages.js";
 import type { Scale } from "#src/gpu/slice.js";
+import { ChunkState } from "#src/chunk_manager/base.js";
 import type {
   SliceViewSingleResolutionSource,
   VolumeChunk,
@@ -31,6 +45,13 @@ import { RefCounted } from "#src/util/disposable.js";
  * time.  Eight is three levels down, where a card's worth of scroll is a handful of chunks.
  */
 const EAGER = 8;
+/*
+ * How many of the pages a view is heading for — the ones a page further along its normal — go up
+ * in one go.  They are not needed yet, and a page is a quarter of a megabyte: a step across a page
+ * boundary wants thirty or so of them, and writing all of those in the frame the step happens is a
+ * hitch where there need not be one.
+ */
+const NEAR_PER_TICK = 6;
 
 /** The fill value of a scale as the atlas holds greys: a fraction of one (`feed.ts`). */
 function fillOf(source: VolumeChunkSource) {
@@ -49,6 +70,13 @@ export class Scan extends RefCounted {
   /** Finest first, as the renderer wants them. */
   readonly scales: Scale[] = [];
   private readonly levels: VolumeChunkSource[] = [];
+  // Each view's standing order, by level; and their union, which is what a chunk arriving is held
+  // against.
+  private readonly orders = new Map<object, Map<number, Order>>();
+  private wanted = new Map<number, Set<number>>();
+  // The pages views are heading for, not yet written: `level * 2^30 + packed`, oldest first.
+  private pending: number[] = [];
+  private draining = false;
 
   constructor(
     private atlas: Atlas,
@@ -71,19 +99,8 @@ export class Scan extends RefCounted {
         upper: [upperVoxelBound[0], upperVoxelBound[1], upperVoxelBound[2]],
       });
       this.levels.push(from);
-      /*
-       * A fine chunk arriving puts nothing anywhere: it is in memory now, and what it holds goes up
-       * a page at a time, when a page is asked for.
-       *
-       * A COARSE one goes up whole, at once.  Asking first and uploading after costs a frame, and
-       * while that frame passes the pixel has nothing to show — measured on a swept cut, a third of
-       * the card was empty at any moment, because what it needed next was always one frame away.
-       * The coarse scales cost almost nothing to hold (a chunk of them is one page) and they are
-       * what the shader falls back to, so holding all of them gives every pixel something to show
-       * while the page it really wants is fetched.  Detail then arrives on top.
-       */
       const eager = this.scales[level].factor >= EAGER;
-      from.feed = eager ? (chunk) => this.all(level, from, chunk) : (chunk) => this.nowhere(level, from, chunk);
+      from.feed = (chunk) => this.arrived(level, from, chunk, eager);
       /*
        * A chunk leaving takes its pages with it.  One eviction policy, and it is the queue's: it
        * knows what every card wants, at what priority, and how visible each card is.  The atlas
@@ -95,6 +112,93 @@ export class Scan extends RefCounted {
         from.drop = undefined;
       });
     });
+  }
+
+  /**
+   * A view's standing order: the pages it cuts now, per level, and the ones it is heading for.
+   * Replaces the view's last order.  What can go up now goes up now.
+   */
+  order(who: object, orders: Map<number, Order>) {
+    this.orders.set(who, orders);
+    this.gather();
+    for (const [level, { cut, near }] of orders) {
+      for (const packed of cut) this.offer(level, packed, true);
+      for (const packed of near) this.pending.push(level * 2 ** 30 + packed);
+    }
+    this.drain();
+  }
+
+  /** The view has gone, and so has its order. */
+  forget(who: object) {
+    if (this.orders.delete(who)) this.gather();
+  }
+
+  // The union of every order, by level.
+  private gather() {
+    const wanted = new Map<number, Set<number>>();
+    for (const orders of this.orders.values())
+      for (const [level, { cut, near }] of orders) {
+        let set = wanted.get(level);
+        if (set === undefined) wanted.set(level, (set = new Set()));
+        for (const packed of cut) set.add(packed);
+        for (const packed of near) set.add(packed);
+      }
+    this.wanted = wanted;
+  }
+
+  /*
+   * The pages views are heading for, written a few at a time, between frames, until there are none.
+   * A page that was written meanwhile — because its chunk arrived, or because a view reached it — is
+   * passed over.
+   */
+  private drain() {
+    if (this.draining || this.pending.length === 0) return;
+    this.draining = true;
+    const tick = () => {
+      this.draining = false;
+      if (this.wasDisposed) return;
+      for (let n = 0; n < NEAR_PER_TICK && this.pending.length > 0; ) {
+        const key = this.pending.shift()!;
+        const level = Math.floor(key / 2 ** 30);
+        const packed = key - level * 2 ** 30;
+        // Still wanted by somebody, or the view has moved on since.
+        if (!this.wanted.get(level)?.has(packed)) continue;
+        if (this.offer(level, packed, false)) n++;
+      }
+      if (this.pending.length > 0) {
+        this.draining = true;
+        setTimeout(tick, 0);
+      }
+    };
+    setTimeout(tick, 0);
+  }
+
+  /**
+   * Puts one page in if it can: the page is not there yet, and its chunk is on the GPU as far as the
+   * queue is concerned.  Answers whether anything was written.  A page already there is touched, so
+   * that what is being looked at is not what the atlas drops.
+   */
+  private offer(level: number, packed: number, looking: boolean): boolean {
+    const at = unpackPage(packed);
+    const page: Page = { source: this.source, level, at };
+    if (this.atlas.has(page)) {
+      if (looking) this.atlas.touch(page);
+      return false;
+    }
+    const from = this.levels[level];
+    const size = from.spec.chunkDataSize;
+    const grid = [
+      Math.floor((at[0] * PAGE) / size[0]),
+      Math.floor((at[1] * PAGE) / size[1]),
+      Math.floor((at[2] * PAGE) / size[2]),
+    ];
+    const chunk = from.chunks.get(grid.join(",")) as VolumeChunk | undefined;
+    if (chunk === undefined || chunk.state !== ChunkState.GPU_MEMORY) return false;
+    if (chunk.data === null) {
+      this.atlas.absent(page);
+      return true;
+    }
+    return putPage(this.atlas, this.source, level, at, grid, size, chunk.data);
   }
 
   /**
@@ -111,26 +215,8 @@ export class Scan extends RefCounted {
       if (lo === 0 && hi === 0) continue;
       if ((hi & 255) !== this.source) continue;
       const level = (hi >> 8) & 15;
-      const from = this.levels[level];
-      if (from === undefined) continue;
-      const at: [number, number, number] = [lo & 1023, (lo >> 10) & 1023, (lo >> 20) & 1023];
-      if (this.atlas.has({ source: this.source, level, at })) continue;
-      const size = from.spec.chunkDataSize;
-      const grid = [
-        Math.floor((at[0] * PAGE) / size[0]),
-        Math.floor((at[1] * PAGE) / size[1]),
-        Math.floor((at[2] * PAGE) / size[2]),
-      ];
-      const chunk = from.chunks.get(grid.join(",")) as VolumeChunk | undefined;
-      if (chunk === undefined) continue;
-      const { data } = chunk;
-      if (data === null) {
-        // The store has no such chunk, and the shader should stop asking: the pixel is the fill.
-        this.atlas.absent({ source: this.source, level, at });
-        put++;
-        continue;
-      }
-      if (putPage(this.atlas, this.source, level, at, grid, size, data)) put++;
+      if (this.levels[level] === undefined) continue;
+      if (this.offer(level, lo & ((1 << 30) - 1), false)) put++;
     }
     return put;
   }
@@ -151,28 +237,25 @@ export class Scan extends RefCounted {
         }
   }
 
-  /** Every page of a chunk, for the coarse scales that are worth holding whole. */
-  private all(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
+  /**
+   * A chunk has reached the GPU, as far as the queue is concerned.  The pages of it somebody has
+   * ordered go up now; every page of a coarse chunk does; and a chunk the store does not have is said
+   * to be nowhere at once, whatever its scale, so that the shader stops asking after it.
+   */
+  private arrived(level: number, from: VolumeChunkSource, chunk: VolumeChunk, eager: boolean) {
     const { data } = chunk;
     if (data === null) {
-      this.nowhere(level, from, chunk);
+      for (const page of this.pagesOf(level, from, chunk)) this.atlas.absent(page);
       return;
     }
+    const wanted = this.wanted.get(level);
     const size = from.spec.chunkDataSize;
     const grid = chunk.chunkGridPosition;
     for (const page of this.pagesOf(level, from, chunk)) {
+      if (!eager && !wanted?.has(page.at[0] | (page.at[1] << 10) | (page.at[2] << 20))) continue;
       if (this.atlas.has(page)) continue;
       putPage(this.atlas, this.source, level, page.at, grid, size, data);
     }
-  }
-
-  /**
-   * A chunk the store does not have is said so at once, whatever its scale: it costs the atlas no
-   * room, and the shader would otherwise ask after every page of it on every frame.
-   */
-  private nowhere(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
-    if (chunk.data !== null) return;
-    for (const page of this.pagesOf(level, from, chunk)) this.atlas.absent(page);
   }
 
   private give(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {

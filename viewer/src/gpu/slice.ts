@@ -84,7 +84,14 @@ export function sliceOf(
     // The card's own y runs downward; the quad's runs up.
     const x = uv().x.sub(0.5).mul(2);
     const y = uv().y.oneMinus().sub(0.5).mul(2);
-    const place = at.add(right.mul(x.mul(half.x))).add(down.mul(y.mul(half.y)));
+    /*
+     * A variable, on purpose, and before anything conditional.  TSL gives a node that is used more
+     * than once a variable of its own, and ASSIGNS it where the node is first met — which, without
+     * this, was inside the `If` of the first scale below.  With that scale skipped the variable was
+     * never assigned, the coarser scales read a place of (0, 0, 0), and a card zoomed out past the
+     * second scale was one flat grey: every pixel the first voxel of the scroll.
+     */
+    const place = at.add(right.mul(x.mul(half.x))).add(down.mul(y.mul(half.y))).toVar();
     const grey = float(MISSING).toVar();
     const found = float(0).toVar();
     for (const scale of scales) {

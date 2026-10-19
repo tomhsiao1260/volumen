@@ -223,7 +223,9 @@ export function surfaceOf(
          * at chunk (74, 15, 38) where it belonged at (38, 15, 74) — empty space on the far side of
          * the scroll, drawn with complete confidence.
          */
-        const voxel = vec3(place.z, place.y, place.x);
+        // A variable before the scales are tried, for the reason `slice.ts` gives: a node used in
+        // several `If`s is assigned where it is first met, and must not be met inside one of them.
+        const voxel = vec3(place.z, place.y, place.x).toVar();
         for (const scale of scales) {
           If(found.equal(0), () => {
             const got = scan.at(

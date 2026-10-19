@@ -201,8 +201,10 @@ export class Device extends RefCounted {
    */
   private draw() {
     if (this.gone) return;
+    const began = performance.now();
     this.frameStarted.dispatch();
     const drawing: Card[] = [];
+    let width = 0, height = 0;
     for (const card of this.cards) {
       card.measure();
       if (card.visibility.value === Number.NEGATIVE_INFINITY) {
@@ -213,19 +215,38 @@ export class Device extends RefCounted {
       const seen = card.renderViewport;
       if (seen.width === 0 || seen.height === 0) continue;
       drawing.push(card);
+      width = Math.max(width, seen.width);
+      height = Math.max(height, seen.height);
     }
     if (drawing.length === 0) return;
+    // Sized once, to the largest card being drawn; each card then takes a corner of it.
+    this.fitSurface(width, height);
     for (const card of drawing) card.draw();
+    const took = performance.now() - began;
+    const { stats } = this;
+    stats.frames++;
+    stats.lastMs = took;
+    stats.meanMs += (took - stats.meanMs) / Math.min(stats.frames, 60);
     this.drawn?.();
   }
+
+  /** What a frame costs, for a measurement to look at: the last one, a running mean, and resizes. */
+  readonly stats = { frames: 0, lastMs: 0, meanMs: 0, resizes: 0 };
 
   /** Called once every frame, after every card has been drawn and copied out. */
   drawn: (() => void) | undefined;
 
-  /** Makes the surface exactly this size, if it is not already.  Called by a card before it draws. */
-  sizeFor(width: number, height: number) {
+  /**
+   * Makes the surface at least this size.  It is left alone while it is within twice the size
+   * needed, because configuring a canvas anew is not free — but it does come back down: a board
+   * zoomed far in would otherwise leave tens of megapixels allocated for good.
+   */
+  fitSurface(width: number, height: number) {
     const { surface } = this;
-    if (surface.width === width && surface.height === height) return;
+    if (surface.width >= width && surface.height >= height) {
+      if (surface.width <= width * 2 && surface.height <= height * 2) return;
+    }
+    this.stats.resizes++;
     surface.width = width;
     surface.height = height;
     this.renderer.setSize(width, height, false);

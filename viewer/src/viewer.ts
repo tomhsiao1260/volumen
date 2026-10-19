@@ -491,6 +491,7 @@ export class Viewer extends RefCounted {
       kept: gpu.atlas.kept,
       pages: gpu.atlas.listing,
       asked: gpu.asked,
+      draw: gpu.device.stats,
       ...gpu.frames(),
     };
   }

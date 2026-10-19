@@ -177,6 +177,16 @@ export class Atlas extends RefCounted {
     return this.pages;
   }
 
+  /**
+   * Says a page is being looked at, so that it is not the one dropped to make room.  The lookup
+   * happens on the GPU and nothing here can see it; the views that know what they are drawing say so
+   * (`scan.ts`).
+   */
+  touch(page: Page) {
+    const slot = this.where.get(`${page.source}/${page.level}/${page.at.join(",")}`);
+    if (slot !== undefined) this.used[slot] = ++this.clock;
+  }
+
   /** Says a page does not exist in the store, so that the shader stops asking for it. */
   absent(page: Page) {
     const name = `${page.source}/${page.level}/${page.at.join(",")}`;

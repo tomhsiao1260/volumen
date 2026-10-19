@@ -18,6 +18,8 @@ import { CardView } from "#src/gpu/card.js";
 import type { Device } from "#src/gpu/device.js";
 import type { scanOf } from "#src/gpu/sample.js";
 import type { Scan } from "#src/gpu/scan.js";
+import { pagesCut } from "#src/gpu/pages.js";
+import type { Order } from "#src/gpu/pages.js";
 import { sliceOf } from "#src/gpu/slice.js";
 import type { Looking } from "#src/gpu/slice.js";
 import { SliceView } from "#src/render/frontend.js";
@@ -90,10 +92,11 @@ export class CrossSection extends RefCounted {
     layer: WatchableValueInterface<RenderLayer | undefined>,
     readonly navigationState: NavigationState,
     shader: ReturnType<typeof scanOf>,
-    scan: Scan,
+    private scan: Scan,
   ) {
     super();
     const view = sliceOf(shader, scan.source, scan.scales);
+    this.registerDisposer(() => scan.forget(this));
     this.card = this.registerDisposer(
       new CardView(element, device, {
         material: view.material,
@@ -191,8 +194,32 @@ export class CrossSection extends RefCounted {
       down: [exact(m[6]), exact(m[5]), exact(m[4])],
       finest: chosen === undefined ? 0 : Math.max(0, asking.sources.indexOf(chosen)),
     };
+    this.order(looking, width, height);
     view.show(looking);
     view.before?.(width, height);
+  }
+
+  // What was last ordered, so that an unchanged frame orders nothing.
+  private ordered = "";
+
+  /**
+   * Tells the scan which pages this card cuts, at every scale the asking chose, so that they go up
+   * before the frame is drawn — and the ones a step through the slices reaches next, so that the
+   * step finds them there.
+   */
+  private order(looking: Looking, width: number, height: number) {
+    const { asking } = this;
+    const levels = asking.visibleSources.map((one) => asking.sources.indexOf(one));
+    const key = `${looking.at}|${looking.right}|${looking.down}|${width}x${height}|${levels}`;
+    if (key === this.ordered) return;
+    this.ordered = key;
+    const orders = new Map<number, Order>();
+    for (const level of levels) {
+      const scale = this.scan.scales[level];
+      if (scale === undefined) continue;
+      orders.set(level, pagesCut(looking, width / 2, height / 2, scale));
+    }
+    this.scan.order(this, orders);
   }
 
   // Pans with every pointer move until the button that started the drag is released.

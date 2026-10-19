@@ -153,16 +153,20 @@ export class CardView extends RefCounted implements Drawn {
     if (width === 0 || height === 0) return;
     this.view.before?.(width, height);
     /*
-     * The surface is made this card's size, and the card fills it.
+     * Drawn into the top-left corner of the surface, which the device has sized to the largest card
+     * being drawn this frame and no larger — so two cards of different sizes do not have the surface
+     * change size twice a frame, which is the canvas being configured anew each time, and was two
+     * hundred times a second on a board of two cards.
      *
-     * Drawing each card into a corner of one larger surface would save the resizing, and it is what
-     * the renderer this replaces did — but three.js's WebGPU backend does not honour a viewport or a
-     * scissor set before `render`, and the card came out covering about two thirds of what it had
-     * asked for, in every frame, whatever was loaded.  A canvas the right size needs no viewport at
-     * all, and the copy below then has no corner to find.
+     * The viewport is set in three.js's own terms, where y counts from the bottom as WebGL does, and
+     * on the WebGPU backend the region it gives at (0, 0) is the canvas's top-left — measured by
+     * drawing a quarter of red and reading it back — which is where the copy below reads from.
      */
-    device.sizeFor(width, height);
-    device.renderer.render(this.scene, this.camera);
+    const { renderer } = device;
+    renderer.setScissorTest(true);
+    renderer.setViewport(0, 0, width, height);
+    renderer.setScissor(0, 0, width, height);
+    renderer.render(this.scene, this.camera);
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
       canvas.height = height;
@@ -170,12 +174,8 @@ export class CardView extends RefCounted implements Drawn {
     /*
      * And copied out before this task ends.  A WebGPU canvas is presented when the task does, so a
      * copy after an await would be copying a canvas that has already gone.
-     *
-     * From the top-left of the surface, which is where the card was just drawn.  The renderer this
-     * replaces read from `surface.height - height` instead, because WebGL counts its rows from the
-     * bottom; WebGPU's canvas has its origin at the top-left.
      */
     context.clearRect(0, 0, width, height);
-    context.drawImage(device.surface, 0, 0);
+    context.drawImage(device.surface, 0, 0, width, height, 0, 0, width, height);
   }
 }
