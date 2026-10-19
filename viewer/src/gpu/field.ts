@@ -70,12 +70,36 @@ export class Field extends RefCounted {
   /** Bumped whenever what is being drawn changes, so a view knows to rebuild its uniforms. */
   generation = 0;
 
+  /*
+   * Tables let go of, kept to be written into again.  Pieces of one card are nearly always the same
+   * size — the grid is fixed by the zoom, the layers by `K` and `per` — and a new march of the same
+   * size can go into a texture the GPU already has, as a write, rather than into a new one, which
+   * is an allocation and a fresh binding.  Measured: a new march cost the frame that first drew it
+   * about 90 ms over the write alone.  One spare of each size is enough: the one being shown, and
+   * the one coming.
+   */
+  private spare = new Map<string, Made>();
+
   constructor(private device: Device) {
     super();
     this.registerDisposer(() => {
       free(this.held);
       free(this.coming);
+      for (const made of this.spare.values()) free(made);
+      this.spare.clear();
     });
+  }
+
+  private sizeOf(said: { nu: number; nv: number; layers: number; walk: { length: number } }) {
+    return `${said.nu}x${said.nv}x${said.layers}/${said.walk.length}`;
+  }
+
+  /** Lets a march go: into the spares if there is room for its size there, otherwise freed. */
+  private release(made: Made | undefined) {
+    if (made === undefined) return;
+    const size = this.sizeOf(made.said);
+    if (this.spare.has(size)) free(made);
+    else this.spare.set(size, made);
   }
 
   get now() {
@@ -91,13 +115,20 @@ export class Field extends RefCounted {
    * A new march.  It is made ready at once and shown later — at once if nothing is being shown yet,
    * since a blank card has nothing to lose by taking it.
    */
-  take(said: Said) {
-    free(this.coming);
+  take(said: Said, { now = false } = {}) {
+    this.release(this.coming);
     const made = this.make(said);
-    if (this.held === undefined) {
+    /*
+     * At once when nothing is shown yet — a blank card has nothing to lose by taking it — and at
+     * once when asked: a cell whose corners are being dragged has to follow the hand, and a hole
+     * where the scan has not arrived is the honest picture of where the hand is.
+     */
+    if (this.held === undefined || now) {
+      this.release(this.held);
       this.held = made;
       this.coming = undefined;
       this.generation++;
+      this.device.redraw();
       return;
     }
     this.coming = { ...made, since: performance.now() };
@@ -113,7 +144,7 @@ export class Field extends RefCounted {
     // Or it has waited long enough.  A piece over a hole in the scan would otherwise never arrive,
     // and a card showing somewhere it has left is worse than a card showing what little it has.
     if (!ready && performance.now() - coming.since < PATIENCE_MS) return;
-    free(this.held);
+    this.release(this.held);
     this.held = { said: coming.said, texture: coming.texture, walk: coming.walk };
     this.coming = undefined;
     this.generation++;
@@ -121,6 +152,37 @@ export class Field extends RefCounted {
   }
 
   private make(said: Said): Made {
+    /*
+     * Into a spare of the same size, if there is one the GPU already holds: the table is written
+     * straight into its texture through the raw device, and the walk likewise.  three.js is not
+     * told — it would upload the stale `image.data` again — and does not need to be: the binding is
+     * the same texture, and the pixels are the new ones.
+     */
+    const spare = this.spare.get(this.sizeOf(said));
+    if (spare !== undefined) {
+      const table = this.device.textureOf(spare.texture);
+      const walk = this.device.textureOf(spare.walk);
+      if (table !== undefined && walk !== undefined) {
+        this.spare.delete(this.sizeOf(said));
+        const { queue } = this.device.gpu;
+        queue.writeTexture(
+          { texture: table },
+          said.data,
+          { bytesPerRow: said.nu * 16, rowsPerImage: said.nv },
+          { width: said.nu, height: said.nv, depthOrArrayLayers: said.layers },
+        );
+        queue.writeTexture(
+          { texture: walk },
+          said.walk,
+          { bytesPerRow: said.walk.length * 4 },
+          { width: said.walk.length, height: 1 },
+        );
+        // So that what three.js would upload, if it ever did again, is what the texture holds.
+        spare.texture.image.data = said.data as unknown as Uint8Array;
+        spare.walk.image.data = said.walk as unknown as Uint8Array;
+        return { said, texture: spare.texture, walk: spare.walk };
+      }
+    }
     const texture = new THREE.Data3DTexture(
       said.data as unknown as Uint8Array,
       said.nu,
@@ -130,13 +192,13 @@ export class Field extends RefCounted {
     texture.format = THREE.RGBAFormat;
     texture.type = THREE.FloatType;
     /*
-     * Filtered by the texture unit where it can be.  Thirty-two-bit floats are an optional thing to
-     * filter in WebGPU as they were an extension in WebGL, so where the device will not, the shader
-     * reads the eight corners itself — one branch in `surfaceOf`, not a second way of holding this.
+     * Never filtered by the texture unit: the shader blends the eight nodes around a point itself,
+     * at full precision, because a weight here multiplies a distance (`surfaceOf.marchAt`).  The
+     * walk below is filtered where the device will, since what it holds is small.
      */
     const smooth = this.device.filtersFloats;
-    texture.minFilter = smooth ? THREE.LinearFilter : THREE.NearestFilter;
-    texture.magFilter = smooth ? THREE.LinearFilter : THREE.NearestFilter;
+    texture.minFilter = THREE.NearestFilter;
+    texture.magFilter = THREE.NearestFilter;
     texture.wrapS = THREE.ClampToEdgeWrapping;
     texture.wrapT = THREE.ClampToEdgeWrapping;
     texture.wrapR = THREE.ClampToEdgeWrapping;
@@ -167,7 +229,7 @@ export class Field extends RefCounted {
 }
 
 /** A march ready to draw: the table, and the walk that spreads a cut by distance. */
-interface Made {
+export interface Made {
   said: Said;
   texture: THREE.Data3DTexture;
   walk: THREE.DataTexture;

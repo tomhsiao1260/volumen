@@ -32,6 +32,7 @@
  * thing it tells the renderer is that a chunk has arrived or has gone (`render/frontend.ts`).
  */
 
+import type * as THREE from "three/webgpu";
 import {
   ChunkManager,
   ChunkQueueManager,
@@ -39,6 +40,9 @@ import {
 import { loadZarrVolume } from "#src/datasource/zarr/frontend.js";
 import type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";
 import { Atlas, BYTES as ATLAS_BYTES } from "#src/gpu/atlas.js";
+import { CardView } from "#src/gpu/card.js";
+import { Cell } from "#src/gpu/cell.js";
+import type { Corners } from "#src/gpu/cell.js";
 import { CrossSection } from "#src/gpu/cross_section.js";
 import { Device } from "#src/gpu/device.js";
 import { FlatCard } from "#src/gpu/flat.js";
@@ -305,8 +309,9 @@ interface Gpu {
   shader: ReturnType<typeof scanOf>;
   scans: Map<Volume, Scan>;
   // What the shader asked for on the last frame read back, for a measurement to look at: how many
-  // pages of each source and scale, which pages (the first few), and how many could be answered.
-  asked?: { by: Record<string, number>; pages: string[]; put: number };
+  // pages of each source and scale, which pages (the first few), how many could be answered, how
+  // long the readback took to come and how long answering it took.
+  asked?: { by: Record<string, number>; pages: string[]; put: number; readMs: number; answerMs: number };
   /*
    * Whether the last frame drawn is also the last word: nothing it asked for could be answered, and
    * no answer is on its way.  A chunk that has arrived is not yet a page the shader can find — the
@@ -446,14 +451,18 @@ export class Viewer extends RefCounted {
       if (reading || this.gpu === undefined || device.gone) return;
       reading = true;
       const frame = frames;
+      const began = performance.now();
       void (async () => {
         try {
           const got = await device.renderer.getArrayBufferAsync(gpu.shader.asked);
           if (this.wasDisposed) return;
+          const read = performance.now();
           const asked = new Uint32Array(got);
           let put = 0;
           for (const scan of scans.values()) put += scan.answer(asked);
           answered = { frame, put };
+          const readMs = read - began;
+          const answerMs = performance.now() - read;
           /*
            * What was asked for, kept where a measurement can see it.  A page that is never asked for
            * and a page that is asked for and cannot be answered look the same from outside — the
@@ -470,7 +479,7 @@ export class Viewer extends RefCounted {
               pages.push(`${name} page ${lo & 1023},${(lo >> 10) & 1023},${(lo >> 20) & 1023}`);
             }
           }
-          gpu.asked = { by, pages, put };
+          gpu.asked = { by, pages, put, readMs, answerMs };
           atlas.asks.fill(0);
           gpu.shader.asked.needsUpdate = true;
           /*
@@ -497,12 +506,20 @@ export class Viewer extends RefCounted {
   get measured() {
     const { gpu } = this;
     if (gpu === undefined) return undefined;
+    const pager = { ordered: 0, offered: 0, written: 0, pending: 0 };
+    for (const scan of gpu.scans.values()) {
+      pager.ordered += scan.stats.ordered;
+      pager.offered += scan.stats.offered;
+      pager.written += scan.stats.written;
+      pager.pending += scan.stats.pending;
+    }
     return {
       room: gpu.atlas.room,
       kept: gpu.atlas.kept,
       pages: gpu.atlas.listing,
       asked: gpu.asked,
       draw: gpu.device.stats,
+      pager,
       ...gpu.frames(),
     };
   }
@@ -619,6 +636,35 @@ export class Viewer extends RefCounted {
       gpu.shader,
       scan,
     );
+    this.registerDisposer(card);
+    return card;
+  }
+
+  /**
+   * A cell: eight corners in the scroll's voxels, and the scan seen through them — as a box in a
+   * scene of your own (`cell.mesh`, `cell.material`) and laid flat on a card (`cell.flat`).  Move
+   * the corners with `cell.setCorners`; the picture follows on the next frame.  See `gpu/cell.ts`.
+   */
+  addCell({ volume, corners }: { volume: Volume; corners: Corners }): Cell {
+    const gpu = this.started();
+    const scan = this.scanOf(gpu, volume);
+    const cell = new Cell(gpu.device, this.chunkManager, volume.renderLayer, gpu.shader, scan, corners);
+    this.registerDisposer(cell);
+    return cell;
+  }
+
+  /**
+   * A card drawing a three.js scene of your own with this viewer's renderer, so that materials made
+   * here — a cell's — can be in it: everything on the one device is visible to it.  The scene's
+   * coordinates are the scan's voxels.  Call `changed()` on the card when the scene has moved, and
+   * `before` is called once a frame with the size it is being drawn at.
+   */
+  addScene(
+    element: HTMLElement,
+    { scene, camera, before }: { scene: THREE.Scene; camera: THREE.Camera; before?: (width: number, height: number) => void },
+  ): CardView {
+    const gpu = this.started();
+    const card = new CardView(element, gpu.device, { scene, camera, asks: true, before });
     this.registerDisposer(card);
     return card;
   }

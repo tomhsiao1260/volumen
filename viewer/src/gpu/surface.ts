@@ -22,6 +22,14 @@
  * winding, the thin parts would be drawn three and a half times magnified against the thick, and the
  * sheets a person is trying to tell apart would stop being level lines.  `walk` is the march's own
  * path inverted, and reading it is what keeps one winding on one line across the card.
+ *
+ * **The program is built once.**  Everything about a particular march — how many nodes and layers
+ * it has, how many sheets each way, where its walk runs from and to, and the two textures that hold
+ * it — is a uniform or a texture binding, swapped when the next march comes.  It used to be baked
+ * in, and the shader built again for every piece: a slide along the papyrus, or a winding taken in,
+ * froze the whole page for a quarter to half a second while the pipeline compiled, and the wheel
+ * events that piled up meanwhile all landed at once when it was over — which is what "the card keeps
+ * going after I turn back" was.
  */
 import * as THREE from "three/webgpu";
 import {
@@ -31,7 +39,6 @@ import {
   ivec3,
   texture,
   texture3D,
-  texture3DLoad,
   uint,
   uniform,
   uv,
@@ -41,7 +48,7 @@ import {
 } from "three/tsl";
 import type { View } from "#src/gpu/card.js";
 import type { Device } from "#src/gpu/device.js";
-import type { Field } from "#src/gpu/field.js";
+import type { Field, Made } from "#src/gpu/field.js";
 import type { scanOf } from "#src/gpu/sample.js";
 import type { Scale } from "#src/gpu/slice.js";
 
@@ -73,6 +80,12 @@ export interface Window {
   through?: { from: number; across: number };
   /** A way of being told what the shader thinks rather than only what it draws; see `TELL`. */
   show?: number;
+  /*
+   * The finest scale worth drawing, as whoever asked for the chunks chose it (`Wanted[0].level`).
+   * A finer page that happens to be resident is passed over, as a cross-section passes it over
+   * (`Looking.finest`): a card half of one scale and half of another has a seam that moves.
+   */
+  finest?: number;
 }
 
 /**
@@ -116,178 +129,211 @@ export function surfaceOf(
   // Zero means the card is affine in w too, which is the sheet laid flat.
   const across = uniform(0);
   const show = uniform(0);
-  let want: Window = { at: [0, 0, 0], right: [0, 0, 0], down: [0, 0, 0] };
-  let built = -1;
+  const finest = uniform(0);
+  /*
+   * The march being drawn: nodes across and down and layers through, whole sheets each way of its
+   * own, layers to a sheet, where its walk starts and how far it runs, and how many samples the walk
+   * has.  Uniforms, so that the next march is a few numbers and not a new program.
+   */
+  const size = uniform(new THREE.Vector3(1, 1, 1));
+  const K = uniform(1);
+  const per = uniform(1);
+  const lo = uniform(0);
+  const span = uniform(1);
+  const samples = uniform(1);
 
-  /** Builds the program for the march being shown.  Once a piece, not once a frame. */
-  const build = () => {
-    const held = field.now;
-    if (held === undefined) return;
-    const { said, texture: table, walk } = held;
-    const size = vec3(said.nu, said.nv, said.layers);
+  /*
+   * The two textures, bound once and swapped behind the binding: a TSL texture node sampled anywhere
+   * in the program follows the texture its base node holds, so `table.value = next` is the whole of
+   * changing marches.  They start out as a texel each of the right kind — format, type and filter
+   * are what the pipeline is built for, and must not change when the real ones come.
+   */
+  const filter = device.filtersFloats ? THREE.LinearFilter : THREE.NearestFilter;
+  const blankTable = new THREE.Data3DTexture(new Float32Array(4), 1, 1, 1);
+  blankTable.format = THREE.RGBAFormat;
+  blankTable.type = THREE.FloatType;
+  // Read by hand (`marchAt`), never filtered by the unit.
+  blankTable.minFilter = blankTable.magFilter = THREE.NearestFilter;
+  blankTable.wrapS = blankTable.wrapT = blankTable.wrapR = THREE.ClampToEdgeWrapping;
+  blankTable.needsUpdate = true;
+  const blankWalk = new THREE.DataTexture(new Float32Array(1), 1, 1, THREE.RedFormat, THREE.FloatType);
+  blankWalk.minFilter = blankWalk.magFilter = filter;
+  blankWalk.wrapS = blankWalk.wrapT = THREE.ClampToEdgeWrapping;
+  blankWalk.needsUpdate = true;
+  const table = texture3D(blankTable);
+  const walk = texture(blankWalk);
 
-    /**
-     * The winding at a distance through the papyrus — the march's own path, inverted.
-     *
-     * The walk is `n` samples from `lo` to `hi`, and a texture's samples sit at the MIDDLE of its
-     * texels: the fraction of the way from `lo` to `hi` has to land on the middle of the first texel
-     * at 0 and of the last at 1, not on their outer edges.  Read at the fraction itself the whole
-     * card was half a sample out, which with a walk of two thousand samples is nothing and with a
-     * short one is a sheet drawn half a voxel off — measured against a walk made by hand.
-     */
-    const n = said.walk.length;
-    const windingAt = Fn(([b]: Num[]) => {
-      const far = from.add(b.mul(across));
-      const t = far.sub(said.lo).div(Math.max(1e-6, said.hi - said.lo));
-      return texture(walk, vec2(t.clamp(0, 1).mul((n - 1) / n).add(0.5 / n), 0.5)).r;
-    });
-    /** The same fraction, for the mode that shows what the walk holds. */
-    const fractionAt = Fn(([b]: Num[]) =>
-      from.add(b.mul(across)).sub(said.lo).div(Math.max(1e-6, said.hi - said.lo)),
-    );
+  /**
+   * The winding at a distance through the papyrus — the march's own path, inverted.
+   *
+   * The walk is `samples` long from `lo` over `span`, and a texture's samples sit at the MIDDLE of
+   * its texels: the fraction of the way along has to land on the middle of the first texel at 0 and
+   * of the last at 1, not on their outer edges.  Read at the fraction itself the whole card was half
+   * a sample out, which with a walk of two thousand samples is nothing and with a short one is a
+   * sheet drawn half a voxel off — measured against a walk made by hand.
+   */
+  const fractionAt = Fn(([b]: Num[]) => from.add(b.mul(across)).sub(lo).div(span));
+  const windingAt = Fn(([b]: Num[]) => {
+    const t = fractionAt(b).clamp(0, 1);
+    return walk.sample(vec2(t.mul(samples.sub(1).div(samples)).add(float(0.5).div(samples)), 0.5)).r;
+  });
 
-    /**
-     * The march, read where the card is looking — one texture read where the device will filter
-     * floats and eight where it will not.
-     *
-     * The fourth channel is whether the march reached.  It is 0 or 1 and the eight weights of a
-     * trilinear read sum to 1, so the blend reaches 1 only where every corner carrying weight was
-     * reached: an alpha short of 1 is exactly "there is no sheet here", whichever way it was read.
-     */
-    const marchAt = Fn(([p]: Num[]) => {
-      if (device.filtersFloats) return texture3D(table, p.add(0.5).div(size));
-      const base = p.floor();
-      const t = p.sub(base);
-      const top = size.sub(1);
-      const total = vec4(0).toVar();
-      for (let dk = 0; dk < 2; dk++)
-        for (let di = 0; di < 2; di++)
-          for (let dj = 0; dj < 2; dj++) {
-            const weight = (dk ? t.z : t.z.oneMinus())
-              .mul(di ? t.y : t.y.oneMinus())
-              .mul(dj ? t.x : t.x.oneMinus());
-            const corner = base.add(vec3(dj, di, dk)).clamp(vec3(0), top);
-            total.addAssign(
-              texture3DLoad(
-                table,
-                ivec3(corner.x.toInt(), corner.y.toInt(), corner.z.toInt()),
-                0,
-              ).mul(weight),
-            );
-          }
-      return total;
-    });
-
-    material.colorNode = Fn(() => {
-      // Across the card and down it.  The quad's own y runs up, the card's runs down.
-      const a = uv().x;
-      const b = uv().y.oneMinus();
-      const window_ = at.add(right.mul(a)).add(down.mul(b));
-      // Along the sheets the window says where directly; across them, distance does.
-      const w = across.equal(0).select(window_.z, windingAt(b));
-      // Where that point sits in the table, which holds a sample every eighth of a sheet.
-      const layer = w.add(said.K).mul(said.per);
-      /*
-       * And nothing where the table has nothing: off the end of the stack, and off the EDGE of the
-       * piece.  The texture would clamp to its edge instead and draw the last row again for every
-       * row past it — a cut swept past the piece it was marched on showed the same row over and
-       * over, standing still under a moving hand, and then jumped when the next piece arrived.
-       * An honest blank fills in when the piece does.
-       */
-      const inside = layer
-        .greaterThanEqual(0)
-        .and(layer.lessThanEqual(said.layers - 1))
-        .and(window_.x.greaterThanEqual(0))
-        .and(window_.x.lessThanEqual(said.nu - 1))
-        .and(window_.y.greaterThanEqual(0))
-        .and(window_.y.lessThanEqual(said.nv - 1));
-      const place = marchAt(vec3(window_.x, window_.y, layer.clamp(0, said.layers - 1))).toVar();
-
-      /*
-       * The papyrus, worked out straight through with nothing nested in anything.
-       *
-       * `reached` is how much of the march got here: the fourth channel is 0 or 1 and the eight
-       * weights of a trilinear read sum to one, so short of the whole weight means a corner was
-       * never walked to and there is no sheet at this pixel.  The threshold is not 0.999, and that
-       * is the price of letting the texture unit do the filtering — it carries the weights in a few
-       * bits of fixed point, so a pixel every corner of which WAS reached comes back a little under.
-       */
-      const reached = inside.select(place.w, float(0));
-      const grey = float(0).toVar();
-      const found = float(0).toVar();
-      If(reached.greaterThan(0.99), () => {
-        /*
-         * The march holds (z, y, x), which is how the scan's array and the fit are both written; the
-         * atlas is asked (x, y, z), because the data source turns the axes round when it places a
-         * volume in the world.  Measured once, the hard way: a place asked the wrong way round sat
-         * at chunk (74, 15, 38) where it belonged at (38, 15, 74) — empty space on the far side of
-         * the scroll, drawn with complete confidence.
-         */
-        // A variable before the scales are tried, for the reason `slice.ts` gives: a node used in
-        // several `If`s is assigned where it is first met, and must not be met inside one of them.
-        const voxel = vec3(place.z, place.y, place.x).toVar();
-        for (const scale of scales) {
-          If(found.equal(0), () => {
-            const got = scan.at(
-              uint(source),
-              uint(scale.level),
-              float(scale.factor),
-              float(scale.fill),
-              vec3(...scale.upper),
-              voxel,
-            );
-            If(got.y.greaterThan(0), () => {
-              grey.assign(got.x);
-              found.assign(1);
-            });
-          });
+  /**
+   * The march, read where the card is looking: the eight nodes around the point, blended by hand.
+   *
+   * By hand, and not by the texture unit, because the unit blends with weights of a few bits — fine
+   * for greys, and it is how the scan itself is read, but a WEIGHT here multiplies a distance between
+   * nodes.  Over a cell a hundred and sixty voxels across, a weight a 256th out is a position two
+   * thirds of a voxel out, and the picture is of the wrong place by that much: measured on a cell
+   * laid flat, a third of its pixels were off by up to twenty greys.  Eight reads at full precision
+   * cost nothing a card can feel, and the table needs no optional filtering feature.
+   *
+   * The fourth channel is whether the march reached.  It is 0 or 1 at every node, so the blend is 1
+   * only where every node carrying weight was reached: short of 1 is exactly "there is no sheet
+   * here".
+   */
+  const marchAt = Fn(([p]: Num[]) => {
+    const base = p.floor();
+    const t = p.sub(base);
+    const top = size.sub(1);
+    const total = vec4(0).toVar();
+    for (let dk = 0; dk < 2; dk++)
+      for (let di = 0; di < 2; di++)
+        for (let dj = 0; dj < 2; dj++) {
+          const weight = (dk ? t.z : t.z.oneMinus())
+            .mul(di ? t.y : t.y.oneMinus())
+            .mul(dj ? t.x : t.x.oneMinus());
+          const corner = base.add(vec3(dj, di, dk)).clamp(vec3(0), top);
+          total.addAssign(
+            table.load(ivec3(corner.x.toInt(), corner.y.toInt(), corner.z.toInt())).mul(weight),
+          );
         }
-      });
+    return total;
+  });
 
-      /*
-       * And then what to say about it.  The debug modes OVERRIDE the answer rather than being
-       * branched around it: nesting them inside the drawing is what let a card be black for a
-       * reason none of them could show, because the mode that would have shown it sat inside a
-       * branch that was not taken.
-       */
-      const out = vec4(grey, grey, grey, found).toVar();
-      // What the table has nothing for stays blank in every mode, so that a measurement of where
-      // the picture is does not read the texture's clamped edge as papyrus.
-      const there = inside.select(float(1), float(0));
-      If(show.equal(TELL.card), () => out.assign(vec4(a, b, float(0.5), float(1))));
-      If(show.equal(TELL.grid), () =>
-        out.assign(
-          vec4(
-            window_.x.div(Math.max(1, said.nu - 1)),
-            window_.y.div(Math.max(1, said.nv - 1)),
-            w.div(said.K).mul(0.5).add(0.5),
-            there,
-          ),
+  material.colorNode = Fn(() => {
+    // Across the card and down it.  The quad's own y runs up, the card's runs down.
+    const a = uv().x;
+    const b = uv().y.oneMinus();
+    const window_ = at.add(right.mul(a)).add(down.mul(b)).toVar();
+    // Along the sheets the window says where directly; across them, distance does.
+    const w = across.equal(0).select(window_.z, windingAt(b)).toVar();
+    // Where that point sits in the table, which holds a sample every so many of a sheet.
+    const layer = w.add(K).mul(per).toVar();
+    const last = size.sub(1);
+    /*
+     * And nothing where the table has nothing: off the end of the stack, and off the EDGE of the
+     * piece.  The texture would clamp to its edge instead and draw the last row again for every
+     * row past it — a cut swept past the piece it was marched on showed the same row over and
+     * over, standing still under a moving hand, and then jumped when the next piece arrived.
+     * An honest blank fills in when the piece does.
+     */
+    const inside = layer
+      .greaterThanEqual(0)
+      .and(layer.lessThanEqual(last.z))
+      .and(window_.x.greaterThanEqual(0))
+      .and(window_.x.lessThanEqual(last.x))
+      .and(window_.y.greaterThanEqual(0))
+      .and(window_.y.lessThanEqual(last.y));
+    const place = marchAt(vec3(window_.x, window_.y, layer.clamp(0, last.z))).toVar();
+
+    /*
+     * The papyrus, worked out straight through with nothing nested in anything.
+     *
+     * `reached` is how much of the march got here: the fourth channel is 0 or 1 and the eight
+     * weights of a trilinear read sum to one, so short of the whole weight means a corner was
+     * never walked to and there is no sheet at this pixel.  The threshold is not 0.999, and that
+     * is the price of letting the texture unit do the filtering — it carries the weights in a few
+     * bits of fixed point, so a pixel every corner of which WAS reached comes back a little under.
+     */
+    const reached = inside.select(place.w, float(0));
+    const grey = float(0).toVar();
+    const found = float(0).toVar();
+    /*
+     * The march holds (z, y, x), which is how the scan's array and the fit are both written; the
+     * atlas is asked (x, y, z), because the data source turns the axes round when it places a
+     * volume in the world.  Measured once, the hard way: a place asked the wrong way round sat at
+     * chunk (74, 15, 38) where it belonged at (38, 15, 74) — empty space on the far side of the
+     * scroll, drawn with complete confidence.
+     *
+     * A variable before the scales are tried, for the reason `slice.ts` gives: a node used in
+     * several `If`s is assigned where it is first met, and must not be met inside one of them.
+     */
+    const voxel = vec3(place.z, place.y, place.x).toVar();
+    If(reached.greaterThan(0.99), () => {
+      for (const scale of scales) {
+        If(found.equal(0).and(float(scale.level).greaterThanEqual(finest)), () => {
+          const got = scan.at(
+            uint(source),
+            uint(scale.level),
+            float(scale.factor),
+            vec3(...scale.upper),
+            voxel,
+          );
+          If(got.y.greaterThan(0), () => {
+            grey.assign(got.x);
+            found.assign(1);
+          });
+        });
+      }
+    });
+
+    /*
+     * And then what to say about it.  The debug modes OVERRIDE the answer rather than being
+     * branched around it: nesting them inside the drawing is what let a card be black for a
+     * reason none of them could show, because the mode that would have shown it sat inside a
+     * branch that was not taken.
+     */
+    const out = vec4(grey, grey, grey, found).toVar();
+    // What the table has nothing for stays blank in every mode, so that a measurement of where
+    // the picture is does not read the texture's clamped edge as papyrus.
+    const there = inside.select(float(1), float(0));
+    If(show.equal(TELL.card), () => out.assign(vec4(a, b, float(0.5), float(1))));
+    If(show.equal(TELL.grid), () =>
+      out.assign(
+        vec4(
+          window_.x.div(last.x.max(1)),
+          window_.y.div(last.y.max(1)),
+          w.div(K).mul(0.5).add(0.5),
+          there,
         ),
-      );
-      // Amplified a hundredfold, because what matters is how far SHORT of one it is.
-      If(show.equal(TELL.reached), () =>
-        out.assign(vec4(reached, float(1).sub(reached).mul(100), float(0), float(1))),
-      );
-      If(show.equal(TELL.walk), () =>
-        out.assign(
-          vec4(
-            fractionAt(b),
-            texture(walk, vec2(0.5, 0.5)).r.add(said.K).div(said.K * 2),
-            texture(walk, vec2(0, 0.5)).r.add(said.K).div(said.K * 2),
-            float(1),
-          ),
+      ),
+    );
+    // Amplified a hundredfold, because what matters is how far SHORT of one it is.
+    If(show.equal(TELL.reached), () =>
+      out.assign(vec4(reached, float(1).sub(reached).mul(100), float(0), float(1))),
+    );
+    If(show.equal(TELL.walk), () =>
+      out.assign(
+        vec4(
+          fractionAt(b),
+          walk.sample(vec2(0.5, 0.5)).r.add(K).div(K.mul(2)),
+          walk.sample(vec2(0, 0.5)).r.add(K).div(K.mul(2)),
+          float(1),
         ),
-      );
-      If(show.equal(TELL.place), () =>
-        out.assign(
-          vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), there),
-        ),
-      );
-      return out;
-    })();
-    material.needsUpdate = true;
-    built = field.generation;
+      ),
+    );
+    If(show.equal(TELL.place), () =>
+      out.assign(
+        vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), there),
+      ),
+    );
+    return out;
+  })();
+
+  let want: Window = { at: [0, 0, 0], right: [0, 0, 0], down: [0, 0, 0] };
+  let bound = -1;
+
+  /** Points the program at the march being shown: a few uniforms and two texture bindings. */
+  const rebind = ({ said, texture: tableNow, walk: walkNow }: Made) => {
+    size.value.set(said.nu, said.nv, said.layers);
+    K.value = said.K;
+    per.value = said.per;
+    lo.value = said.lo;
+    span.value = Math.max(1e-6, said.hi - said.lo);
+    samples.value = said.walk.length;
+    table.value = tableNow;
+    walk.value = walkNow;
   };
 
   return {
@@ -300,21 +346,32 @@ export function surfaceOf(
       if (where.__window.length > 8) where.__window.shift();
     },
     before() {
-      if (field.generation !== built) build();
+      const held = field.now;
+      if (held !== undefined && field.generation !== bound) {
+        rebind(held);
+        bound = field.generation;
+      }
       // Onto the grid of the march being drawn, which is where on the plane it was marched.
-      const lattice = field.now?.said.lattice ?? [0, 0];
+      const lattice = held?.said.lattice ?? [0, 0];
       // Kept where a measurement can read it: which piece of the plane is actually being drawn.
-      (globalThis as unknown as { __drawing?: unknown }).__drawing = { lattice, waiting: field.waiting, generation: field.generation };
+      (globalThis as unknown as { __drawing?: unknown }).__drawing = {
+        lattice,
+        waiting: field.waiting,
+        generation: field.generation,
+      };
       at.value.set(want.at[0] - lattice[1], want.at[1] - lattice[0], want.at[2]);
       right.value.set(want.right[0], want.right[1], want.right[2]);
       down.value.set(want.down[0], want.down[1], want.down[2]);
       from.value = want.through?.from ?? 0;
       across.value = want.through?.across ?? 0;
       show.value = want.show ?? 0;
+      finest.value = want.finest ?? 0;
       scan.update();
     },
     dispose() {
       material.dispose();
+      blankTable.dispose();
+      blankWalk.dispose();
     },
   };
 }

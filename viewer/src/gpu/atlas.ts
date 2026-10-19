@@ -41,12 +41,20 @@ export const SIDE = 640;
 export const BYTES = SIDE ** 3;
 /*
  * How many entries the table holds.  It is open addressing, so it wants to be comfortably larger
- * than the number of pages — at a load factor near a half the probe is one read nearly always.
+ * than the number of pages — at a load factor near a quarter the probe is one read nearly always.
  */
-const SLOTS = 4096;
-// Four words an entry: the key in two, where the page went, and how recently it was read.
+export const SLOTS = 4096;
+// Four words an entry: the key in two, where the page went, and one spare.
 const WORDS = 4;
 const EMPTY = 0xffffffff;
+/*
+ * How many slots may hold a page that has gone before the table is built afresh.  A slot that held a
+ * page cannot simply be emptied — it would cut the probe chain running through it — so it is left
+ * standing with no page in it, and the shader walks past.  Enough of those and every walk is long:
+ * the shader gives up after a few steps, misses a page that is there, and asks for it again every
+ * frame.  Measured on a sparse scan, the table filled with such slots in a few hundred frames.
+ */
+const STALE_MOST = SLOTS / 8;
 
 /** Where a page of some scale of some source belongs. */
 export interface Page {
@@ -75,10 +83,12 @@ const keyOf = (page: Page): [number, number] => [
 const hashOf = (lo: number, hi: number) =>
   Math.imul(lo ^ Math.imul(hi, 0x9e3779b1), 0x85ebca6b) >>> (32 - Math.log2(SLOTS));
 
+const nameOf = (page: Page) => `${page.source}/${page.level}/${page.at.join(",")}`;
+
 export class Atlas extends RefCounted {
   /** The one texture.  R8, read with the texture unit's own filtering. */
   readonly texture: THREE.Data3DTexture;
-  /** The table, as the shader reads it: `SLOTS × (keyLo, keyHi, where, when)`. */
+  /** The table, as the shader reads it: `SLOTS × (keyLo, keyHi, where, spare)`. */
   readonly table = new Uint32Array(SLOTS * WORDS);
   /*
    * And where the shader writes the pages it wanted and did not find, two words a key, at the key's
@@ -93,16 +103,11 @@ export class Atlas extends RefCounted {
   private readonly held: (Page | undefined)[];
   // Where each page went, by its key, so that the same page is not written twice.
   private readonly where = new Map<string, number>();
-  /*
-   * And the pages the store does not have, which take no room at all.  A sparse scroll is mostly
-   * these: the chunk arrives with no data, and a pixel in it is the volume's fill value.  Said in the
-   * table as a key whose slot is `pages` — one past the last — so that the shader finds the key,
-   * sees there is no page behind it, and draws the fill rather than asking for it again every frame.
-   */
-  private readonly absents = new Set<string>();
   // A clock that only goes forward, for dropping the least recently wanted page.
   private clock = 0;
   private readonly used: number[];
+  // Slots of the table that held a page that has gone (see `STALE_MOST`).
+  private stale = 0;
   /** Bumped whenever the table changes, so a view knows to send it again. */
   generation = 0;
 
@@ -141,16 +146,16 @@ export class Atlas extends RefCounted {
     this.registerDisposer(() => this.texture.dispose());
   }
 
-  /** How many pages the atlas holds, how many are in use, and how many are known to be nowhere. */
+  /** How many pages the atlas holds, how many are in use, and how many slots stand stale. */
   get room() {
-    return { pages: this.pages, used: this.where.size, absent: this.absents.size };
+    return { pages: this.pages, used: this.where.size, stale: this.stale };
   }
 
   /** Every page held, for a measurement to look at, as `source/level/x,y,z → slot`. */
   get listing() {
     const held: Record<string, number> = {};
     this.held.forEach((page, slot) => {
-      if (page !== undefined) held[`${page.source}/${page.level}/${page.at.join(",")}`] = slot;
+      if (page !== undefined) held[nameOf(page)] = slot;
     });
     return held;
   }
@@ -166,15 +171,9 @@ export class Atlas extends RefCounted {
     return Object.fromEntries(by);
   }
 
-  /** Whether a page is already here — or is known not to exist — so that nobody offers it twice. */
+  /** Whether a page is already here, so that nobody uploads it twice. */
   has(page: Page) {
-    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
-    return this.where.has(name) || this.absents.has(name);
-  }
-
-  /** The slot the table gives a page the store does not have.  The shader draws the fill value there. */
-  get absentSlot() {
-    return this.pages;
+    return this.where.has(nameOf(page));
   }
 
   /**
@@ -183,16 +182,8 @@ export class Atlas extends RefCounted {
    * (`scan.ts`).
    */
   touch(page: Page) {
-    const slot = this.where.get(`${page.source}/${page.level}/${page.at.join(",")}`);
+    const slot = this.where.get(nameOf(page));
     if (slot !== undefined) this.used[slot] = ++this.clock;
-  }
-
-  /** Says a page does not exist in the store, so that the shader stops asking for it. */
-  absent(page: Page) {
-    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
-    if (this.where.has(name) || this.absents.has(name)) return;
-    this.absents.add(name);
-    this.remember(page, this.pages);
   }
 
   /**
@@ -206,11 +197,7 @@ export class Atlas extends RefCounted {
    * and it already drops accordingly.  So it decides, and this does as it is told.
    */
   remove(page: Page) {
-    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
-    if (this.absents.delete(name)) {
-      this.forget(page);
-      return;
-    }
+    const name = nameOf(page);
     const slot = this.where.get(name);
     if (slot === undefined) return;
     this.where.delete(name);
@@ -244,13 +231,13 @@ export class Atlas extends RefCounted {
     if (voxels.length !== PAGE ** 3) {
       throw new Error(`A page is ${PAGE ** 3} bytes, not ${voxels.length}.`);
     }
-    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
+    const name = nameOf(page);
     let slot = this.where.get(name);
     if (slot === undefined) {
       slot = this.free();
       const was = this.held[slot];
       if (was !== undefined) {
-        this.where.delete(`${was.source}/${was.level}/${was.at.join(",")}`);
+        this.where.delete(nameOf(was));
         this.forget(was);
       }
       this.held[slot] = page;
@@ -285,26 +272,41 @@ export class Atlas extends RefCounted {
    * The table is open addressing with linear probing, and the shader walks it the same way — so a
    * key that was never here is answered by the first empty slot rather than by a walk to the end.
    * That is why forgetting cannot just blank a slot: it would cut a probe chain in half and hide
-   * every key behind it.  A forgotten slot is marked taken-but-no-page instead.
+   * every key behind it.  A forgotten slot is marked taken-but-no-page instead, and taken again by
+   * the next key whose walk reaches it.
    */
   private remember(page: Page, slot: number) {
     const [lo, hi] = keyOf(page);
     let at = hashOf(lo, hi);
+    let reuse = -1;
     for (let step = 0; step < SLOTS; step++) {
       const o = at * WORDS;
-      const free = this.table[o + 2] === EMPTY;
-      const same = this.table[o] === lo && this.table[o + 1] === hi;
-      if (free || same) {
-        this.table[o] = lo;
-        this.table[o + 1] = hi;
-        this.table[o + 2] = slot;
-        this.table[o + 3] = 0;
-        this.generation++;
+      if (this.table[o + 2] === EMPTY) {
+        // The end of the chain: the key is not here.  Into the first stale slot passed, if any.
+        if (reuse !== -1) {
+          this.stale--;
+          at = reuse;
+        }
+        this.write(at, lo, hi, slot);
         return;
       }
+      if (this.table[o] === lo && this.table[o + 1] === hi) {
+        this.write(at, lo, hi, slot);
+        return;
+      }
+      if (reuse === -1 && this.table[o] === EMPTY) reuse = at;
       at = (at + 1) % SLOTS;
     }
     throw new Error("The atlas's table is full, which cannot happen while it is larger than the atlas.");
+  }
+
+  private write(at: number, lo: number, hi: number, slot: number) {
+    const o = at * WORDS;
+    this.table[o] = lo;
+    this.table[o + 1] = hi;
+    this.table[o + 2] = slot;
+    this.table[o + 3] = 0;
+    this.generation++;
   }
 
   private forget(page: Page) {
@@ -319,9 +321,20 @@ export class Atlas extends RefCounted {
         this.table[o + 1] = EMPTY;
         this.table[o + 2] = this.pages;
         this.generation++;
+        if (++this.stale > STALE_MOST) this.rebuild();
         return;
       }
       at = (at + 1) % SLOTS;
     }
+  }
+
+  /** The table built afresh from the pages held, with no stale slot in it. */
+  private rebuild() {
+    this.table.fill(EMPTY);
+    this.stale = 0;
+    this.held.forEach((page, slot) => {
+      if (page !== undefined) this.remember(page, slot);
+    });
+    this.generation++;
   }
 }

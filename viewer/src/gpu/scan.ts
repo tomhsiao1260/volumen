@@ -37,7 +37,6 @@ import type {
   VolumeChunkSource,
 } from "#src/render/frontend.js";
 import type { RenderLayer } from "#src/render/layer.js";
-import { DataType } from "#src/util/data_type.js";
 import { RefCounted } from "#src/util/disposable.js";
 
 /*
@@ -52,19 +51,6 @@ const EAGER = 8;
  * hitch where there need not be one.
  */
 const NEAR_PER_TICK = 6;
-
-/** The fill value of a scale as the atlas holds greys: a fraction of one (`feed.ts`). */
-function fillOf(source: VolumeChunkSource) {
-  const { fillValue, dataType } = source.spec;
-  switch (dataType) {
-    case DataType.UINT8:
-      return fillValue / 255;
-    case DataType.UINT16:
-      return fillValue / 65535;
-    default:
-      return Math.max(0, Math.min(1, fillValue));
-  }
-}
 
 export class Scan extends RefCounted {
   /** Finest first, as the renderer wants them. */
@@ -95,7 +81,6 @@ export class Scan extends RefCounted {
       this.scales.push({
         level,
         factor: one.chunkToMultiscaleTransform[2] / finest,
-        fill: fillOf(from),
         upper: [upperVoxelBound[0], upperVoxelBound[1], upperVoxelBound[2]],
       });
       this.levels.push(from);
@@ -114,11 +99,21 @@ export class Scan extends RefCounted {
     });
   }
 
+  /** What the pager has done, for a measurement to look at. */
+  readonly stats = { ordered: 0, offered: 0, written: 0, pending: 0 };
+
+  /** How many voxels of its own a chunk of `level` is each way (x, y, z). */
+  chunkSizeOf(level: number): [number, number, number] {
+    const size = this.levels[level].spec.chunkDataSize;
+    return [size[0], size[1], size[2]];
+  }
+
   /**
    * A view's standing order: the pages it cuts now, per level, and the ones it is heading for.
    * Replaces the view's last order.  What can go up now goes up now.
    */
   order(who: object, orders: Map<number, Order>) {
+    this.stats.ordered++;
     this.orders.set(who, orders);
     this.gather();
     for (const [level, { cut, near }] of orders) {
@@ -179,6 +174,8 @@ export class Scan extends RefCounted {
    * that what is being looked at is not what the atlas drops.
    */
   private offer(level: number, packed: number, looking: boolean): boolean {
+    this.stats.offered++;
+    this.stats.pending = this.pending.length;
     const at = unpackPage(packed);
     const page: Page = { source: this.source, level, at };
     if (this.atlas.has(page)) {
@@ -194,11 +191,11 @@ export class Scan extends RefCounted {
     ];
     const chunk = from.chunks.get(grid.join(",")) as VolumeChunk | undefined;
     if (chunk === undefined || chunk.state !== ChunkState.GPU_MEMORY) return false;
-    if (chunk.data === null) {
-      this.atlas.absent(page);
-      return true;
-    }
-    return putPage(this.atlas, this.source, level, at, grid, size, chunk.data);
+    // A chunk the store does not have: nothing to write, and the coarser scales answer for it.
+    if (chunk.data === null) return false;
+    const written = putPage(this.atlas, this.source, level, at, grid, size, chunk.data);
+    if (written) this.stats.written++;
+    return written;
   }
 
   /**
@@ -239,15 +236,17 @@ export class Scan extends RefCounted {
 
   /**
    * A chunk has reached the GPU, as far as the queue is concerned.  The pages of it somebody has
-   * ordered go up now; every page of a coarse chunk does; and a chunk the store does not have is said
-   * to be nowhere at once, whatever its scale, so that the shader stops asking after it.
+   * ordered go up now, and every page of a coarse chunk does.
+   *
+   * A chunk the store does not have puts nothing up.  It used to be marked in the table, page by
+   * page, so that the shader would draw the fill there and stop asking — and a sparse scan has
+   * thousands of such chunks, sixty-four pages each, which filled the table in a few hundred frames.
+   * The coarser scales, held whole, answer for those places instead; where no scale has anything,
+   * the pixel is the grey of nothing.
    */
   private arrived(level: number, from: VolumeChunkSource, chunk: VolumeChunk, eager: boolean) {
     const { data } = chunk;
-    if (data === null) {
-      for (const page of this.pagesOf(level, from, chunk)) this.atlas.absent(page);
-      return;
-    }
+    if (data === null) return;
     const wanted = this.wanted.get(level);
     const size = from.spec.chunkDataSize;
     const grid = chunk.chunkGridPosition;

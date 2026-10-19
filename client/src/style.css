@@ -733,6 +733,20 @@ button:focus-visible,
   text-decoration: underline;
 }
 
+/* The frame rate, with `?fps`: a line of numbers in the corner, out of the way. */
+.fps {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 3;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background-color: #14161ccc;
+  color: #9ca3af;
+  font: 11px ui-monospace, monospace;
+  pointer-events: none;
+}
+
 /* The tool rail: what a press on the data does.  It floats over the board, a little in from the edge,
    and it is a sibling of `#board` so that a press on it never reaches the board underneath. */
 #rail {

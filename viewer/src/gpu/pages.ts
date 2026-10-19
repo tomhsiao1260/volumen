@@ -33,6 +33,30 @@ export interface Order {
 const HALF = PAGE / 2;
 
 /**
+ * Every page of `scale` under a box of the scroll, `lower` to `upper` in full-resolution voxels
+ * (x, y, z).  For a thing that is a volume rather than a surface — a cell somebody is pulling out of
+ * shape, whose eight corners bound it — every page of the box may be read, so every page is ordered.
+ */
+export function pagesUnder(
+  lower: [number, number, number],
+  upper: [number, number, number],
+  scale: Scale,
+): number[] {
+  const { factor } = scale;
+  const lo = [0, 0, 0], hi = [0, 0, 0];
+  for (let i = 0; i < 3; i++) {
+    const last = Math.floor((scale.upper[i] - 1) / PAGE);
+    lo[i] = Math.max(0, Math.floor(((lower[i] + 0.5) / factor - 0.5) / PAGE));
+    hi[i] = Math.min(last, Math.floor(((upper[i] + 0.5) / factor - 0.5) / PAGE));
+  }
+  const pages: number[] = [];
+  for (let z = lo[2]; z <= hi[2]; z++)
+    for (let y = lo[1]; y <= hi[1]; y++)
+      for (let x = lo[0]; x <= hi[0]; x++) pages.push(packPage(x, y, z));
+  return pages;
+}
+
+/**
  * The pages of `scale` that the rectangle `looking` cuts, `halfWidth` and `halfHeight` pixels either
  * side of its middle, nearest the middle first — and, in `near`, the pages one page further along
  * the rectangle's normal either way, which is where a hand stepping through the slices is going.

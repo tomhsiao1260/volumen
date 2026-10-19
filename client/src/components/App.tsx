@@ -647,7 +647,44 @@ export function App() {
           )}
         </div>
       )}
+      {SHOW_FPS && session !== null && <FrameRate session={session} />}
       </div>
     </>
   );
+}
+
+// `?fps` puts the frame rate in the corner, for saying how a board feels in numbers.
+const SHOW_FPS = new URLSearchParams(window.location.search).has("fps");
+
+/**
+ * Frames a second over the last second, and what the viewer spent drawing them, read off the
+ * viewer's own counters.  It costs a frame callback of its own and nothing else.
+ */
+function FrameRate({ session }: { session: Session }) {
+  const [text, setText] = useState("");
+  useEffect(() => {
+    let handle = 0;
+    let frames = 0;
+    let since = performance.now();
+    let drawn = 0;
+    const tick = () => {
+      frames++;
+      const now = performance.now();
+      if (now - since >= 1000) {
+        const measured = session.viewer.measured;
+        const draws = measured === undefined ? 0 : measured.draw.frames - drawn;
+        drawn = measured?.draw.frames ?? 0;
+        setText(
+          `${Math.round((frames * 1000) / (now - since))} fps · ${draws} drawn · ` +
+            `${measured === undefined ? "–" : measured.draw.meanMs.toFixed(1)} ms/draw`,
+        );
+        frames = 0;
+        since = now;
+      }
+      handle = requestAnimationFrame(tick);
+    };
+    handle = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(handle);
+  }, [session]);
+  return <div className="fps">{text}</div>;
 }

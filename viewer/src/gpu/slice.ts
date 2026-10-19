@@ -19,14 +19,13 @@ import type { View } from "#src/gpu/card.js";
 import type { scanOf } from "#src/gpu/sample.js";
 
 /**
- * One scale of a source: where it sits in the list, how many full-resolution voxels a voxel is, what
- * a voxel the store never held is worth, as a fraction of one, and how many voxels of its own it has
- * each way (x, y, z) — beyond which there is padding in the store's last chunk, and nothing to draw.
+ * One scale of a source: where it sits in the list, how many full-resolution voxels a voxel is, and
+ * how many voxels of its own it has each way (x, y, z) — beyond which there is padding in the
+ * store's last chunk, and nothing to draw.
  */
 export interface Scale {
   level: number;
   factor: number;
-  fill: number;
   upper: [number, number, number];
 }
 
@@ -101,7 +100,6 @@ export function sliceOf(
           uint(source),
           uint(scale.level),
           float(scale.factor),
-          float(scale.fill),
           vec3(...scale.upper),
           place,
         );

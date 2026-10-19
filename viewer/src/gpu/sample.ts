@@ -26,7 +26,7 @@ import {
   vec3,
 } from "three/tsl";
 import type { Atlas } from "#src/gpu/atlas.js";
-import { PAGE } from "#src/gpu/atlas.js";
+import { PAGE, SLOTS } from "#src/gpu/atlas.js";
 
 /*
  * What a TSL node looks like to TypeScript.
@@ -39,19 +39,17 @@ import { PAGE } from "#src/gpu/atlas.js";
 type Num = any;
 
 // How far a probe may walk before giving up.  At the load factor the atlas holds it is one read
-// nearly always, and four is far past where a run of that length is worth looking for.
+// nearly always, and eight is far past where a run of that length is worth looking for.
 const PROBES = 8;
-const SLOTS = 4096;
 const EMPTY = 0xffffffff;
 
 /**
  * The scan as a TSL function, and the handle for keeping its table up to date.
  *
- * `at(source, level, factor, fill, upper, voxel)` takes a place in FULL-RESOLUTION voxels and the
- * scale to read it at, and answers `(grey, found)` — `found` being 0 where that page is not
- * resident, so a view can try a coarser scale or leave the pixel alone.  A page the store does not
- * have IS found, and is `fill`: the volume's own value for a voxel it never stored, as the renderer
- * before this one drew it.
+ * `at(source, level, factor, upper, voxel)` takes a place in FULL-RESOLUTION voxels and the scale
+ * to read it at, and answers `(grey, found)` — `found` being 0 where that page is not resident, so
+ * a view can try a coarser scale or leave the pixel alone.  A page the store does not have is never
+ * resident, so a place in it is read from the coarser scales, which hold the volume's fill there.
  *
  * `upper` is how many voxels the scale has each way.  Beyond it is the padding of the store's last
  * chunk — zarr pads every chunk to the same size — and a place there is nothing, not black: a card
@@ -63,11 +61,10 @@ export function scanOf(atlas: Atlas) {
   /*
    * Where the shader says which page it wanted and did not find.
    *
-   * This is the whole of how the atlas learns what to hold.  The lookup happens here, so here is the
-   * only place that knows what is actually being drawn — a list worked out on the other thread can
-   * only be a guess at it, and the guess was wrong by a factor of sixty: a chunk of this scan is
-   * 256 voxels a side, sixty-four pages, and a sheet cutting through one touches two or three of
-   * them.  Uploading all sixty-four filled the atlas with papyrus nobody was looking at.
+   * This is how a view whose geometry only a worker knows gets its pages: the lookup happens here,
+   * so here is the only place that knows what is actually being drawn.  A cross-section does not
+   * need it — its pages are ordered ahead on the other thread (`pages.ts`) — but a flattening is a
+   * march of a couple of hundred thousand positions, and the shader is the one that reads them.
    *
    * Written at the key's own hash, two words a key, and atomically — not for the atomicity but
    * because three.js will not give a fragment shader a writable storage buffer any other way (its
@@ -82,8 +79,8 @@ export function scanOf(atlas: Atlas) {
 
   const across = Math.max(1, Math.floor(atlas.texture.image.width / PAGE));
   const side = float(across * PAGE);
-  // The slot that says "this page is nowhere": one past the last real one (`Atlas.absent`).
-  const ABSENT = atlas.absentSlot;
+  // The slot a forgotten page leaves behind: taken, holding nothing (`Atlas.forget`).
+  const STALE = across ** 3;
 
   /*
    * A multiplicative hash, the same two constants the other side uses.  WGSL's `u32` multiply
@@ -103,7 +100,7 @@ export function scanOf(atlas: Atlas) {
       .shiftRight(uint(32 - Math.log2(SLOTS))),
   );
 
-  /** Where a page sits in the atlas, in voxels, or `-1` in `w` when it is not resident. */
+  /** Where a page sits in the atlas, as a slot number, or `EMPTY` when it is not resident. */
   const pageAt = Fn(([lo, hi]: Num[]) => {
       const at = hashOf(lo, hi).toVar();
       const slot = uint(EMPTY).toVar();
@@ -130,7 +127,7 @@ export function scanOf(atlas: Atlas) {
    * because the scan was held as `R8UI` and integers cannot be filtered; held as `R8` the hardware
    * does it, which is both less code and less work.
    */
-  const at = Fn(([source, level, factor, fill, upper, voxel]: Num[]) => {
+  const at = Fn(([source, level, factor, upper, voxel]: Num[]) => {
       /*
        * Into this scale's own voxels, where a page is `PAGE` of them — nudged up by a thousandth of
        * one, so that a place exactly on the boundary between two texels, which every whole-numbered
@@ -168,11 +165,7 @@ export function scanOf(atlas: Atlas) {
         atomicStore(asks.element(where), lo);
         atomicStore(asks.element(where.add(uint(1))), hi);
       });
-      // Nowhere, and known to be: the volume's own value for a voxel it never stored.
-      If(slot.equal(uint(ABSENT)), () => {
-        out.assign(vec2(fill, 1));
-      });
-      If(slot.notEqual(uint(EMPTY)).and(slot.notEqual(uint(ABSENT))), () => {
+      If(slot.notEqual(uint(EMPTY)).and(slot.notEqual(uint(STALE))), () => {
         /*
          * Where that page went, unpacked from its number: pages are laid out x fastest, then y,
          * then z, which is the order `Atlas.cornerOf` lays them out in.
