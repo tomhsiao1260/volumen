@@ -71,6 +71,9 @@ the server on 3005 of this machine only. Then double click the board and pick a 
 public, so no account is needed. A coarse scan (tens of micrometres per voxel) is a good place to
 start; the finest scans are hundreds of gigabytes, of which you only ever download what you look at.
 
+The page draws with WebGPU and nothing else, so it needs a browser that has it — Chrome, Edge or
+Brave. A browser without it shows the board, says so, and draws no data.
+
 ## Project structure
 
 - `client/`: the page (React, Vite, one stylesheet). `src/board/` holds the board itself — its state
@@ -89,7 +92,10 @@ start; the finest scans are hundreds of gigabytes, of which you only ever downlo
   the data bucket, `/api/folders` this machine's folders, and `/api/sources` and `/api/board` keep
   the sources and the board in `server/db/json/`.
 - `viewer/`: the viewer library, which started as a copy of Neuroglancer Mini's and is now this
-  project's own.
+  project's own. Neuroglancer's chunk machinery, reduced — the asking, the queueing, the dropping,
+  the zarr and the decoding — feeds one WebGPU device: every resident chunk is paged into one atlas
+  (`src/gpu/atlas.ts`), and a card is one TSL function that looks the scan up there, a cross-section
+  (`src/gpu/slice.ts`) or papyrus laid flat (`src/gpu/surface.ts`). `src/viewer.ts` is the API.
 - `scripts/start.js`: installs, builds, starts both and opens the page.
 - `docs/whiteboard.md`: what the viewer needed for this board, and what the board does not do yet.
 

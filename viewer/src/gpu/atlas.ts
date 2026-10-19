@@ -67,9 +67,13 @@ const keyOf = (page: Page): [number, number] => [
   (page.source & 255) | ((page.level & 15) << 8),
 ];
 
-/** Knuth's multiplicative hash over the two words, which is enough for keys this regular. */
+/*
+ * A multiplicative hash over the two words, taking the TOP bits of the product (see `sample.ts`,
+ * which must agree with this to the bit).  The bottom bits of a product depend only on the bottom
+ * bits of what was multiplied, and the bottom bits of a key are the page's x alone.
+ */
 const hashOf = (lo: number, hi: number) =>
-  (Math.imul(lo ^ Math.imul(hi, 0x9e3779b1), 0x85ebca6b) >>> 0) % SLOTS;
+  Math.imul(lo ^ Math.imul(hi, 0x9e3779b1), 0x85ebca6b) >>> (32 - Math.log2(SLOTS));
 
 export class Atlas extends RefCounted {
   /** The one texture.  R8, read with the texture unit's own filtering. */
@@ -89,6 +93,13 @@ export class Atlas extends RefCounted {
   private readonly held: (Page | undefined)[];
   // Where each page went, by its key, so that the same page is not written twice.
   private readonly where = new Map<string, number>();
+  /*
+   * And the pages the store does not have, which take no room at all.  A sparse scroll is mostly
+   * these: the chunk arrives with no data, and a pixel in it is the volume's fill value.  Said in the
+   * table as a key whose slot is `pages` — one past the last — so that the shader finds the key,
+   * sees there is no page behind it, and draws the fill rather than asking for it again every frame.
+   */
+  private readonly absents = new Set<string>();
   // A clock that only goes forward, for dropping the least recently wanted page.
   private clock = 0;
   private readonly used: number[];
@@ -130,9 +141,18 @@ export class Atlas extends RefCounted {
     this.registerDisposer(() => this.texture.dispose());
   }
 
-  /** How many pages the atlas holds, and how many are in use. */
+  /** How many pages the atlas holds, how many are in use, and how many are known to be nowhere. */
   get room() {
-    return { pages: this.pages, used: this.where.size };
+    return { pages: this.pages, used: this.where.size, absent: this.absents.size };
+  }
+
+  /** Every page held, for a measurement to look at, as `source/level/x,y,z → slot`. */
+  get listing() {
+    const held: Record<string, number> = {};
+    this.held.forEach((page, slot) => {
+      if (page !== undefined) held[`${page.source}/${page.level}/${page.at.join(",")}`] = slot;
+    });
+    return held;
   }
 
   /** What is in it, for a measurement to look at: how many pages of each source and scale. */
@@ -146,9 +166,23 @@ export class Atlas extends RefCounted {
     return Object.fromEntries(by);
   }
 
-  /** Whether a page is already here, so that nobody uploads it twice. */
+  /** Whether a page is already here — or is known not to exist — so that nobody offers it twice. */
   has(page: Page) {
-    return this.where.has(`${page.source}/${page.level}/${page.at.join(",")}`);
+    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
+    return this.where.has(name) || this.absents.has(name);
+  }
+
+  /** The slot the table gives a page the store does not have.  The shader draws the fill value there. */
+  get absentSlot() {
+    return this.pages;
+  }
+
+  /** Says a page does not exist in the store, so that the shader stops asking for it. */
+  absent(page: Page) {
+    const name = `${page.source}/${page.level}/${page.at.join(",")}`;
+    if (this.where.has(name) || this.absents.has(name)) return;
+    this.absents.add(name);
+    this.remember(page, this.pages);
   }
 
   /**
@@ -163,6 +197,10 @@ export class Atlas extends RefCounted {
    */
   remove(page: Page) {
     const name = `${page.source}/${page.level}/${page.at.join(",")}`;
+    if (this.absents.delete(name)) {
+      this.forget(page);
+      return;
+    }
     const slot = this.where.get(name);
     if (slot === undefined) return;
     this.where.delete(name);

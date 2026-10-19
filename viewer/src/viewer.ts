@@ -1,22 +1,23 @@
 /** @license Copyright 2016 Google Inc. SPDX-License-Identifier: Apache-2.0 */
 
 /**
- * @file The viewer: zarr volumes shown in any number of cross-section views.
+ * @file The viewer: zarr volumes shown in any number of cross-section views, drawn with WebGPU.
  *
  *   const viewer = new Viewer({ container });
+ *   if (!(await viewer.ready)) throw new Error("no WebGPU");
  *   const volume = viewer.addVolume(store);
+ *   await volume.loaded;
  *   const navigation = new NavigationGroup(volume);
  *   const view = viewer.addView(element, { volume, orientation: "xy", navigation });
- *   await volume.loaded;
  *   navigation.setPosition({ x: 100, y: 200, z: 300 });
  *   navigation.onViewChanged(() => console.log(navigation.position, navigation.zoom));
  *   viewer.onPointerMove((point, view) => console.log(point));
  *   view.dispose();
  *
- * Each view draws into a canvas of its own inside its element, which must lie inside `container`, so
- * views can be laid out with any CSS, moved, resized, stacked and clipped.  A view that is moved
- * without being resized has to be reported with `invalidateBounds`, and a CSS transform that
- * magnifies a view shows the same data larger rather than more data.
+ * Each view draws into a canvas of its own inside its element, so views can be laid out with any
+ * CSS, moved, resized, stacked and clipped.  A view that is moved without being resized has to be
+ * reported with `invalidateBounds`, and a CSS transform that magnifies a view shows the same data
+ * larger rather than more data.
  *
  * A view shows one volume for its whole life and looks through one `NavigationGroup`: views sharing
  * a group show the same place and move together.
@@ -24,6 +25,11 @@
  * Points are in voxels of the full-resolution scale, with `x`, `y` and `z` along the last, middle and
  * first dimensions of the zarr array.  Voxel `(i, j, k)` is centered on `{ x: i, y: j, z: k }` and
  * extends half a voxel around it, so rounding a point gives the voxel that contains it.
+ *
+ * How it draws: one GPU device, one atlas every resident chunk is paged into, and a TSL function
+ * per kind of card (`gpu/`).  The chunk machinery — the asking, the queueing, the dropping, the
+ * zarr and the decoding — is Neuroglancer's, reduced, and none of it knows what a GPU is; the only
+ * thing it tells the renderer is that a chunk has arrived or has gone (`render/frontend.ts`).
  */
 
 import {
@@ -32,23 +38,14 @@ import {
 } from "#src/chunk_manager/frontend.js";
 import { loadZarrVolume } from "#src/datasource/zarr/frontend.js";
 import type { ZarrStoreSpec } from "#src/datasource/zarr/store.js";
-import { DisplayContext, SliceViewPanel } from "#src/render/panel.js";
-import type { RenderLayer } from "#src/render/renderlayer.js";
-import { SliceView } from "#src/render/frontend.js";
-import { SurfaceView } from "#src/render/surface_view.js";
 import { Atlas, BYTES as ATLAS_BYTES } from "#src/gpu/atlas.js";
-import { CardView } from "#src/gpu/card.js";
+import { CrossSection } from "#src/gpu/cross_section.js";
 import { Device } from "#src/gpu/device.js";
+import { FlatCard } from "#src/gpu/flat.js";
 import { scanOf } from "#src/gpu/sample.js";
 import { Scan } from "#src/gpu/scan.js";
-import { sliceOf } from "#src/gpu/slice.js";
-import { Field } from "#src/gpu/field.js";
-import type { Said } from "#src/gpu/field.js";
-import { surfaceOf } from "#src/gpu/surface.js";
-import type { Window as FlatWindow } from "#src/gpu/surface.js";
-import { Wanting } from "#src/gpu/wanting.js";
-import type { Wanted } from "#src/gpu/wanting.js";
-import { ImageRenderLayer } from "#src/render/renderlayer.js";
+import type { RenderLayer } from "#src/render/layer.js";
+import { VolumeLayer } from "#src/render/layer.js";
 import {
   makeCoordinateSpace,
   TrackableCoordinateSpace,
@@ -63,7 +60,7 @@ import { WatchableValue } from "#src/state/trackable_value.js";
 import type { Borrowed } from "#src/util/disposable.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { mat3, quat, vec3 } from "#src/util/geom.js";
-import { Signal } from "#src/util/signal.js";
+import { NullarySignal, Signal } from "#src/util/signal.js";
 import { RPC } from "#src/worker/worker_rpc.js";
 
 export interface Point {
@@ -80,7 +77,7 @@ export interface MissingChunk {
 /**
  * Called for each chunk whose file is not in the store, at most once per chunk while the volume is
  * open.  Return (or resolve to) `true` once the file has been added to the store, to load the chunk
- * again; otherwise the chunk is shown as empty.
+ * again; otherwise the chunk is shown as the volume's fill value.
  */
 export type MissingChunkHandler = (
   chunk: MissingChunk,
@@ -129,13 +126,14 @@ function toPoint(coordinates: ArrayLike<number>): Point {
 }
 
 export interface VolumeOptions {
-  // What to do about chunks of this volume missing from the store; by default they are shown empty.
+  // What to do about chunks of this volume missing from the store; by default they are shown as the
+  // volume's fill value.
   onMissingChunk?: MissingChunkHandler;
 }
 
 /**
  * One zarr volume loaded into a viewer.  Any number of views can show it, and they then share its
- * chunks: one download and one texture per chunk, whatever the layout.  Dispose it once no view
+ * chunks: one download and one set of pages per chunk, whatever the layout.  Dispose it once no view
  * shows it any more; loading it again is a fresh download.
  */
 export class Volume extends RefCounted {
@@ -144,7 +142,7 @@ export class Volume extends RefCounted {
   // The bounds of the volume, in its own (z, y, x) voxel coordinates.  A navigation group takes its
   // coordinates from the volume it is created with.
   readonly coordinateSpace = new TrackableCoordinateSpace();
-  // The layer that draws the volume; `undefined` until it has loaded.
+  // The layer that shows the volume; `undefined` until it has loaded.
   readonly renderLayer = new WatchableValue<RenderLayer | undefined>(
     undefined,
   );
@@ -175,7 +173,7 @@ export class Volume extends RefCounted {
   }
 
   // Reads the metadata of every scale, sets the coordinate space from the volume bounds and creates
-  // the render layer that draws it.
+  // the layer that shows it.
   private async load(
     chunkManager: Borrowed<ChunkManager>,
     renderScaleTarget: WatchableValueInterface<number>,
@@ -208,8 +206,8 @@ export class Volume extends RefCounted {
       volume.upperBounds,
     );
 
-    const layer = new ImageRenderLayer(volume, { renderScaleTarget });
-    // The views that draw it hold their own references, so it outlives this volume only while one
+    const layer = new VolumeLayer(volume, { renderScaleTarget });
+    // The views that show it hold their own references, so it outlives this volume only while one
     // of them is still being disposed.
     this.registerDisposer(layer);
     this.renderLayer.value = layer;
@@ -280,10 +278,13 @@ export class NavigationGroup extends RefCounted {
 }
 
 // One cross-section view, as returned by `Viewer.addView`.
-export type View = SliceViewPanel;
+export type View = CrossSection;
+
+// One card of papyrus laid flat, as returned by `Viewer.addSurfaceView`.
+export type Flat = FlatCard;
 
 export interface ViewerOptions {
-  // Element the viewer draws in.  View elements must lie inside it.
+  // Element the views are laid out in.  Resizing it measures them again.
   container: HTMLElement;
 }
 
@@ -297,14 +298,39 @@ export interface ViewOptions {
   navigation: Borrowed<NavigationGroup>;
 }
 
+/** The GPU side, once the device has come: one device, one atlas, one lookup, a scan per volume. */
+interface Gpu {
+  device: Device;
+  atlas: Atlas;
+  shader: ReturnType<typeof scanOf>;
+  scans: Map<Volume, Scan>;
+  // What the shader asked for on the last frame read back, for a measurement to look at: how many
+  // pages of each source and scale, which pages (the first few), and how many could be answered.
+  asked?: { by: Record<string, number>; pages: string[]; put: number };
+  /*
+   * Whether the last frame drawn is also the last word: nothing it asked for could be answered, and
+   * no answer is on its way.  A chunk that has arrived is not yet a page the shader can find — the
+   * shader asks for it, the ask is read back, the page is written, and the card is drawn again — so
+   * a card whose chunks are all here is still a frame or two from showing them.
+   */
+  quiet(): boolean;
+  // The same, in numbers, for a measurement to look at.
+  frames(): { frames: number; answered: { frame: number; put: number } | undefined; reading: boolean };
+}
+
 export class Viewer extends RefCounted {
-  display: DisplayContext;
   chunkManager: ChunkManager;
+  /**
+   * Whether this browser can draw at all: resolves `true` once the GPU device has come, `false`
+   * where there is no WebGPU.  Views can only be added after it has resolved `true`.
+   */
+  readonly ready: Promise<boolean>;
 
   // Decides which chunks to load, and reads and decodes them.
   private worker: Worker;
+  private chunkQueueManager: ChunkQueueManager;
   // Preferred size of a voxel of the chosen scale, in screen pixels (1: pick the scale whose voxels
-  // are closest to one pixel).  It is shared with the worker by each render layer.
+  // are closest to one pixel).  It is shared with the worker by each layer.
   private renderScaleTarget = new WatchableValue(1);
   // The pointer's last position over a view, if it is over one.
   private pointer:
@@ -313,42 +339,160 @@ export class Viewer extends RefCounted {
   private pointerMoved = new Signal<
     (point: Point | undefined, view: View) => void
   >();
+  private lost = new NullarySignal();
+  private gpu: Gpu | undefined;
+  private views = new Set<View>();
 
   constructor({ container }: ViewerOptions) {
     super();
-    this.display = this.registerDisposer(new DisplayContext(container));
-
     this.worker = new Worker(
       new URL("./worker/chunk_worker.bundle.js", import.meta.url),
       { type: "module" },
     );
     const rpc = new RPC(this.worker, true);
-    const chunkQueueManager = this.registerDisposer(
-      // A browser gives a tab only so much GPU memory, and the canvases the panels are drawn in
-      // come out of the same budget; asking for more than this is how a context gets lost.  Chunks
-      // dropped from the GPU are still decoded in system memory, so getting one back is a re-upload
-      // rather than a download.
-      new ChunkQueueManager(rpc, this.display.gl, {
+    const chunkQueueManager = (this.chunkQueueManager = this.registerDisposer(
+      new ChunkQueueManager(rpc, {
         /*
-         * The GPU's share is the atlas's own size, because the atlas IS where chunks go now.  Two
+         * The GPU's share is the atlas's own size, because the atlas IS where chunks go.  Two
          * numbers here would be two opinions about how much room there is, and the one that lost
-         * would be the card a person was looking at.
+         * would be the card a person was looking at.  Chunks dropped from the GPU are still decoded
+         * in system memory, so getting one back is a re-upload rather than a download.
          */
         gpuMemory: { itemLimit: 1e4, sizeLimit: ATLAS_BYTES },
         systemMemory: { itemLimit: 1e5, sizeLimit: 1.5e9 },
         download: { itemLimit: 100, sizeLimit: Number.POSITIVE_INFINITY },
       }),
-    );
+    ));
     chunkQueueManager.registerDisposer(() => this.worker.terminate());
     this.chunkManager = this.registerDisposer(
       new ChunkManager(chunkQueueManager),
     );
+    // The views are laid out in the container, so a container that changed size has views to
+    // measure again.
+    const resized = new ResizeObserver(() => this.invalidateBounds());
+    resized.observe(container);
+    this.registerDisposer(() => resized.disconnect());
+    this.ready = this.start();
+  }
 
+  /** Starts the one GPU device, and everything that hangs off it. */
+  private async start(): Promise<boolean> {
+    const device = await Device.start();
+    if (device === undefined) return false;
+    if (this.wasDisposed) {
+      device.dispose();
+      return false;
+    }
+    const atlas = this.registerDisposer(new Atlas(device));
+    this.registerDisposer(device);
+    const scans = new Map<Volume, Scan>();
+    // Frames drawn, and the frame the last readback answered for, with how much it could put.
+    let frames = 0;
+    let answered: { frame: number; put: number } | undefined;
+    let reading = false;
+    const gpu: Gpu = (this.gpu = {
+      device,
+      atlas,
+      shader: scanOf(atlas),
+      scans,
+      quiet: () => !reading && answered !== undefined && answered.frame === frames && answered.put === 0,
+      frames: () => ({ frames, answered, reading }),
+    });
+    const { chunkQueueManager } = this;
+
+    // Everything on the device went with it; the page builds a new viewer.
     this.registerDisposer(
-      this.display.updateStarted.add(() => {
+      device.lost.add(() => {
+        chunkQueueManager.gone = true;
+        this.lost.dispatch();
+      }),
+    );
+    // Uploads make way for drawing: a deadline set after a view moved is cleared as the frame starts.
+    this.registerDisposer(
+      device.frameStarted.add(() => {
         chunkQueueManager.chunkUpdateDeadline = null;
       }),
     );
+    /*
+     * A chunk arriving is the only thing that changes a card without the card asking.  Pages that
+     * could not be written yet are offered again at the same moment, which is the one place both
+     * things are known to have happened.
+     */
+    this.registerDisposer(
+      chunkQueueManager.visibleChunksChanged.add(() => device.redraw()),
+    );
+    /*
+     * And after every frame, the pages the shader said it wanted and could not find.
+     *
+     * Reading a buffer back is not instant, so one is in flight at a time and the rest of the frame
+     * does not wait for it: a page asked for now is written a frame or two later, which is the same
+     * bargain every chunk arriving already makes.  Whatever was asked is then cleared, so a page
+     * that is still missing has to be asked for again — which is what keeps this a statement about
+     * the frame just drawn rather than a list that only grows.
+     */
+    device.drawn = () => {
+      frames++;
+      if (reading || this.gpu === undefined || device.gone) return;
+      reading = true;
+      const frame = frames;
+      void (async () => {
+        try {
+          const got = await device.renderer.getArrayBufferAsync(gpu.shader.asked);
+          if (this.wasDisposed) return;
+          const asked = new Uint32Array(got);
+          let put = 0;
+          for (const scan of scans.values()) put += scan.answer(asked);
+          answered = { frame, put };
+          /*
+           * What was asked for, kept where a measurement can see it.  A page that is never asked for
+           * and a page that is asked for and cannot be answered look the same from outside — the
+           * card is blank either way — and telling them apart is most of finding out why.
+           */
+          const by: Record<string, number> = {};
+          const pages: string[] = [];
+          for (let i = 0; i + 1 < asked.length; i += 2) {
+            const lo = asked[i], hi = asked[i + 1];
+            if (lo === 0 && hi === 0) continue;
+            const name = `source ${hi & 255} level ${(hi >> 8) & 15}`;
+            by[name] = (by[name] ?? 0) + 1;
+            if (pages.length < 64) {
+              pages.push(`${name} page ${lo & 1023},${(lo >> 10) & 1023},${(lo >> 20) & 1023}`);
+            }
+          }
+          gpu.asked = { by, pages, put };
+          atlas.asks.fill(0);
+          gpu.shader.asked.needsUpdate = true;
+          /*
+           * Drawn again if a page went in — and if a frame was drawn while this one was being read.
+           * That frame's misses were never read: one readback is in flight at a time, and the zeros
+           * going up now overwrite them.  Without another frame they would be lost, and a card would
+           * stay on a coarser scale with every chunk it needs resident, waiting for an ask that
+           * nobody will make.
+           */
+          if (put > 0 || frames !== frame) device.redraw();
+        } catch (error) {
+          if (!device.gone) {
+            console.warn("The pages the shader asked for could not be read back:", error);
+          }
+        } finally {
+          reading = false;
+        }
+      })();
+    };
+    return true;
+  }
+
+  /** What is on the GPU, for a measurement to look at: the atlas's room and what the shader asked. */
+  get measured() {
+    const { gpu } = this;
+    if (gpu === undefined) return undefined;
+    return {
+      room: gpu.atlas.room,
+      kept: gpu.atlas.kept,
+      pages: gpu.atlas.listing,
+      asked: gpu.asked,
+      ...gpu.frames(),
+    };
   }
 
   /**
@@ -365,286 +509,61 @@ export class Viewer extends RefCounted {
     );
   }
 
-  /**
-   * Shows a volume in `element`, on the plane named by `orientation`.  The view is drawn in a canvas
-   * of its own inside the element, which must lie inside the container.  Call `dispose()` on the
-   * returned view to remove it; the element itself is left in place.
-   */
-  /**
-   * A card showing a volume not in cross-section but laid flat: papyrus unrolled onto a grid worked
-   * out elsewhere.
-   *
-   * It draws with the same context and into the same shared surface as every cross-section, so the
-   * two kinds of card cost one GPU context between them and the chunks they read are the same chunks
-   * — a scan already on the GPU for a slice card is not downloaded or uploaded a second time.
-   *
-   * What it is NOT given is a navigation: a flattening has coordinates of its own, and where it is
-   * looking is said with `show`.  See `render/surface_view.ts`.
-   */
-  /*
-   * The renderer being built to replace the one above: one WebGPU device, one atlas, and views
-   * written in TSL (`gpu/`).  It shares this viewer's chunk machinery — the asking, the queueing,
-   * the dropping, the zarr and the decoding, none of which knows what a GPU is — and only changes
-   * where a chunk goes when it arrives.
-   *
-   * Undefined until `startGpu` has been awaited, and undefined for good where there is no WebGPU.
-   */
-  gpu:
-    | {
-        device: Device;
-        atlas: Atlas;
-        scan: ReturnType<typeof scanOf>;
-        scans: Map<Volume, Scan>;
-        // What the shader asked for on the last frame read back, for a measurement to look at.
-        asked?: { by: Record<string, number>; put: number };
-      }
-    | undefined;
-
-  /** Starts the WebGPU side.  Answers whether it could. */
-  async startGpu(): Promise<boolean> {
-    if (this.gpu !== undefined) return true;
-    const device = await Device.start();
-    if (device === undefined) return false;
-    const atlas = this.registerDisposer(new Atlas(device));
-    this.registerDisposer(device);
-    const scans = new Map<Volume, Scan>();
-    this.gpu = { device, atlas, scan: scanOf(atlas), scans };
-    /*
-     * A chunk arriving is the only thing that changes a card without the card asking.  Pages that
-     * could not be written yet are offered again at the same moment, which is the one place both
-     * things are known to have happened.
-     */
-    this.registerDisposer(
-      this.chunkManager.chunkQueueManager.visibleChunksChanged.add(() => device.redraw()),
-    );
-    /*
-     * And after every frame, the pages the shader said it wanted and could not find.
-     *
-     * Reading a buffer back is not instant, so one is in flight at a time and the rest of the frame
-     * does not wait for it: a page asked for now is written a frame or two later, which is the same
-     * bargain every chunk arriving already makes.  Whatever was asked is then cleared, so a page
-     * that is still missing has to be asked for again — which is what keeps this a statement about
-     * the frame just drawn rather than a list that only grows.
-     */
-    let reading = false;
-    device.drawn = () => {
-      if (reading || this.gpu === undefined) return;
-      reading = true;
-      void (async () => {
-        try {
-          const got = await device.renderer.getArrayBufferAsync(this.gpu!.scan.asked);
-          const asked = new Uint32Array(got);
-          let put = 0;
-          for (const scan of scans.values()) put += scan.answer(asked);
-          /*
-           * What was asked for, kept where a measurement can see it.  A page that is never asked for
-           * and a page that is asked for and cannot be answered look the same from outside — the
-           * card is blank either way — and telling them apart is most of finding out why.
-           */
-          if (this.gpu !== undefined) {
-            const by: Record<string, number> = {};
-            for (let i = 0; i + 1 < asked.length; i += 2) {
-              if (asked[i] === 0 && asked[i + 1] === 0) continue;
-              const name = `source ${asked[i + 1] & 255} level ${(asked[i + 1] >> 8) & 15}`;
-              by[name] = (by[name] ?? 0) + 1;
-            }
-            this.gpu.asked = { by, put };
-          }
-          atlas.asks.fill(0);
-          this.gpu!.scan.asked.needsUpdate = true;
-          if (put > 0) device.redraw();
-        } catch (error) {
-          console.warn("The pages the shader asked for could not be read back:", error);
-        } finally {
-          reading = false;
-        }
-      })();
-    };
-    return true;
+  private started(): Gpu {
+    const { gpu } = this;
+    if (gpu === undefined) {
+      throw new Error("The viewer has no GPU device yet: await `viewer.ready` first.");
+    }
+    return gpu;
   }
 
   /** This volume's chunks, pointed at the atlas.  One per volume; made on first use. */
-  private scanOf(volume: Volume): Scan {
-    const { gpu } = this;
-    if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
+  private scanOf(gpu: Gpu, volume: Volume): Scan {
     let scan = gpu.scans.get(volume);
     if (scan === undefined) {
-      scan = this.registerDisposer(new Scan(gpu.atlas, gpu.scans.size, volume));
+      const layer = volume.renderLayer.value;
+      if (layer === undefined) {
+        throw new Error("A view can only be added once its volume has loaded: await `volume.loaded`.");
+      }
+      scan = this.registerDisposer(new Scan(gpu.atlas, gpu.scans.size, layer));
       gpu.scans.set(volume, scan);
     }
     return scan;
   }
 
   /**
-   * A cross-section drawn by the new renderer.
-   *
-   * Two halves that must not come apart: a `SliceView` that asks for chunks — the plane-against-box
-   * geometry, the priorities, the prefetch, all of which is the library as it was and none of which
-   * knows what a GPU is — and a TSL function that draws.  Both read the SAME view matrix, so they
-   * cannot disagree about where the card is looking.
-   *
-   * Getting that wrong is quiet: the first time this was wired, nothing asked for anything and the
-   * card drew a perfectly convincing picture out of chunks some other card had fetched.
+   * Shows a volume in `element`, on the plane named by `orientation`.  The view is drawn in a canvas
+   * of its own inside the element.  Call `dispose()` on the returned view to remove it; the element
+   * itself is left in place.  Both `ready` and the volume's `loaded` must have resolved.
    */
-  addSliceView(
-    element: HTMLElement,
-    { volume, orientation, navigation }: ViewOptions,
-  ) {
-    const { gpu } = this;
-    if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
-    const scan = this.scanOf(volume);
-    const view = sliceOf(gpu.scan, scan.source, scan.scales);
-
-    const seen = new WatchableValue(Number.POSITIVE_INFINITY);
-    const asking = new SliceView(
-      this.chunkManager,
-      volume.renderLayer,
-      navigation.makeNavigationState(viewRotations[orientation]()),
-      seen,
-    );
-    const matrix = () => asking.projectionParameters.value.invViewMatrix;
-
-    const card: CardView = new CardView(element, gpu.device, {
-      material: view.material,
-      before: (width, height) => {
-        /*
-         * The size the card is drawn at is the size its chunks are asked for — and `pixelScale`
-         * goes with it, because the matrix below divides the zoom by it.  Getting that one number
-         * wrong would leave the drawing and the fetching a factor of two apart.
-         */
-        asking.projectionParameters.setViewport(card.renderViewport);
-        asking.flushBackendProjectionParameters();
-        /*
-         * And where it is looking, out of the same matrix: its columns are the view's own axes with
-         * the zoom in them, and its last is the middle.  All of it is the viewer's (z, y, x), which
-         * the drawing counts the other way round.
-         */
-        const m = matrix();
-        view.show({
-          at: [m[14], m[13], m[12]],
-          right: [m[2], m[1], m[0]],
-          down: [m[6], m[5], m[4]],
-        });
-        view.before?.(width, height);
-      },
-      dispose: () => view.dispose?.(),
-    });
-    card.registerDisposer(asking);
-    card.registerDisposer(
-      card.visibility.changed.add(() => (seen.value = card.visibility.value)),
-    );
-    card.registerDisposer(asking.viewChanged.add(() => card.changed()));
-    this.registerDisposer(card);
-    return card;
-  }
-
-  /**
-   * Papyrus laid flat, drawn by the new renderer.
-   *
-   * Three things are pushed in from the page's own worker, because only it knows them: the march
-   * (`take`), where the card is looking (`show`), and which chunks the sheet lands in (`want`).
-   * Everything else — whether those chunks have arrived, and therefore whether the march that is
-   * waiting may replace the one being drawn — is decided here, where both are known.
-   */
-  addFlatView(element: HTMLElement, { volume }: { volume: Volume }) {
-    const { gpu } = this;
-    if (gpu === undefined) throw new Error("`startGpu` has not been awaited.");
-    const scan = this.scanOf(volume);
-    const field = new Field(gpu.device);
-    const view = surfaceOf(gpu.device, gpu.scan, scan.source, scan.scales, field);
-    const seen = new WatchableValue(Number.POSITIVE_INFINITY);
-    const wanting = new Wanting(this.chunkManager, volume.renderLayer, seen);
-    let settled = false;
-    let onSettled: ((settled: boolean) => void) | undefined;
-    // What the march being drawn asked for, kept until the one waiting can be drawn instead.
-    let keeping: Wanted[] = [];
-
-    const card = new CardView(element, gpu.device, {
-      material: view.material,
-      before: (width, height) => {
-        /*
-         * Asked once a frame, because a chunk arrives long after it was asked for.  This is both
-         * what lets the waiting march through and what tells the card to stop saying it is loading.
-         */
-        const now = wanting.settled();
-        field.settled(now);
-        if (now !== settled) {
-          settled = now;
-          onSettled?.(now);
-        }
-        view.before?.(width, height);
-      },
-      dispose: () => view.dispose?.(),
-    });
-    card.registerDisposer(field);
-    card.registerDisposer(wanting);
-    card.registerDisposer(
-      card.visibility.changed.add(() => (seen.value = card.visibility.value)),
-    );
-    this.registerDisposer(card);
-    return Object.assign(card, {
-      take(said: Said) {
-        field.take(said);
-        card.changed();
-      },
-      show(window: FlatWindow) {
-        view.show(window);
-        card.changed();
-      },
-      want(wanted: Wanted[]) {
-        /*
-         * The chunks the march being drawn needs are asked for alongside the ones the march waiting
-         * needs, until the waiting one takes over.
-         *
-         * Holding the old march is not enough on its own: the moment a new list goes to the queue,
-         * the old chunks stop being wanted, are dropped, and take their pages with them — so the
-         * card keeps a march it can no longer draw and goes blank anyway.  Measured on a swept cut,
-         * two frames in sixty fell to almost nothing, and this is what they were.
-         *
-         * The new list goes first, because `settled` asks about the finest scale of the first.
-         */
-        wanting.want(settled || keeping.length === 0 ? wanted : [...wanted, ...keeping]);
-        keeping = wanted;
-        card.changed();
-      },
-      /** Told when every chunk of the finest scale asked for has arrived, and when that stops. */
-      set onSettled(said: ((settled: boolean) => void) | undefined) {
-        onSettled = said;
-      },
-    });
-  }
-
-  addSurfaceView(element: HTMLElement, { volume }: { volume: Volume }): SurfaceView {
-    const view = new SurfaceView(
-      element,
-      this.display,
-      this.chunkManager,
-      volume.renderLayer,
-    );
-    this.registerDisposer(view);
-    return view;
-  }
-
   addView(
     element: HTMLElement,
     { volume, orientation, navigation }: ViewOptions,
   ): View {
-    const view = new SliceViewPanel(
+    const gpu = this.started();
+    const scan = this.scanOf(gpu, volume);
+    const view = new CrossSection(
       element,
-      navigation.makeNavigationState(viewRotations[orientation]()),
+      gpu.device,
+      this.chunkManager,
       volume.renderLayer,
-      this,
+      navigation.makeNavigationState(viewRotations[orientation]()),
+      gpu.shader,
+      scan,
     );
+    this.views.add(view);
+    view.registerDisposer(() => this.views.delete(view));
 
     // While a view moves, chunk uploads to the GPU make way for drawing: after a change of the view
     // they may only start within the next 10 ms, and then wait until a frame has started.  A view
     // moving under a still pointer also changes the point under it.
     view.registerDisposer(
       view.navigationState.changed.add(() => {
-        const { chunkQueueManager } = this.chunkManager;
+        const { chunkQueueManager } = this;
         if (chunkQueueManager.chunkUpdateDeadline === null) {
           chunkQueueManager.chunkUpdateDeadline = Date.now() + 10;
         }
+        view.changed();
         if (this.pointer?.view === view) this.reportPointer();
       }),
     );
@@ -665,16 +584,40 @@ export class Viewer extends RefCounted {
       element.removeEventListener("pointerleave", onPointerLeave);
       onPointerLeave();
     });
+    this.registerDisposer(view);
     return view;
   }
 
   /**
-   * Calls `callback` if the browser takes the WebGL context away, which it does when too much of its
-   * memory is asked for.  Nothing is drawn after that, so the page has to be loaded again.  Returns
-   * a function that stops the calls.
+   * A card showing a volume not in cross-section but laid flat: papyrus unrolled onto a grid worked
+   * out elsewhere.  It draws from the same atlas as every cross-section, so a scan already on the
+   * GPU for a slice card is not uploaded a second time.
+   *
+   * What it is NOT given is a navigation: a flattening has coordinates of its own, and where it is
+   * looking is said with `show`.  See `gpu/flat.ts`.
+   */
+  addSurfaceView(element: HTMLElement, { volume }: { volume: Volume }): Flat {
+    const gpu = this.started();
+    const scan = this.scanOf(gpu, volume);
+    const card = new FlatCard(
+      element,
+      gpu.device,
+      this.chunkManager,
+      volume.renderLayer,
+      gpu.shader,
+      scan,
+    );
+    this.registerDisposer(card);
+    return card;
+  }
+
+  /**
+   * Calls `callback` if the browser takes the GPU device away, which it does when too much of its
+   * memory is asked for, or when the GPU itself goes.  Nothing is drawn after that; the page builds
+   * a new viewer.  Returns a function that stops the calls.
    */
   onContextLost(callback: () => void) {
-    return this.display.contextLost.add(callback);
+    return this.lost.add(callback);
   }
 
   /**
@@ -682,7 +625,15 @@ export class Viewer extends RefCounted {
    * moving one — panning a board of views, scrolling the page — has to be reported with this.
    */
   invalidateBounds() {
-    this.display.invalidateBounds();
+    this.gpu?.device.resized();
+  }
+
+  /**
+   * Takes the GPU device away, as the browser might.  For tests of what happens then, and nothing
+   * else: `onContextLost` fires, and this viewer draws nothing more.
+   */
+  lose() {
+    this.gpu?.device.gpu.destroy();
   }
 
   /**
@@ -695,17 +646,17 @@ export class Viewer extends RefCounted {
   }
 
   /**
-   * Whether every view that is drawn shows its data with nothing still loading (see
-   * `SliceView.isReady`).  A viewer with no view is ready, and a view whose volume is still loading
-   * is not.
+   * Whether every view that is drawn shows its data with nothing still loading: its chunks have
+   * arrived (see `SliceView.isReady`) and the last frame found every page it asked for.  A viewer
+   * with no view is ready, and a view whose volume is still loading is not.
    */
   isReady() {
-    for (const panel of this.display.panels) {
-      if (panel.visibility.value === Number.NEGATIVE_INFINITY) continue;
-      panel.ensureBoundsUpdated();
-      if (!panel.isReady()) return false;
+    for (const view of this.views) {
+      if (view.visibility.value === Number.NEGATIVE_INFINITY) continue;
+      view.card.measure();
+      if (!view.isReady()) return false;
     }
-    return true;
+    return this.views.size === 0 || (this.gpu?.quiet() ?? false);
   }
 
   private reportPointer() {

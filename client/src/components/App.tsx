@@ -90,6 +90,15 @@ export function App() {
     const created = new Session(board);
     sessionRef.current = created;
     setSession(created);
+    // The viewer draws with WebGPU and nothing else, so a browser without it shows no data at all —
+    // said once, here, rather than by every card.
+    created.viewer.ready.then((could) => {
+      if (could || sessionRef.current !== created) return;
+      setNotice({
+        text: "This browser has no WebGPU, which the viewer draws with. Chrome, Edge or Brave have it.",
+        reload: false,
+      });
+    });
     return () => {
       sessionRef.current = null;
       created.dispose();
@@ -97,7 +106,7 @@ export function App() {
   }, [board]);
 
   /*
-   * A browser may take a page's WebGL context away at any time, usually because it or another tab
+   * A browser may take a page's GPU device away at any time, usually because it or another tab
    * asked for too much of the GPU, and everything on the GPU goes with it.  Rather than making the
    * user reload and lose what is on screen, the board starts again on a new viewer and puts its
    * cards back where they were.
@@ -212,6 +221,10 @@ export function App() {
         },
         get session() {
           return sessionRef.current;
+        },
+        // Whether the saved board has been read in yet; a card added before that is replaced by it.
+        get restored() {
+          return restoredRef.current;
         },
         // What the surface cards have found, which a test can measure a piece against.
         sheets: (sourceId: string) => sheetsOf(sourceId),

@@ -3,7 +3,7 @@
  * planes, and nothing that draws.
  *
  * The pixels are the card's own business now — it holds the march as a texture and works each one
- * out on the GPU (`gpu/field.ts`, `viewer/render/surface_layer.ts`).  What is left here is what only
+ * out on the GPU (`viewer/gpu/field.ts`, `viewer/gpu/surface.ts`).  What is left here is what only
  * this side knows: how a pixel maps to a point of the piece, how far across the sheets a cut
  * reaches and how that is spread, and which chunks of the scan a plane lands in.
  *

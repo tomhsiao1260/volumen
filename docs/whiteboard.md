@@ -10,6 +10,12 @@ of it must therefore stay as they are — worth reading before trimming that lib
 is kept as small as possible in its own project.  Line references are to the viewer as of this
 writing.
 
+**Since 2026-10-19 the viewer draws with WebGPU only.**  `render/panel.ts`, `renderlayer.ts`,
+`chunk_format.ts`, `surface_layer.ts`, `surface_view.ts` and `webgl/` named below are gone; what they
+did is now `gpu/` (one device, one atlas, a TSL function per kind of card — see `gpu/device.ts`,
+`gpu/atlas.ts`, `gpu/cross_section.ts`, `gpu/flat.ts`).  The rest of these notes — what a board
+needs of a viewer, and why — still holds; only the file names have moved.
+
 ## Where this stands
 
 The board itself is built (`client/src/board/`), and the viewer changes it needed are in:

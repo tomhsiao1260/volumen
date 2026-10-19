@@ -1,4 +1,10 @@
-export const SERVER_API_ENDPOINT = "http://localhost:3005";
+/*
+ * The server's port: 3005, or whatever `VITE_SERVER_PORT` said when the page was built or served.
+ * The tests (`notes/tests/`) run a server of their own beside the one being worked with, so that a
+ * test never adds a card to a board somebody is using — which one did, once.
+ */
+const PORT = import.meta.env.VITE_SERVER_PORT || "3005";
+export const SERVER_API_ENDPOINT = `http://localhost:${PORT}`;
 
 /*
  * The same server, under its other name, for reading the scan through.  A browser opens six

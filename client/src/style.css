@@ -141,7 +141,7 @@ button {
 /* Lines drawn over a slice: where the sheets of the surface cards cut it. */
 /* Where a card drawn on the GPU puts its canvas: over the black the flat card leaves showing, and
    under the sheet line and the winding points, which are painted on their own canvas above it. */
-/* A surface card's papyrus, drawn on the GPU out of the march (`viewer`'s `SurfaceView`). */
+/* A surface card's papyrus, drawn on the GPU out of the march (`viewer`'s `addSurfaceView`). */
 .card-gpu {
   position: absolute;
   inset: 0;

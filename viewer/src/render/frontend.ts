@@ -1,5 +1,12 @@
 /** @license Copyright 2016 Google Inc. SPDX-License-Identifier: Apache-2.0 */
 
+/**
+ * @file Main-thread side of a cross-section's ASKING: which scales a volume has, where a view is
+ * looking, and which chunks that makes visible.  The worker counterpart (`render/backend.ts`)
+ * requests them; the chunks arrive through `chunk_manager/frontend.ts` and are drawn out of the
+ * atlas (`gpu/`).
+ */
+
 import { debounce } from "es-toolkit";
 import { ChunkState } from "#src/chunk_manager/base.js";
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
@@ -26,21 +33,16 @@ import {
   SLICEVIEW_SET_LAYER_RPC_ID,
   SliceViewBase,
 } from "#src/render/base.js";
-import {
-  ChunkFormat,
-  FillValueTexture,
-  TextureLayout,
-} from "#src/render/chunk_format.js";
-import type { RenderLayer } from "#src/render/renderlayer.js";
+import type { RenderLayer } from "#src/render/layer.js";
 import type { TypedArray } from "#src/util/array.js";
 import type { DataType } from "#src/util/data_type.js";
 import type { Borrowed, Disposer, Owned } from "#src/util/disposable.js";
-import { invokeDisposers, RefCounted } from "#src/util/disposable.js";
+import { invokeDisposers } from "#src/util/disposable.js";
+import { RefCounted } from "#src/util/disposable.js";
 import { mat4, vec3 } from "#src/util/geom.js";
 import { NullarySignal, Signal } from "#src/util/signal.js";
 import { SharedWatchableValue } from "#src/worker/shared_watchable_value.js";
 import { kEmptyFloat32Vec } from "#src/util/vector.js";
-import type { GL } from "#src/webgl/context.js";
 import type { RPC } from "#src/worker/worker_rpc.js";
 import {
   registerSharedObjectOwner,
@@ -155,16 +157,16 @@ function serializeTransformedSource(
 }
 
 /**
- * Main-thread side of one cross-section view.  Sends the volume's sources and the projection
- * parameters to its worker counterpart (`SliceViewBackend`), which requests the visible chunks,
- * and draws the chunks that have reached the GPU.
+ * Main-thread side of one cross-section view's asking.  Sends the volume's sources and the
+ * projection parameters to its worker counterpart (`SliceViewBackend`), which requests the visible
+ * chunks.  It draws nothing: the card that owns it draws out of the atlas, from the same matrix
+ * (`gpu/cross_section.ts`).
  */
 @registerSharedObjectOwner(SLICEVIEW_RPC_ID)
 export class SliceView extends SliceViewBase<VolumeChunkSource> {
-  gl = this.chunkManager.gl;
   // Dispatched when the view needs to be drawn again.
   viewChanged = new NullarySignal();
-  // The render layer being drawn, once `renderLayer` has a value.
+  // The layer being shown, once `renderLayer` has a value.
   layer: RenderLayer | undefined;
   private layerDisposers: Disposer[] = [];
 
@@ -178,10 +180,10 @@ export class SliceView extends SliceViewBase<VolumeChunkSource> {
 
   constructor(
     public chunkManager: ChunkManager,
-    // The render layer to draw; `undefined` until the volume has loaded.
+    // The layer to show; `undefined` until the volume has loaded.
     public renderLayer: WatchableValueInterface<RenderLayer | undefined>,
     public navigationState: Owned<NavigationState>,
-    // How much the view's chunks are worth loading (see `render/panel.ts`).
+    // How much the view's chunks are worth loading (see `gpu/card.ts`).
     visibility: WatchableValueInterface<number>,
   ) {
     super(
@@ -251,7 +253,7 @@ export class SliceView extends SliceViewBase<VolumeChunkSource> {
     this.updateLayer();
   }
 
-  // Releases the render layer and the projection parameters, and stops listening to them.
+  // Releases the layer and the projection parameters, and stops listening to them.
   disposed() {
     const { layer } = this;
     if (layer !== undefined) {
@@ -292,8 +294,7 @@ export class SliceView extends SliceViewBase<VolumeChunkSource> {
     this.viewChanged.dispatch();
   }
 
-  // Once the render layer exists, places the volume's scales in the view and sends them to the
-  // worker.
+  // Once the layer exists, places the volume's scales in the view and sends them to the worker.
   private updateLayerNow() {
     if (this.wasDisposed) {
       return;
@@ -353,34 +354,6 @@ export class SliceView extends SliceViewBase<VolumeChunkSource> {
     }
     return true;
   }
-
-  // Draws the slice into the current viewport, which the panel has set to its part of the canvas.
-  draw() {
-    const projectionParameters = this.projectionParameters.value;
-    const { width, height } = projectionParameters;
-    if (width === 0 || height === 0) {
-      return;
-    }
-    this.updateLayer.flush();
-    this.updateVisibleSources();
-
-    const { gl } = this;
-    // Pixels where no chunk is drawn are gray.
-    gl.clearColor(0.5, 0.5, 0.5, 1);
-    gl.clear(WebGL2RenderingContext.COLOR_BUFFER_BIT);
-    const { layer } = this;
-    if (layer !== undefined) {
-      // The depth buffer keeps coarser scales from being drawn over finer ones (see
-      // `renderlayer.ts`).
-      gl.enable(WebGL2RenderingContext.DEPTH_TEST);
-      gl.depthFunc(WebGL2RenderingContext.LESS);
-      gl.clearDepth(1);
-      gl.clear(WebGL2RenderingContext.DEPTH_BUFFER_BIT);
-      gl.disable(WebGL2RenderingContext.BLEND);
-      layer.draw({ sliceView: this, projectionParameters });
-    }
-    gl.disable(WebGL2RenderingContext.DEPTH_TEST);
-  }
 }
 
 // One scale of the volume: its chunk source, and the homogeneous transform ((rank + 1) squared,
@@ -428,26 +401,20 @@ export function getVolumetricTransformedSources(
 
 /**
  * Main-thread side of the chunk source of one scale.  Its chunks arrive from the worker in
- * `Chunk.update` messages (see `chunk_manager/frontend.ts`) and are uploaded to textures of
- * `chunkFormat`.
+ * `Chunk.update` messages (see `chunk_manager/frontend.ts`) and are kept in memory; what happens to
+ * them on the GPU is said by `feed` and `drop`.
  */
 export class VolumeChunkSource extends ChunkSource {
   chunks!: Map<string, VolumeChunk>;
   spec: VolumeChunkSpecification;
   /*
-   * Where this source's chunks go on the GPU, when something other than a texture each wants them.
-   *
-   * Set by the renderer built on one atlas (`gpu/feed.ts`): a chunk then becomes pages of the one
-   * texture rather than a texture of its own, and the upload below does not happen at all.  Left
-   * unset, everything works as it always did — which is how the two renderers were held against
-   * each other while one replaced the other.
+   * What a chunk entering or leaving the GPU means, set by the renderer (`gpu/scan.ts`): a chunk
+   * becomes pages of the one atlas — written when the shader asks for them, or at once for a coarse
+   * scale — and a chunk leaving takes its pages with it.  Unset, a chunk's state changes and nothing
+   * else happens, which is what a volume nothing is drawing yet looks like.
    */
   feed: ((chunk: VolumeChunk) => void) | undefined = undefined;
   drop: ((chunk: VolumeChunk) => void) | undefined = undefined;
-  chunkFormat: ChunkFormat;
-  // Layout of the texture of each chunk of this source.
-  textureLayout: TextureLayout;
-  fillValueTexture: FillValueTexture;
 
   constructor(
     chunkManager: ChunkManager,
@@ -455,18 +422,10 @@ export class VolumeChunkSource extends ChunkSource {
   ) {
     super(chunkManager, options);
     this.spec = options.spec;
-    const { gl } = chunkManager.chunkQueueManager;
-    const { chunkDataSize, dataType, fillValue } = this.spec;
-    this.chunkFormat = this.registerDisposer(ChunkFormat.get(gl, dataType));
-    this.textureLayout = new TextureLayout(gl, chunkDataSize);
-    this.fillValueTexture = this.registerDisposer(
-      FillValueTexture.get(
-        gl,
-        this.chunkFormat,
-        chunkDataSize.length,
-        fillValue,
-      ),
-    );
+  }
+
+  get dataType(): DataType {
+    return this.spec.dataType;
   }
 
   initializeCounterpart(rpc: RPC, options: any) {
@@ -475,24 +434,17 @@ export class VolumeChunkSource extends ChunkSource {
   }
 
   getChunk(x: any): VolumeChunk {
-    const chunk = new VolumeChunk(this, x);
-    if (chunk.data === null) {
-      chunk.texture = this.fillValueTexture.texture;
-      chunk.textureLayout = this.fillValueTexture.textureLayout;
-    }
-    return chunk;
+    return new VolumeChunk(this, x);
   }
 }
 
-// Main-thread copy of a volume chunk: its data lives in a texture while the chunk is in GPU memory.
-// A chunk with no data uses the source's fill value texture instead.
+// Main-thread copy of a volume chunk.  `data` is null for a chunk the store does not have, which is
+// drawn as the volume's fill value.
 export class VolumeChunk extends Chunk {
   source!: VolumeChunkSource;
   // Position of the chunk in the chunk grid.
   chunkGridPosition: vec3;
   data: TypedArray | null;
-  texture: WebGLTexture | null = null;
-  textureLayout: TextureLayout | null = null;
 
   constructor(source: VolumeChunkSource, x: any) {
     super(source);
@@ -500,33 +452,14 @@ export class VolumeChunk extends Chunk {
     this.data = x.data;
   }
 
-  copyToGPU(gl: GL) {
-    super.copyToGPU(gl);
-    if (this.data === null) return;
-    const { feed } = this.source;
-    if (feed !== undefined) {
-      feed(this);
-      return;
-    }
-    const { chunkFormat, textureLayout } = this.source;
-    const texture = (this.texture = gl.createTexture());
-    gl.bindTexture(WebGL2RenderingContext.TEXTURE_3D, texture);
-    this.textureLayout = textureLayout;
-    chunkFormat.setTextureData(gl, textureLayout, this.data);
-    gl.bindTexture(WebGL2RenderingContext.TEXTURE_3D, null);
+  copyToGPU() {
+    super.copyToGPU();
+    this.source.feed?.(this);
   }
 
-  freeGPUMemory(gl: GL) {
-    super.freeGPUMemory(gl);
-    if (this.data === null) return;
-    const { drop } = this.source;
-    if (drop !== undefined) {
-      drop(this);
-      return;
-    }
-    gl.deleteTexture(this.texture);
-    this.texture = null;
-    this.textureLayout = null;
+  freeGPUMemory() {
+    super.freeGPUMemory();
+    this.source.drop?.(this);
   }
 }
 

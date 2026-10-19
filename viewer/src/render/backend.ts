@@ -81,7 +81,7 @@ export class SliceViewBackend extends SliceViewBase<VolumeChunkSource> {
   layer: SliceViewRenderLayerBackend | undefined;
   // Estimates how the view position moves, to prefetch the chunks it is heading towards.
   velocityEstimator = new VelocityEstimator();
-  // How much this view's chunks are worth loading (see `render/panel.ts`).
+  // How much this view's chunks are worth loading (see `gpu/card.ts`).
   visibility: SharedWatchableValue<number>;
 
   constructor(rpc: RPC, options: any) {

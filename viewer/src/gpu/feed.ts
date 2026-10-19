@@ -10,12 +10,26 @@
  * cutting through it touches two or three: the atlas filled with papyrus nobody was looking at and
  * dropped what somebody was.  Now the shader says which page it wanted and did not find
  * (`sample.ts`), and only that page is written.
+ *
+ * The atlas holds a byte a voxel whatever the store holds.  A scan's greys are a measurement, and
+ * sixteen bits of one are not more picture than eight on a screen that shows eight — so a sixteen-bit
+ * scan goes in by its high byte and a float one by its fraction of one, which is what the renderer
+ * before this one did with `normalized()` in its shader, only on the way in rather than on the way
+ * out.
  */
 import type { Atlas } from "#src/gpu/atlas.js";
 import { PAGE } from "#src/gpu/atlas.js";
+import type { TypedArray } from "#src/util/array.js";
 
 // One page's worth of bytes, reused rather than allocated per page.
 const spare = new Uint8Array(PAGE ** 3);
+
+/** A voxel of the store as a byte: the high byte of a short, a fraction of one as a float. */
+function byteOf(data: TypedArray, i: number) {
+  if (data instanceof Uint8Array) return data[i];
+  if (data instanceof Uint16Array) return data[i] >> 8;
+  return Math.max(0, Math.min(255, Math.round(data[i] * 255)));
+}
 
 /**
  * Cuts one page out of a chunk and puts it in.
@@ -33,7 +47,7 @@ export function putPage(
   at: [number, number, number],
   grid: ArrayLike<number>,
   size: ArrayLike<number>,
-  data: Uint8Array,
+  data: TypedArray,
 ): boolean {
   // Where this page starts inside the chunk.
   const o0 = at[0] * PAGE - grid[0] * size[0];
@@ -45,14 +59,23 @@ export function putPage(
   ) {
     return false;
   }
-  if (size[0] === PAGE && size[1] === PAGE && size[2] === PAGE) {
-    // The chunk is the page: handed straight through, which is the common scale.
-    return atlas.put({ source, level, at }, data.subarray(0, PAGE ** 3));
+  if (data instanceof Uint8Array) {
+    if (size[0] === PAGE && size[1] === PAGE && size[2] === PAGE) {
+      // The chunk is the page: handed straight through, which is the common scale.
+      return atlas.put({ source, level, at }, data.subarray(0, PAGE ** 3));
+    }
+    for (let z = 0; z < PAGE; z++)
+      for (let y = 0; y < PAGE; y++) {
+        const from = ((o2 + z) * size[1] + (o1 + y)) * size[0] + o0;
+        spare.set(data.subarray(from, from + PAGE), (z * PAGE + y) * PAGE);
+      }
+    return atlas.put({ source, level, at }, spare);
   }
   for (let z = 0; z < PAGE; z++)
     for (let y = 0; y < PAGE; y++) {
       const from = ((o2 + z) * size[1] + (o1 + y)) * size[0] + o0;
-      spare.set(data.subarray(from, from + PAGE), (z * PAGE + y) * PAGE);
+      const to = (z * PAGE + y) * PAGE;
+      for (let x = 0; x < PAGE; x++) spare[to + x] = byteOf(data, from + x);
     }
   return atlas.put({ source, level, at }, spare);
 }

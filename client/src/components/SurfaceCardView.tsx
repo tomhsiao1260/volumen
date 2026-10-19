@@ -61,18 +61,6 @@ const PATIENCE_MS = 8000;
  * card share — what the pixels then mean is the plane's, and only the flat card turns them into
  * sheets.  So the two sizes below are said in pixels and `PER_PIXEL` is what converts.
  */
-/*
- * Which renderer draws the papyrus.
- *
- * The WebGPU one only when `?gpu2=yes` asks for it.  It draws the flat card well and keeps the march
- * it is showing until the next can be drawn — which is what a card going blank for half a second
- * was — but a CUT drawn by it covers only about two thirds of its own card, for a reason not yet
- * found: `reached` is 1 down to four fifths of the way and 0 below, and the window the card asks for
- * is comfortably inside the walk it is asking of.  Until that is understood the papyrus is drawn by
- * the renderer that gets it right, and the new one is reached for on purpose.
- */
-const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") !== "no";
-
 const PER_PIXEL = 1 / 960;
 const NOTCH = 1 / 8;
 const NOTCH_PIXELS = NOTCH / PER_PIXEL;
@@ -449,16 +437,12 @@ export function SurfaceCardView({
     const lastV = have.nv - 1;
     const [row, column] = alongNow();
     if (wantedPlane.current === "uv") {
-      if (ON_GPU2) {
-        view.show({
-          at: [have.lattice[1], have.lattice[0], own],
-          right: [lastU, 0, 0],
-          down: [0, lastV, 0],
-          show: gpuShow,
-        });
-      } else {
-        view.show({ plane: "uv", w: own, from: 0, across: 1, pin, show: gpuShow });
-      }
+      view.show({
+        at: [have.lattice[1], have.lattice[0], own],
+        right: [lastU, 0, 0],
+        down: [0, lastV, 0],
+        show: gpuShow,
+      });
       shown.current = wanted.current;
       return;
     }
@@ -478,27 +462,16 @@ export function SurfaceCardView({
       edge[1] - across / 2,
       Math.max(edge[0] + across / 2, far.current ?? farOf(have.walk, own)),
     );
-    if (ON_GPU2) {
-      // A cut: one axis of the grid across the card, the sheets down it by distance, the other axis
-      // held where the pin says.
-      const alongU = wantedPlane.current === "uw";
-      view.show({
-        at: [alongU ? have.lattice[1] : column, alongU ? row : have.lattice[0], 0],
-        right: alongU ? [lastU, 0, 0] : [0, lastV, 0],
-        down: [0, 0, 0],
-        through: { from: middle - across / 2, across },
-        show: gpuShow,
-      });
-    } else {
-      view.show({
-        plane: wantedPlane.current,
-        w: own,
-        from: middle - across / 2,
-        across,
-        pin,
-        show: gpuShow,
-      });
-    }
+    // A cut: one axis of the grid across the card, the sheets down it by distance, the other axis
+    // held where the pin says.
+    const alongU = wantedPlane.current === "uw";
+    view.show({
+      at: [alongU ? have.lattice[1] : column, alongU ? row : have.lattice[0], 0],
+      right: alongU ? [lastU, 0, 0] : [0, lastV, 0],
+      down: [0, 0, 0],
+      through: { from: middle - across / 2, across },
+      show: gpuShow,
+    });
     /*
      * The window, kept where a measurement can read it.
      *
@@ -1136,49 +1109,33 @@ export function SurfaceCardView({
   }, [chainsMoved, tool, status, askAbout]);
 
   /*
-   * The viewer's side of a card drawn on the GPU: one surface view, for as long as the card shows
-   * this scan.  It joins the same context and the same shared canvas as every slice card, so the
-   * two kinds of card cost one GPU context between them and read the same chunk textures.
+   * The viewer's side of the card: one flat view, for as long as the card shows this scan.  It draws
+   * from the same atlas as every slice card, so a scan on the GPU for one is on the GPU for the
+   * other — and it keeps the march it is drawing until the one replacing it can actually be drawn,
+   * which is what a card going blank for half a second used to be.
    */
   useEffect(() => {
     if (session === null || sourceId === null || gpuBox.current === null) return;
     const volume = session.volumes.get(sourceId);
-    /*
-     * The renderer being built to replace the one below (`?gpu2=yes`): one atlas, a TSL function,
-     * and — the part that matters here — a march that is not let go of until the one replacing it
-     * can be drawn, which is what a card going blank for half a second was.
-     */
-    /*
-     * Whether the card is still waiting, answered by the one thing that knows.
-     *
-     * It used to come from the worker, which drew the papyrus and so could say when it had drawn all
-     * of it.  The papyrus is drawn on the GPU now, so what is left to wait for is chunks arriving —
-     * which only the view can see, because the view is what asked for them.
-     */
-    const attach = (view: Flat) => {
+    let current = true;
+    let view: Flat | undefined;
+    // Both: the device has to be there, and the volume's scales have to be known.
+    Promise.all([session.viewer.ready, volume.loaded]).then(([could]) => {
+      if (!current || !could || gpuBox.current === null) return;
+      view = session.viewer.addSurfaceView(gpuBox.current, { volume });
+      /*
+       * Whether the card is still waiting, answered by the one thing that knows.
+       *
+       * It used to come from the worker, which drew the papyrus and so could say when it had drawn
+       * all of it.  The papyrus is drawn on the GPU now, so what is left to wait for is chunks
+       * arriving — which only the view can see, because the view is what asked for them.
+       */
       view.onSettled = (settled) => {
         if (!settled) return;
         clearTimeout(waiting.current);
         setLoading(false);
       };
       gpuRef.current = view;
-    };
-    if (!ON_GPU2) {
-      const view = session.viewer.addSurfaceView(gpuBox.current, { volume });
-      attach(view);
-      return () => {
-        gpuRef.current = undefined;
-        view.dispose();
-      };
-    }
-    // The WebGPU device is started once for the page and awaited by whichever card gets there first.
-    let current = true;
-    let view: Flat | undefined;
-    // Both: the device has to be there, and the volume's scales have to be known.
-    Promise.all([session.viewer.startGpu(), volume.loaded]).then(([could]) => {
-      if (!current || !could || gpuBox.current === null) return;
-      view = session.viewer.addFlatView(gpuBox.current, { volume });
-      attach(view);
       /*
        * And a limit on the waiting, as every other ask has.
        *

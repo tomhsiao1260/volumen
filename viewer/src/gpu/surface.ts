@@ -129,13 +129,17 @@ export function surfaceOf(
     /**
      * The winding at a distance through the papyrus — the march's own path, inverted.
      *
-     * Read by hand rather than filtered: a one-dimensional float texture would raise the same
-     * optional-feature question as the field and buy nothing, since this is two reads and a mix.
+     * The walk is `n` samples from `lo` to `hi`, and a texture's samples sit at the MIDDLE of its
+     * texels: the fraction of the way from `lo` to `hi` has to land on the middle of the first texel
+     * at 0 and of the last at 1, not on their outer edges.  Read at the fraction itself the whole
+     * card was half a sample out, which with a walk of two thousand samples is nothing and with a
+     * short one is a sheet drawn half a voxel off — measured against a walk made by hand.
      */
+    const n = said.walk.length;
     const windingAt = Fn(([b]: Num[]) => {
       const far = from.add(b.mul(across));
       const t = far.sub(said.lo).div(Math.max(1e-6, said.hi - said.lo));
-      return texture(walk, vec2(t.clamp(0, 1), 0.5)).r;
+      return texture(walk, vec2(t.clamp(0, 1).mul((n - 1) / n).add(0.5 / n), 0.5)).r;
     });
     /** The same fraction, for the mode that shows what the walk holds. */
     const fractionAt = Fn(([b]: Num[]) =>
@@ -222,7 +226,14 @@ export function surfaceOf(
         const voxel = vec3(place.z, place.y, place.x);
         for (const scale of scales) {
           If(found.equal(0), () => {
-            const got = scan.at(uint(source), uint(scale.level), float(scale.factor), voxel);
+            const got = scan.at(
+              uint(source),
+              uint(scale.level),
+              float(scale.factor),
+              float(scale.fill),
+              vec3(...scale.upper),
+              voxel,
+            );
             If(got.y.greaterThan(0), () => {
               grey.assign(got.x);
               found.assign(1);

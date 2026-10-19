@@ -14,7 +14,7 @@
  * The shader is the only thing that knows what is really being drawn, so the shader is asked.
  */
 import { PAGE } from "#src/gpu/atlas.js";
-import type { Atlas } from "#src/gpu/atlas.js";
+import type { Atlas, Page } from "#src/gpu/atlas.js";
 import { putPage } from "#src/gpu/feed.js";
 import type { Scale } from "#src/gpu/slice.js";
 import type {
@@ -22,7 +22,8 @@ import type {
   VolumeChunk,
   VolumeChunkSource,
 } from "#src/render/frontend.js";
-import type { Volume } from "#src/viewer.js";
+import type { RenderLayer } from "#src/render/layer.js";
+import { DataType } from "#src/util/data_type.js";
 import { RefCounted } from "#src/util/disposable.js";
 
 /*
@@ -30,6 +31,19 @@ import { RefCounted } from "#src/util/disposable.js";
  * time.  Eight is three levels down, where a card's worth of scroll is a handful of chunks.
  */
 const EAGER = 8;
+
+/** The fill value of a scale as the atlas holds greys: a fraction of one (`feed.ts`). */
+function fillOf(source: VolumeChunkSource) {
+  const { fillValue, dataType } = source.spec;
+  switch (dataType) {
+    case DataType.UINT8:
+      return fillValue / 255;
+    case DataType.UINT16:
+      return fillValue / 65535;
+    default:
+      return Math.max(0, Math.min(1, fillValue));
+  }
+}
 
 export class Scan extends RefCounted {
   /** Finest first, as the renderer wants them. */
@@ -40,18 +54,22 @@ export class Scan extends RefCounted {
     private atlas: Atlas,
     /** Which scan this is, as the atlas's keys count them. */
     readonly source: number,
-    volume: Volume,
+    layer: RenderLayer,
   ) {
     super();
-    const layer = volume.renderLayer.value;
-    if (layer === undefined) throw new Error("A scan can only be made once its volume has loaded.");
     const sources: SliceViewSingleResolutionSource[] = layer.getSources();
     // The x scale of each level against the finest, which is what "how many full-resolution voxels
     // is one of these" means.  The transform is column-major and x is the last zarr dimension.
     const finest = sources[0].chunkToMultiscaleTransform[2];
     sources.forEach((one: SliceViewSingleResolutionSource, level: number) => {
-      this.scales.push({ level, factor: one.chunkToMultiscaleTransform[2] / finest });
       const from = one.chunkSource as VolumeChunkSource;
+      const { upperVoxelBound } = from.spec;
+      this.scales.push({
+        level,
+        factor: one.chunkToMultiscaleTransform[2] / finest,
+        fill: fillOf(from),
+        upper: [upperVoxelBound[0], upperVoxelBound[1], upperVoxelBound[2]],
+      });
       this.levels.push(from);
       /*
        * A fine chunk arriving puts nothing anywhere: it is in memory now, and what it holds goes up
@@ -65,7 +83,7 @@ export class Scan extends RefCounted {
        * while the page it really wants is fetched.  Detail then arrives on top.
        */
       const eager = this.scales[level].factor >= EAGER;
-      from.feed = eager ? (chunk) => this.all(level, from, chunk) : () => {};
+      from.feed = eager ? (chunk) => this.all(level, from, chunk) : (chunk) => this.nowhere(level, from, chunk);
       /*
        * A chunk leaving takes its pages with it.  One eviction policy, and it is the queue's: it
        * knows what every card wants, at what priority, and how visible each card is.  The atlas
@@ -104,47 +122,60 @@ export class Scan extends RefCounted {
         Math.floor((at[2] * PAGE) / size[2]),
       ];
       const chunk = from.chunks.get(grid.join(",")) as VolumeChunk | undefined;
-      const data = chunk?.data;
-      if (data == null) continue;
-      const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      if (putPage(this.atlas, this.source, level, at, grid, size, bytes)) put++;
+      if (chunk === undefined) continue;
+      const { data } = chunk;
+      if (data === null) {
+        // The store has no such chunk, and the shader should stop asking: the pixel is the fill.
+        this.atlas.absent({ source: this.source, level, at });
+        put++;
+        continue;
+      }
+      if (putPage(this.atlas, this.source, level, at, grid, size, data)) put++;
     }
     return put;
   }
 
-  /** Every page of a chunk, for the coarse scales that are worth holding whole. */
-  private all(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
-    const data = chunk.data;
-    if (data == null) return;
-    const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  // The pages of a chunk, as the atlas counts them.
+  private *pagesOf(level: number, from: VolumeChunkSource, chunk: VolumeChunk): Iterable<Page> {
     const size = from.spec.chunkDataSize;
     const pages = [size[0] / PAGE, size[1] / PAGE, size[2] / PAGE];
     const grid = chunk.chunkGridPosition;
     for (let pz = 0; pz < pages[2]; pz++)
       for (let py = 0; py < pages[1]; py++)
         for (let px = 0; px < pages[0]; px++) {
-          const at: [number, number, number] = [
-            grid[0] * pages[0] + px,
-            grid[1] * pages[1] + py,
-            grid[2] * pages[2] + pz,
-          ];
-          if (this.atlas.has({ source: this.source, level, at })) continue;
-          putPage(this.atlas, this.source, level, at, grid, size, bytes);
-        }
-  }
-
-  private give(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
-    const size = from.spec.chunkDataSize;
-    const pages = [size[0] / PAGE, size[1] / PAGE, size[2] / PAGE];
-    const grid = chunk.chunkGridPosition;
-    for (let pz = 0; pz < pages[2]; pz++)
-      for (let py = 0; py < pages[1]; py++)
-        for (let px = 0; px < pages[0]; px++) {
-          this.atlas.remove({
+          yield {
             source: this.source,
             level,
             at: [grid[0] * pages[0] + px, grid[1] * pages[1] + py, grid[2] * pages[2] + pz],
-          });
+          };
         }
+  }
+
+  /** Every page of a chunk, for the coarse scales that are worth holding whole. */
+  private all(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
+    const { data } = chunk;
+    if (data === null) {
+      this.nowhere(level, from, chunk);
+      return;
+    }
+    const size = from.spec.chunkDataSize;
+    const grid = chunk.chunkGridPosition;
+    for (const page of this.pagesOf(level, from, chunk)) {
+      if (this.atlas.has(page)) continue;
+      putPage(this.atlas, this.source, level, page.at, grid, size, data);
+    }
+  }
+
+  /**
+   * A chunk the store does not have is said so at once, whatever its scale: it costs the atlas no
+   * room, and the shader would otherwise ask after every page of it on every frame.
+   */
+  private nowhere(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
+    if (chunk.data !== null) return;
+    for (const page of this.pagesOf(level, from, chunk)) this.atlas.absent(page);
+  }
+
+  private give(level: number, from: VolumeChunkSource, chunk: VolumeChunk) {
+    for (const page of this.pagesOf(level, from, chunk)) this.atlas.remove(page);
   }
 }

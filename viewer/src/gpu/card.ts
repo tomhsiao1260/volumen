@@ -15,13 +15,16 @@ import { RefCounted } from "#src/util/disposable.js";
 import { WatchableValue } from "#src/state/trackable_value.js";
 
 /*
- * The most pixels a card is drawn with along either side.  A board that magnifies a card shows the
- * same data over more of the screen, so drawing more than this adds no detail — it only asks for
- * memory and for a larger copy every frame, which is how a device is lost.
+ * The most pixels a card is drawn with along either side, and per pixel of its own layout.
+ *
+ * A board that magnifies a card shows the same data over more of the screen — the extent a card
+ * shows is fixed by its own zoom — so drawing it with more than twice its layout pixels adds no
+ * detail.  It only asks for memory and for a larger copy every frame, which is how a device is lost.
+ * Looking closer at the data is what the card's own zoom is for; that asks for finer chunks instead.
  */
 const MOST = 2048;
 const MOST_SCALE = 2;
-// How far outside the board a card is still worth fetching for, though not drawing.
+// How far outside the window a card is still worth fetching for, though not drawing.
 const NEAR = "200px";
 
 /** What a view has to give a card: a material to draw with, and a chance to set it up each frame. */
@@ -30,6 +33,23 @@ export interface View {
   // Called once per frame before drawing, with the size it is being drawn at.
   before?(width: number, height: number): void;
   dispose?(): void;
+}
+
+/**
+ * The pixels to draw one of a card's own layout pixels with, given how many pixels of the screen
+ * one of them covers and how large the card is.
+ *
+ * Only ever a power of two: halving and doubling keeps the shape of what is drawn exactly, so the
+ * card's canvas can simply be stretched over it, and leaves the size alone until the magnification
+ * has really changed.  A size that changed with every frame of a zoom reallocated every card's
+ * canvas and the surface sixty times a second, and that is what cost the WebGL context before this.
+ */
+function fitScale(shown: number, layoutSize: number) {
+  let scale = 2 ** Math.round(Math.log2(Math.max(shown, 1e-3)));
+  scale = Math.min(scale, MOST_SCALE);
+  const most = MOST / layoutSize;
+  while (scale > most && scale > 1 / 8) scale /= 2;
+  return Math.max(1 / 8, scale);
 }
 
 export class CardView extends RefCounted implements Drawn {
@@ -75,7 +95,8 @@ export class CardView extends RefCounted implements Drawn {
         : this.nearScreen
           ? 0
           : Number.NEGATIVE_INFINITY;
-      device.redraw();
+      // A card whose visibility changed has moved, so its size is worth measuring again.
+      device.resized();
     };
     const watch = (options: IntersectionObserverInit, set: (seen: boolean) => void) => {
       const observer = new IntersectionObserver((entries) => {
@@ -87,6 +108,10 @@ export class CardView extends RefCounted implements Drawn {
     };
     watch({}, (seen) => (this.onScreen = seen));
     watch({ rootMargin: NEAR }, (seen) => (this.nearScreen = seen));
+    // A card resized is a card to measure again; one merely moved is reported by the board.
+    const resized = new ResizeObserver(() => device.resized());
+    resized.observe(element);
+    this.registerDisposer(() => resized.disconnect());
 
     device.add(this);
     this.registerDisposer(() => device.remove(this));
@@ -103,13 +128,18 @@ export class CardView extends RefCounted implements Drawn {
     const wide = Math.max(1, this.element.offsetWidth);
     const tall = Math.max(1, this.element.offsetHeight);
     /*
-     * Drawn with a few more pixels than it is laid out with on a dense screen, which keeps it sharp
-     * without asking for four times the data — and never more than `MOST` along a side.
+     * How many pixels of the screen one of the card's own pixels covers: the board's magnification
+     * (`getBoundingClientRect` is scaled by a CSS transform on an ancestor and `offsetWidth` is not)
+     * times the screen's own density.  Drawn with that many, within the limits above, a card is as
+     * sharp as the screen shows it and no sharper.
      */
-    const room = MOST / Math.max(wide, tall);
-    const scale = Math.min(MOST_SCALE, Math.max(1, room));
+    const { width } = this.element.getBoundingClientRect();
+    const shown = (width / wide) * (window.devicePixelRatio || 1);
+    const scale = fitScale(shown, Math.max(wide, tall));
     this.renderViewport.width = Math.round(wide * scale);
     this.renderViewport.height = Math.round(tall * scale);
+    // It is the pixels actually drawn that count, so that a card drawn with fewer of them than it
+    // is shown with still shows the same data (see `RenderViewport`).
     this.renderViewport.pixelScale = scale;
   }
 
@@ -140,18 +170,12 @@ export class CardView extends RefCounted implements Drawn {
     /*
      * And copied out before this task ends.  A WebGPU canvas is presented when the task does, so a
      * copy after an await would be copying a canvas that has already gone.
+     *
+     * From the top-left of the surface, which is where the card was just drawn.  The renderer this
+     * replaces read from `surface.height - height` instead, because WebGL counts its rows from the
+     * bottom; WebGPU's canvas has its origin at the top-left.
      */
     context.clearRect(0, 0, width, height);
-    /*
-     * From the top-left of the surface, which is where the card was just drawn.
-     *
-     * The renderer this replaces read from `surface.height - height` instead, because WebGL counts
-     * its rows from the bottom and a viewport at the origin therefore lands at the TOP of the
-     * canvas.  WebGPU's canvas has its origin at the top-left, so a card smaller than the surface —
-     * which is sized to the largest card on the board — was being copied out of a region it had
-     * never drawn into.  Measured: two thirds of a cut card had papyrus on it and the rest was
-     * empty, in every frame, whatever was loaded.
-     */
     context.drawImage(device.surface, 0, 0);
   }
 }

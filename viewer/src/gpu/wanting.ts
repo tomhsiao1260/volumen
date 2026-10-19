@@ -16,7 +16,7 @@ import { ChunkState } from "#src/chunk_manager/base.js";
 import type { ChunkManager } from "#src/chunk_manager/frontend.js";
 import { SURFACE_VIEW_RPC_ID, SURFACE_VIEW_WANT_RPC_ID } from "#src/render/base.js";
 import type { VolumeChunkSource } from "#src/render/frontend.js";
-import type { RenderLayer } from "#src/render/renderlayer.js";
+import type { RenderLayer } from "#src/render/layer.js";
 import type { WatchableValueInterface } from "#src/state/trackable_value.js";
 import { RefCounted } from "#src/util/disposable.js";
 import { SharedWatchableValue } from "#src/worker/shared_watchable_value.js";

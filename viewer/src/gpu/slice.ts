@@ -18,10 +18,16 @@ import { Fn, If, float, uint, uniform, uv, vec3, vec4 } from "three/tsl";
 import type { View } from "#src/gpu/card.js";
 import type { scanOf } from "#src/gpu/sample.js";
 
-/** One scale of a source: where it sits in the list, and how many full-resolution voxels a voxel is. */
+/**
+ * One scale of a source: where it sits in the list, how many full-resolution voxels a voxel is, what
+ * a voxel the store never held is worth, as a fraction of one, and how many voxels of its own it has
+ * each way (x, y, z) — beyond which there is padding in the store's last chunk, and nothing to draw.
+ */
 export interface Scale {
   level: number;
   factor: number;
+  fill: number;
+  upper: [number, number, number];
 }
 
 /**
@@ -39,8 +45,19 @@ export interface Looking {
   // One pixel to the right, and one pixel down.
   right: [number, number, number];
   down: [number, number, number];
+  /*
+   * The finest scale worth drawing at this zoom, as the asking chose it (`filterVisibleSources`).
+   *
+   * A finer page that happens to be resident — fetched for another card, or for this one before it
+   * zoomed out — is passed over.  Drawing it would be sharper where it is and no sharper where it is
+   * not, and a card half of one scale and half of another has a seam down it that moves as the
+   * atlas turns over.  The renderer before this one drew only the scales the asking chose, and so
+   * does this.
+   */
+  finest: number;
 }
 
+// What a pixel no scale can answer for yet is drawn as: the grey the renderer before this cleared to.
 const MISSING = 0.5;
 
 /**
@@ -59,6 +76,7 @@ export function sliceOf(
   const down = uniform(new THREE.Vector3(0, 1, 0));
   // Half the card in pixels, so a place is `at + right·x + down·y` with x, y in ±this.
   const half = uniform(new THREE.Vector2());
+  const finest = uniform(0);
 
   const material = new THREE.MeshBasicNodeMaterial();
   material.transparent = false;
@@ -71,8 +89,15 @@ export function sliceOf(
     const found = float(0).toVar();
     for (const scale of scales) {
       // Finest first, and the first that answers wins; a coarser one only fills what is missing.
-      If(found.equal(0), () => {
-        const got = scan.at(uint(source), uint(scale.level), float(scale.factor), place);
+      If(found.equal(0).and(float(scale.level).greaterThanEqual(finest)), () => {
+        const got = scan.at(
+          uint(source),
+          uint(scale.level),
+          float(scale.factor),
+          float(scale.fill),
+          vec3(...scale.upper),
+          place,
+        );
         If(got.y.greaterThan(0), () => {
           grey.assign(got.x);
           found.assign(1);
@@ -88,6 +113,7 @@ export function sliceOf(
       at.value.set(looking.at[0], looking.at[1], looking.at[2]);
       right.value.set(looking.right[0], looking.right[1], looking.right[2]);
       down.value.set(looking.down[0], looking.down[1], looking.down[2]);
+      finest.value = looking.finest;
     },
     before(width: number, height: number) {
       // Worked out here because only now is the size the card is actually drawn at known.

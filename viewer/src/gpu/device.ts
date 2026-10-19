@@ -7,10 +7,10 @@
  * wrong twice over: a browser allows only a handful of contexts, and nothing on one device is
  * visible to another — every card would hold its own copy of every chunk.
  *
- * Measured in the spike (`client/spike.html`): three cards drawn and copied out inside one task all
- * come out right, so the scheme survives the move from WebGL to WebGPU unchanged.  That matters,
- * because WebGPU presents a canvas at the END of the current task — the copy has to happen before
- * the task yields, which is what `draw` below enforces by doing all of it in one go.
+ * Measured before this was built: three cards drawn and copied out inside one task all come out
+ * right, so the scheme survives the move from WebGL to WebGPU unchanged.  That matters, because
+ * WebGPU presents a canvas at the END of the current task — the copy has to happen before the task
+ * yields, which is what `draw` below enforces by doing all of it in one go.
  *
  * Two things here are deliberate and easy to lose:
  *
@@ -20,7 +20,8 @@
  *     device and the `GPUTexture` behind a three.js texture are reachable.
  *   - Everything that can fail quietly is made to speak.  A WebGPU call that is invalid does not
  *     throw: it goes to an error scope and the operation does nothing, which on a canvas shows as
- *     the frame BEFORE it — the spike was fooled by exactly that twice before error scopes went in.
+ *     the frame BEFORE it — which fooled the first version of this exactly twice before error
+ *     scopes went in.
  */
 import * as THREE from "three/webgpu";
 import type { RenderViewport } from "#src/render/base.js";
@@ -54,6 +55,8 @@ export class Device extends RefCounted {
   readonly gpu: GPUDevice;
 
   readonly lost = new NullarySignal();
+  /** Dispatched as a frame starts drawing, before any card is measured. */
+  readonly frameStarted = new NullarySignal();
   /*
    * Once the device is gone every texture and pipeline belongs to a device that is gone, so any
    * further call only produces errors — thousands of them, since drawing is driven by animation
@@ -154,7 +157,7 @@ export class Device extends RefCounted {
    * WebGPU does not throw for an invalid call — a buffer written with the wrong size, a texture
    * laid out wrongly, a binding that does not fit.  Each goes to an error scope and the operation
    * quietly does nothing, which here would be a card showing the frame before it and no sign of
-   * why.  The spike was fooled by exactly that, twice.
+   * why.
    */
   async checked<T>(what: () => T, saying: string): Promise<T> {
     this.gpu.pushErrorScope("validation");
@@ -175,6 +178,11 @@ export class Device extends RefCounted {
     this.cards.delete(card);
   }
 
+  /** The cards being drawn, for whoever has to ask them all something. */
+  get drawing(): Iterable<Card> {
+    return this.cards;
+  }
+
   /** Says that some card's size may have changed, so every card measures itself again. */
   resized() {
     this.sized++;
@@ -186,16 +194,15 @@ export class Device extends RefCounted {
   );
 
   /**
-   * One frame: measure every card, size the surface once to the largest, then draw and copy them
-   * one at a time.
+   * One frame: measure every card, then draw and copy them one at a time.
    *
    * All of it in one task, with nothing awaited.  A WebGPU canvas is presented when the task ends,
    * so a copy that happened after an await would be copying a canvas that had already gone.
    */
   private draw() {
     if (this.gone) return;
+    this.frameStarted.dispatch();
     const drawing: Card[] = [];
-    let width = 0, height = 0;
     for (const card of this.cards) {
       card.measure();
       if (card.visibility.value === Number.NEGATIVE_INFINITY) {
@@ -206,12 +213,8 @@ export class Device extends RefCounted {
       const seen = card.renderViewport;
       if (seen.width === 0 || seen.height === 0) continue;
       drawing.push(card);
-      width = Math.max(width, seen.width);
-      height = Math.max(height, seen.height);
     }
     if (drawing.length === 0) return;
-    void width;
-    void height;
     for (const card of drawing) card.draw();
     this.drawn?.();
   }

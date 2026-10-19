@@ -5,8 +5,13 @@
  *
  * The worker decides which chunks to load and where they should live (see
  * `chunk_manager/backend.ts`).  It sends each change as a `Chunk.update` message, which is queued
- * here and applied in time slices: new chunks arrive with their data, are uploaded to the GPU,
- * freed from the GPU, or deleted once expired.
+ * here and applied in time slices: new chunks arrive with their data, are handed to the GPU, taken
+ * back from it, or deleted once expired.
+ *
+ * Nothing here knows what a GPU is.  "On the GPU" is a state a chunk is in, and what happens when a
+ * chunk enters or leaves it is the chunk's own business (`render/frontend.ts`): the one renderer
+ * there is puts pages of it in an atlas when they are asked for, and takes them out when the chunk
+ * leaves.  The queue only keeps the count.
  */
 
 import type { Capacity } from "#src/chunk_manager/base.js";
@@ -20,7 +25,6 @@ import { SharedWatchableValue } from "#src/worker/shared_watchable_value.js";
 import { WatchableValue } from "#src/state/trackable_value.js";
 import type { Borrowed } from "#src/util/disposable.js";
 import { NullarySignal } from "#src/util/signal.js";
-import type { GL } from "#src/webgl/context.js";
 import type { RPC } from "#src/worker/worker_rpc.js";
 import {
   registerRPC,
@@ -37,11 +41,11 @@ export class Chunk {
   state = ChunkState.SYSTEM_MEMORY;
   constructor(public source: ChunkSource) {}
 
-  copyToGPU(_gl: GL) {
+  copyToGPU() {
     this.state = ChunkState.GPU_MEMORY;
   }
 
-  freeGPUMemory(_gl: GL) {
+  freeGPUMemory() {
     this.state = ChunkState.SYSTEM_MEMORY;
   }
 }
@@ -63,10 +67,14 @@ export class ChunkQueueManager extends SharedObject {
   enablePrefetch = new WatchableValue(true);
   // Whether the worker logs how many chunks are in each state after every update.
   logStatistics = new WatchableValue(false);
+  /**
+   * Set once the GPU device is gone.  Every chunk on it belongs to a device that no longer exists,
+   * so no update is applied after this: the page builds a new viewer instead.
+   */
+  gone = false;
 
   constructor(
     rpc: RPC,
-    public gl: GL,
     capacities: {
       gpuMemory: Capacity;
       systemMemory: Capacity;
@@ -95,8 +103,7 @@ export class ChunkQueueManager extends SharedObject {
   }
 
   processPendingChunkUpdates() {
-    // Uploading to a context that is gone only produces errors, one per chunk.
-    if (this.gl.isContextLost()) return;
+    if (this.gone) return;
     const deadline =
       this.chunkUpdateDeadline ?? Date.now() + CHUNK_UPDATE_TIME_BUDGET_MS;
     let visibleChunksChanged = false;
@@ -153,12 +160,12 @@ export class ChunkQueueManager extends SharedObject {
       if (newState !== oldState) {
         switch (newState) {
           case ChunkState.GPU_MEMORY:
-            chunk.copyToGPU(this.gl);
+            chunk.copyToGPU();
             visibleChunksChanged = true;
             break;
           case ChunkState.SYSTEM_MEMORY:
             if (oldState === ChunkState.GPU_MEMORY) {
-              chunk.freeGPUMemory(this.gl);
+              chunk.freeGPUMemory();
             }
             break;
           default:
@@ -190,10 +197,6 @@ registerRPC("Chunk.update", function (x) {
 export class ChunkManager extends SharedObject {
   // Chunk sources by key, so that all views of the same data share one source and its chunks.
   private chunkSources = new Map<string, ChunkSource>();
-
-  get gl() {
-    return this.chunkQueueManager.gl;
-  }
 
   constructor(public chunkQueueManager: ChunkQueueManager) {
     super();
@@ -236,14 +239,10 @@ export class ChunkSource extends SharedObject {
     super.initializeCounterpart(rpc, options);
   }
 
-  get gl() {
-    return this.chunkManager.chunkQueueManager.gl;
-  }
-
   deleteChunk(key: string) {
     const chunk = this.chunks.get(key)!;
     if (chunk.state === ChunkState.GPU_MEMORY) {
-      chunk.freeGPUMemory(this.gl);
+      chunk.freeGPUMemory();
     }
     this.chunks.delete(key);
   }

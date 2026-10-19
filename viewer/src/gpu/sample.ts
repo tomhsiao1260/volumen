@@ -47,9 +47,16 @@ const EMPTY = 0xffffffff;
 /**
  * The scan as a TSL function, and the handle for keeping its table up to date.
  *
- * `at(source, level, factor, voxel)` takes a place in FULL-RESOLUTION voxels and the scale to read
- * it at, and answers `(grey, found)` — `found` being 0 where that page is not resident, so a view
- * can try a coarser scale or leave the pixel alone.
+ * `at(source, level, factor, fill, upper, voxel)` takes a place in FULL-RESOLUTION voxels and the
+ * scale to read it at, and answers `(grey, found)` — `found` being 0 where that page is not
+ * resident, so a view can try a coarser scale or leave the pixel alone.  A page the store does not
+ * have IS found, and is `fill`: the volume's own value for a voxel it never stored, as the renderer
+ * before this one drew it.
+ *
+ * `upper` is how many voxels the scale has each way.  Beyond it is the padding of the store's last
+ * chunk — zarr pads every chunk to the same size — and a place there is nothing, not black: a card
+ * past the edge of a scroll used to show the padding of a coarse scale, confidently, where the
+ * renderer before this one clipped its polygons to the volume and showed its clear colour.
  */
 export function scanOf(atlas: Atlas) {
   const table = instancedArray(atlas.table, "uvec4");
@@ -75,17 +82,25 @@ export function scanOf(atlas: Atlas) {
 
   const across = Math.max(1, Math.floor(atlas.texture.image.width / PAGE));
   const side = float(across * PAGE);
+  // The slot that says "this page is nowhere": one past the last real one (`Atlas.absent`).
+  const ABSENT = atlas.absentSlot;
 
   /*
-   * Knuth's multiplicative hash, the same two constants the other side uses.  WGSL's `u32` multiply
+   * A multiplicative hash, the same two constants the other side uses.  WGSL's `u32` multiply
    * wraps, which is what `Math.imul` is doing over there — so the two agree without either of them
    * having to say so.
+   *
+   * The slot is the TOP twelve bits of the product, not the bottom.  The bottom twelve depend only on
+   * the bottom twelve of the key — the page's x and two bits of its y — so every page of a column
+   * through the scroll hashed to one slot, and a card cut along z walked a chain as long as the
+   * scroll is deep and gave up: measured, pages that were resident were asked for again every frame
+   * and never found.
    */
   const hashOf = Fn(([lo, hi]: Num[]) =>
     lo
       .bitXor(hi.mul(uint(0x9e3779b1)))
       .mul(uint(0x85ebca6b))
-      .mod(uint(SLOTS)),
+      .shiftRight(uint(32 - Math.log2(SLOTS))),
   );
 
   /** Where a page sits in the atlas, in voxels, or `-1` in `w` when it is not resident. */
@@ -115,22 +130,29 @@ export function scanOf(atlas: Atlas) {
    * because the scan was held as `R8UI` and integers cannot be filtered; held as `R8` the hardware
    * does it, which is both less code and less work.
    */
-  const at = Fn(([source, level, factor, voxel]: Num[]) => {
-      // Into this scale's own voxels, where a page is `PAGE` of them.
-      const here = voxel.add(0.5).div(factor).sub(0.5);
+  const at = Fn(([source, level, factor, fill, upper, voxel]: Num[]) => {
+      /*
+       * Into this scale's own voxels, where a page is `PAGE` of them — nudged up by a thousandth of
+       * one, so that a place exactly on the boundary between two texels, which every whole-numbered
+       * position is, reads the one at the higher coordinate rather than whichever way the arithmetic
+       * happened to round.  The renderer before this one nudged its chunk positions by the same
+       * amount for the same reason.
+       */
+      const here = voxel.add(0.5).div(factor).sub(0.5 - 1e-3);
       const page = here.div(float(PAGE)).floor();
       const out = vec2(0, 0).toVar();
-      const asked = uint(0).toVar();
       /*
-       * Outside the keys a page can have, there is nothing to ask about — and asking anyway is not
-       * harmless.  A negative coordinate turned into a `u32` wraps to an enormous one, and ten bits
-       * of it are kept, so it lands on some OTHER page's key: a card reaching past the edge of a
-       * scroll would draw a piece of somewhere else entirely, confidently.  Measured on a card one
-       * border-width too wide, which is how this was found.
+       * Outside the volume there is nothing to ask about — and asking anyway is not harmless.  A
+       * negative coordinate turned into a `u32` wraps to an enormous one, and ten bits of it are
+       * kept, so it lands on some OTHER page's key: a card reaching past the edge of a scroll would
+       * draw a piece of somewhere else entirely, confidently.  Measured on a card one border-width
+       * too wide, which is how this was found.  And past `upper` is the padding of the last chunk,
+       * which is not the scroll either.
        */
-      const inRange = page
-        .greaterThanEqual(vec3(0))
+      const inRange = here
+        .greaterThanEqual(vec3(-0.5))
         .all()
+        .and(here.lessThan(upper.sub(0.5)).all())
         .and(page.lessThan(vec3(1024)).all());
       If(inRange, () => {
       const lo = page.x
@@ -142,12 +164,15 @@ export function scanOf(atlas: Atlas) {
       const slot = pageAt(lo, hi).toVar();
       // Not here: say so, once, where whoever fills the atlas will see it.
       If(slot.equal(uint(EMPTY)), () => {
-        asked.assign(1);
         const where = hashOf(lo, hi).mul(uint(2));
         atomicStore(asks.element(where), lo);
         atomicStore(asks.element(where.add(uint(1))), hi);
       });
-      If(slot.notEqual(uint(EMPTY)), () => {
+      // Nowhere, and known to be: the volume's own value for a voxel it never stored.
+      If(slot.equal(uint(ABSENT)), () => {
+        out.assign(vec2(fill, 1));
+      });
+      If(slot.notEqual(uint(EMPTY)).and(slot.notEqual(uint(ABSENT))), () => {
         /*
          * Where that page went, unpacked from its number: pages are laid out x fastest, then y,
          * then z, which is the order `Atlas.cornerOf` lays them out in.
@@ -167,13 +192,17 @@ export function scanOf(atlas: Atlas) {
          * simply the wrong place.  Found by checking a linear volume pixel by pixel; nothing less
          * exact would have shown it.
          *
-         * The clamp keeps both texels the filter touches inside this page.  Without it the filter
-         * reaches into whatever page sits next door in the ATLAS, which is some unrelated part of
-         * the scroll — the one way this scheme can draw a seam, and it draws a bright one.  The cost
-         * is half a voxel of error at a page's own edge, which is the same bargain the renderer
-         * before this one made at a chunk's.
+         * The clamp keeps both texels the filter touches inside this page, and inside the volume.
+         * Without it the filter reaches into whatever page sits next door in the ATLAS, which is
+         * some unrelated part of the scroll — the one way this scheme can draw a seam, and it draws
+         * a bright one — or into the padding of the volume's last chunk.  The cost is half a voxel
+         * of error at a page's own edge, which is the same bargain the renderer before this one made
+         * at a chunk's.
          */
-        const inside = here.sub(page.mul(float(PAGE))).clamp(0, PAGE - 1);
+        const corner0 = page.mul(float(PAGE));
+        const inside = here
+          .sub(corner0)
+          .clamp(vec3(0), upper.sub(1).sub(corner0).min(vec3(PAGE - 1)));
         const got = texture3D(atlas.texture, corner.add(inside).add(0.5).div(side));
         out.assign(vec2(got.r, 1));
       });

@@ -14,7 +14,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { Point, ViewOrientation } from "viewer";
+import type { Point, View, ViewOrientation } from "viewer";
 import { getLasagna } from "../api/lasagna";
 import { sourceLabel, sourceMicron } from "../api/sources";
 import type { Source } from "../api/sources";
@@ -41,15 +41,6 @@ const AXES: Record<ViewOrientation, [number, number, number]> = {
   xz: [2, 0, 1],
   yz: [0, 1, 2],
 };
-
-/*
- * Whether this session draws with the renderer being built to replace the old one: `?gpu2=yes`.
- *
- * Both at once is not a state to be in — two devices, two surfaces, and a card of each kind drawing
- * into a canvas the other also writes.  So the flag is one flag for the whole page, and it is off
- * until the new renderer draws every kind of card correctly.
- */
-const ON_GPU2 = new URLSearchParams(window.location.search).get("gpu2") === "yes";
 
 /*
  * The line where a surface card's sheet cuts this slice: a dark stroke under a bright one, so that it
@@ -270,55 +261,21 @@ export function CardView({
     };
   }, [menu]);
 
-  // The viewer's side of the card: one view, for as long as it shows this scan in this plane.
+  /*
+   * The viewer's side of the card: one view, for as long as it shows this scan in this plane.
+   *
+   * Added once two things are there — the GPU device, which the page starts once, and the volume's
+   * scales, which the view's chunks are asked from.  Where it is looking is then read from the
+   * navigation each frame, inside the viewer, out of the same matrix its chunks are asked for, so
+   * nothing has to be pushed in from here.
+   */
   useEffect(() => {
     if (sourceId === null || slice.current === null) return;
     const volume = session.volumes.get(sourceId);
     const navigation = session.group(groupId).navigationFor(volume);
-    /*
-     * The renderer being built to replace the one below (`?gpu2=yes`).
-     *
-     * It draws the same scan from the same chunks — the asking and the downloading are shared — but
-     * through one atlas and a TSL function instead of a texture and a draw call per chunk.  Kept
-     * side by side only while the two are being held against each other; the old one goes when they
-     * agree.
-     */
-    if (ON_GPU2) {
-      let card: { dispose(): void; changed(): void } | undefined;
-      let current2 = true;
-      session.viewer.startGpu().then((could) => {
-        if (!current2 || !could || slice.current === null) return;
-        volume.loaded.then(() => {
-          if (!current2 || slice.current === null) return;
-          // Where it is looking is read from the navigation each frame, inside the viewer, out of
-          // the same matrix its chunks are asked for — so nothing has to be pushed in from here.
-          card = session.viewer.addSliceView(slice.current, { volume, orientation, navigation });
-          setLoaded(true);
-          card.changed();
-        });
-      });
-      setFailed(false);
-      setLoaded(false);
-      setCentre(navigation.position);
-      const off2 = navigation.onViewChanged(() => {
-        setCentre(navigation.position);
-        card?.changed();
-        onLooked();
-      });
-      return () => {
-        current2 = false;
-        off2();
-        card?.dispose();
-      };
-    }
-    const added = session.viewer.addView(slice.current, {
-      volume,
-      orientation,
-      navigation,
-    });
-    // The view navigates only while Alt is held; every other press and wheel belongs to the board,
-    // which moves the card or the board itself.
-    added.handleInput = (event) => event.altKey;
+    let view: View | undefined;
+    let unwatch: (() => void) | undefined;
+    let current = true;
     setFailed(false);
     setLoaded(false);
     setCentre(navigation.position);
@@ -326,12 +283,19 @@ export function CardView({
       setCentre(navigation.position);
       onLooked();
     });
-    const unwatch = session.watchPointer(added, setPointer);
     // Asked now, so that the menu knows whether a surface can be opened by the time it is opened.
     getLasagna(sourceId).catch(() => {});
-    let current = true;
-    volume.loaded.then(
-      () => current && setLoaded(true),
+    Promise.all([session.viewer.ready, volume.loaded]).then(
+      ([could]) => {
+        // A browser with no WebGPU is told so once, by the board; the card has nothing to add.
+        if (!current || !could || slice.current === null) return;
+        view = session.viewer.addView(slice.current, { volume, orientation, navigation });
+        // The view navigates only while Alt is held; every other press and wheel belongs to the
+        // board, which moves the card or the board itself.
+        view.handleInput = (event) => event.altKey;
+        unwatch = session.watchPointer(view, setPointer);
+        setLoaded(true);
+      },
       (error) => {
         if (!current) return;
         console.error("Failed to load the volume:", error);
@@ -341,9 +305,9 @@ export function CardView({
     return () => {
       current = false;
       off();
-      unwatch();
+      unwatch?.();
       setPointer(undefined);
-      added.dispose();
+      view?.dispose();
     };
     // `onLooked` is left out on purpose: it only schedules a save, and a new one every render would
     // take the view apart and add it again.

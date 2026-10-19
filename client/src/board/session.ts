@@ -3,9 +3,9 @@
  * linked cards.  These have lifetimes of their own — a volume is downloaded once however often a
  * card re-renders — so they live in a ref rather than in state.
  *
- * A lost WebGL context means a whole new session: everything above belonged to the viewer that is
- * gone.  `Session.replace` builds one, remembering where each group was looking so that the cards
- * come back as they were.
+ * A lost GPU device means a whole new session: everything above belonged to the viewer that is
+ * gone.  `App` builds one, remembering where each group was looking so that the cards come back as
+ * they were.
  */
 
 import type { Point, View } from "viewer";
