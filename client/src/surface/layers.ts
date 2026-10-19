@@ -40,8 +40,8 @@ export interface Cut {
   // The piece, as the engine names it: cards of one piece share a march and so share coordinates.
   piece: string;
   plane: "uw" | "vw";
-  // Where along the axis the cut does NOT show it is taken, 0 to 1 across the grid.
-  pin: number;
+  // Where the cut is taken: a node of the plane's lattice (`ShowRequest.along`).
+  along: [number, number];
 }
 
 const cuts = new Map<string, Cut>();

@@ -25,6 +25,7 @@ import type { NormalField, Vec3 } from "./field";
 import type { ChainSaid } from "./types";
 // Positions and directions are full-resolution voxels in (z, y, x) order.
 const add = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const mul = (a: Vec3, s: number): Vec3 => [a[0] * s, a[1] * s, a[2] * s];
 const dot = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const unit = (a: Vec3): Vec3 => mul(a, 1 / (Math.hypot(a[0], a[1], a[2]) || 1));
@@ -102,6 +103,47 @@ export interface Walk extends PatchGrid {
   n0: Vec3;
   right: Vec3;
   down: Vec3;
+  // The point of the tangent plane under the middle of the grid (`Laid.origin`).
+  origin: Vec3;
+}
+
+/**
+ * Where a piece is laid: a tangent plane, and what the solve on it may start from.
+ *
+ * Every piece a card builds is laid on the SAME plane as the one before it, as long as the sheet
+ * has not leaned too far from it.  Moving along the papyrus slides the grid across the plane rather
+ * than standing a new plane at the place reached, and moving across the sheets keeps the grid where
+ * it is and starts the solve from the sheet reached.  So one (u, v) is one place for as long as the
+ * plane lasts, and a card that moves does not jump: the pieces this replaces were each solved afresh
+ * from their own tangent plane, and two planes do not map onto each other by arithmetic.
+ */
+export interface Laid {
+  // The point of the plane under the middle of the grid.
+  origin: Vec3;
+  /*
+   * The plane's normal, where the plane is already standing — or nothing, for a first piece, and
+   * the normal is read from the field at `origin`, turned to agree with `towards`.
+   */
+  normal?: Vec3;
+  towards: Vec3;
+  prior?: Prior;
+}
+
+/**
+ * The heights of a grid solved before on the same plane, for the solve to continue from.
+ *
+ * A piece slid along the papyrus starts from the piece it slid from; one rebased across the sheets
+ * starts from the sheet it was rebased to.  Without one, the middle node is held at height zero —
+ * the seed is on the sheet, and that is the whole of what is known.
+ */
+export interface Prior {
+  // Where this grid sits against the prior's, in nodes: node (i, j) here is the prior's (i + di, j + dj).
+  di: number;
+  dj: number;
+  nu: number;
+  nv: number;
+  // Along the plane's normal, NaN where the prior had nothing.
+  H: Float64Array;
 }
 
 export interface Patch extends PatchGrid {
@@ -117,6 +159,8 @@ export interface Patch extends PatchGrid {
   down: Vec3;
   // The normal at the base's centre: the direction w grows in.
   normal: Vec3;
+  // The point of the plane under the middle of the grid, which the plane's (u, v) are counted from.
+  origin: Vec3;
   /*
    * How many places a person's annotations came to, once each chain's clicks were joined into a line,
    * and how far one of them reached.  Kept because they are the two numbers that say whether the fit
@@ -133,7 +177,7 @@ export interface Patch extends PatchGrid {
  * field's normals in the least-squares sense (SOR), resampling the normals where the surface moved
  * to a few times over.
  */
-function baseSurface(field: NormalField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
+function baseSurface(field: NormalField, p0: Vec3, n0: Vec3, grid: PatchGrid, prior?: Prior) {
   const { nu, nv, hu, hv } = grid;
   const { right, down } = frame(n0);
   const ci = (nv - 1) / 2, cj = (nu - 1) / 2;
@@ -143,7 +187,56 @@ function baseSurface(field: NormalField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
   const position = (i: number, j: number, h: number) =>
     add(add(p0, mul(right, (j - cj) * hu)), add(mul(down, (i - ci) * hv), mul(n0, h)));
 
+  /*
+   * What is known before anything is read, and the one node held through the solve.
+   *
+   * Without a prior it is the middle node, at zero.  With one it is every node the prior knew, and
+   * the one of them nearest the middle is the one held — at the height it was given, so that the
+   * surface solved here is the surface it came from, continued.
+   */
+  const known = new Uint8Array(count);
+  let pin = ci * nu + cj;
+  let nearest = Infinity;
+  if (prior !== undefined) {
+    for (let i = 0; i < nv; i++)
+      for (let j = 0; j < nu; j++) {
+        const pi = i + prior.di, pj = j + prior.dj;
+        if (pi < 0 || pj < 0 || pi >= prior.nv || pj >= prior.nu) continue;
+        const h = prior.H[pi * prior.nu + pj];
+        if (Number.isNaN(h)) continue;
+        const k = i * nu + j;
+        H[k] = h;
+        known[k] = 1;
+        const far = (i - ci) ** 2 + (j - cj) ** 2;
+        if (far < nearest) {
+          nearest = far;
+          pin = k;
+        }
+      }
+  }
+  if (nearest === Infinity) known[pin] = 1;
+  /*
+   * Outward from what is known, in four sweeps — right, left, down, up — each node taking from the
+   * one before it: its height copied, before the slopes are read, so that they are read near the
+   * surface rather than on the plane; or the slope integrated across, once they have been.  With
+   * only the middle known that is the starting guess there has always been, exactly: the slopes
+   * integrated along the middle row, then down every column.
+   */
+  const spread = (integrate: boolean) => {
+    const done = known.slice();
+    const take = (k: number, from: number, g: Float64Array, h: number) => {
+      if (done[k] || !done[from]) return;
+      H[k] = integrate ? H[from] + (h * (g[from] + g[k])) / 2 : H[from];
+      done[k] = 1;
+    };
+    for (let i = 0; i < nv; i++) for (let j = 1; j < nu; j++) take(i * nu + j, i * nu + j - 1, gu, hu);
+    for (let i = 0; i < nv; i++) for (let j = nu - 2; j >= 0; j--) take(i * nu + j, i * nu + j + 1, gu, -hu);
+    for (let i = 1; i < nv; i++) for (let j = 0; j < nu; j++) take(i * nu + j, (i - 1) * nu + j, gv, hv);
+    for (let i = nv - 2; i >= 0; i--) for (let j = 0; j < nu; j++) take(i * nu + j, (i + 1) * nu + j, gv, -hv);
+  };
+
   for (let pass = 0; pass < 3; pass++) {
+    if (pass === 0) spread(false);
     for (let i = 0; i < nv; i++)
       for (let j = 0; j < nu; j++) {
         const k = i * nu + j;
@@ -158,20 +251,12 @@ function baseSurface(field: NormalField, p0: Vec3, n0: Vec3, grid: PatchGrid) {
         gv[k] = Math.max(-2, Math.min(2, -dot(n, down) / cn));
         wt[k] = 1;
       }
-    if (pass === 0) {
-      // A starting guess: the slopes integrated along the middle row, then down every column.
-      for (let j = cj + 1; j < nu; j++) H[ci * nu + j] = H[ci * nu + j - 1] + (hu * (gu[ci * nu + j - 1] + gu[ci * nu + j])) / 2;
-      for (let j = cj - 1; j >= 0; j--) H[ci * nu + j] = H[ci * nu + j + 1] - (hu * (gu[ci * nu + j + 1] + gu[ci * nu + j])) / 2;
-      for (let j = 0; j < nu; j++) {
-        for (let i = ci + 1; i < nv; i++) H[i * nu + j] = H[(i - 1) * nu + j] + (hv * (gv[(i - 1) * nu + j] + gv[i * nu + j])) / 2;
-        for (let i = ci - 1; i >= 0; i--) H[i * nu + j] = H[(i + 1) * nu + j] - (hv * (gv[(i + 1) * nu + j] + gv[i * nu + j])) / 2;
-      }
-    }
+    if (pass === 0) spread(true);
     for (let sweep = 0; sweep < 120; sweep++) {
       for (let i = 0; i < nv; i++)
         for (let j = 0; j < nu; j++) {
-          if (i === ci && j === cj) continue;
           const k = i * nu + j;
+          if (k === pin) continue;
           let num = 0, den = 0, w: number;
           if (j + 1 < nu) (w = Math.min(wt[k], wt[k + 1])), (num += w * (H[k + 1] - (hu * (gu[k] + gu[k + 1])) / 2)), (den += w);
           if (j > 0) (w = Math.min(wt[k], wt[k - 1])), (num += w * (H[k - 1] + (hu * (gu[k] + gu[k - 1])) / 2)), (den += w);
@@ -843,8 +928,7 @@ export const walkReach = (K: number, per: number) => (K + MARGIN) * per;
 
 export async function walkOut(
   field: NormalField,
-  seed: Vec3,
-  towards: Vec3,
+  laid: Laid,
   grid: PatchGrid,
   K = 3,
   per = 8,
@@ -874,12 +958,13 @@ export async function walkOut(
   ) => Promise<{ P: Float32Array; A: Float32Array } | undefined>,
 ): Promise<Walk | undefined> {
   // Where the person pressed, not the nearest sheet to it: moving the seed is already a decision
-  // about which sheet they meant, and this fit makes no such decisions.
-  const n0 = normalAt(field, seed, towards);
+  // about which sheet they meant, and this fit makes no such decisions.  A plane already standing
+  // keeps its normal, which is what makes it the same plane.
+  const n0 = laid.normal ?? normalAt(field, laid.origin, laid.towards);
   if (n0 === null) return undefined;
 
   const apart = spacingSaid(field, chains, n0, spacing);
-  const { X, right, down } = baseSurface(field, seed, n0, grid);
+  const { X, right, down } = baseSurface(field, laid.origin, n0, grid, laid.prior);
   /*
    * Walked once, and further than the piece needs: the room either side is what a correction slides
    * into.
@@ -887,7 +972,7 @@ export async function walkOut(
   const reach = walkReach(K, per);
   const marched =
     (await elsewhere?.(X, n0, reach, per, apart)) ?? walk(field, X, n0, grid, reach, per, apart);
-  return { ...grid, ...marched, reach, per, apart, n0, right, down };
+  return { ...grid, ...marched, reach, per, apart, n0, right, down, origin: laid.origin };
 }
 
 /**
@@ -913,7 +998,7 @@ export function buildPatch(
    */
   micron = 2.4,
 ): Patch {
-  const { nu, nv, hu, hv, reach, per, apart, n0, right, down } = walked;
+  const { nu, nv, hu, hv, reach, per, apart, n0, right, down, origin } = walked;
   const grid: PatchGrid = { nu, nv, hu, hv };
   const count = nu * nv;
   {
@@ -974,7 +1059,7 @@ export function buildPatch(
   };
 
   const said = { places: 0, reach: 0 };
-  const plain: Patch = { ...grid, K, per, ...table(reach, walked), right, down, normal: n0, said };
+  const plain: Patch = { ...grid, K, per, ...table(reach, walked), right, down, normal: n0, origin, said };
   if (chains.length === 0) return plain;
 
   /*
@@ -992,7 +1077,7 @@ export function buildPatch(
   said.places = want.length;
   said.reach = apart * REACH_OF_WRAP;
   const shift = bend(grid, want, said.reach, apart, micron);
-  return { ...grid, K, per, ...table(reach, walked, shift), right, down, normal: n0, said };
+  return { ...grid, K, per, ...table(reach, walked, shift), right, down, normal: n0, origin, said };
   }
 }
 
@@ -1148,9 +1233,9 @@ export function nearestOn(patch: Patch, at: Vec3) {
    *
    * The piece is a height field over one tangent plane — that is what `baseSurface` solves — so a
    * place in the scroll projects straight onto the grid: how far along `right` it is, in cells, is
-   * which column, and how far along `down` is which row.  The plane's own origin is in the table
-   * already: `baseSurface` pins the middle node's height at zero, so the middle of the base layer IS
-   * that origin, and nothing has to be carried alongside the march to say so.
+   * which column, and how far along `down` is which row.  Measured from the middle node of the base
+   * layer, which sits over the middle of the grid at whatever height the solve gave it — and height
+   * is along the normal, which the projection cannot see.
    *
    * This replaces a spatial hash over the whole table — a quarter of a million points indexed to
    * answer a few hundred questions.  It is also more honest: a piece can come round close to itself,
@@ -1217,6 +1302,68 @@ export function nearestOn(patch: Patch, at: Vec3) {
       if (!moved) break;
     }
   return { w, gi, gj, away };
+}
+
+/**
+ * Sheet `w` of the piece as a height field over its plane, for the next piece to start from: slid
+ * by (`di`, `dj`) nodes, or rebased onto that sheet with no slide at all.
+ *
+ * The base sheet is the solve itself, so this is exact there.  Any other sheet is where the march
+ * ended, which is some way across the plane from the node it started at — the normals converge
+ * where the papyrus is concave — so its height is read at the node that walked there rather than
+ * at the node under it.  That is wrong by the drift times the slope, which is a starting guess the
+ * solve then corrects, and not a place anything is drawn from.
+ */
+export function priorOf(patch: Patch, w: number, di: number, dj: number): Prior {
+  const { nu, nv, normal, origin } = patch;
+  const grid = layerGrid(patch, w);
+  const H = new Float64Array(nu * nv);
+  for (let node = 0; node < nu * nv; node++) {
+    const o = node * 3;
+    H[node] = Number.isNaN(grid[o])
+      ? NaN
+      : (grid[o] - origin[0]) * normal[0] + (grid[o + 1] - origin[1]) * normal[1] + (grid[o + 2] - origin[2]) * normal[2];
+  }
+  return { di, dj, nu, nv, H };
+}
+
+/** The prior's height nearest to node (`i`, `j`) of a grid laid against it; zero if it knows nothing. */
+export function heightNear(prior: Prior, i: number, j: number) {
+  let best = Infinity, height = 0;
+  for (let pi = 0; pi < prior.nv; pi++)
+    for (let pj = 0; pj < prior.nu; pj++) {
+      const h = prior.H[pi * prior.nu + pj];
+      if (Number.isNaN(h)) continue;
+      const far = (pi - prior.di - i) ** 2 + (pj - prior.dj - j) ** 2;
+      if (far < best) {
+        best = far;
+        height = h;
+      }
+    }
+  return height;
+}
+
+/**
+ * How far the sheet leans from the plane the piece is laid on at node (`gi`, `gj`) of its base, in
+ * radians — NaN where the base has no sheet there.  Past a certain lean the plane is no longer a
+ * plane worth keeping: its slopes saturate (`baseSurface` clamps them at two), and the papyrus
+ * is drawn foreshortened by the cosine.
+ */
+export function leanAt(patch: Patch, gi: number, gj: number) {
+  const { nu, nv, K, per, P, normal } = patch;
+  const count = nu * nv;
+  // At the nearest node with a neighbour either side — asked about a node past the edge, which is
+  // where a grid is going, it answers for the edge.
+  gi = Math.min(nv - 2, Math.max(1, Math.round(gi)));
+  gj = Math.min(nu - 2, Math.max(1, Math.round(gj)));
+  const at = (i: number, j: number): Vec3 | undefined => {
+    const o = (K * per * count + i * nu + j) * 3;
+    return Number.isNaN(P[o]) ? undefined : [P[o], P[o + 1], P[o + 2]];
+  };
+  const l = at(gi, gj - 1), r = at(gi, gj + 1), u = at(gi - 1, gj), d = at(gi + 1, gj);
+  if (l === undefined || r === undefined || u === undefined || d === undefined) return NaN;
+  const n = unit(cross(sub(r, l), sub(d, u)));
+  return Math.acos(Math.min(1, Math.abs(dot(n, normal))));
 }
 
 /**

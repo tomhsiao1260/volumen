@@ -60,9 +60,9 @@ class SurfaceEngine {
     return this.pieces.get(id);
   }
 
-  show(id: string, w: number, plane: SurfacePlane, pin?: number) {
+  show(id: string, w: number, plane: SurfacePlane, along?: [number, number]) {
     this.planes.set(id, plane);
-    this.post({ type: "show", id, w, plane, pin });
+    this.post({ type: "show", id, w, plane, along });
     this.alongWith(id, w);
   }
 

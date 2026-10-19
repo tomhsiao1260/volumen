@@ -54,8 +54,10 @@ type Num = any;
 /**
  * The window a card has on the flattening.
  *
- * `at`, `right` and `down` are in the march's own units: a whole number along u or v is a grid
- * point, and a whole number along w is a sheet.
+ * `at`, `right` and `down` are in the plane's own units: a whole number along u or v is a node of
+ * the plane's lattice, counted from where the plane was stood, and a whole number along w is a
+ * sheet.  Which piece of the plane has been marched, and where its grid sits, is the march's own
+ * business (`Said.lattice`).
  */
 export interface Window {
   at: [number, number, number];
@@ -181,7 +183,20 @@ export function surfaceOf(
       const w = across.equal(0).select(window_.z, windingAt(b));
       // Where that point sits in the table, which holds a sample every eighth of a sheet.
       const layer = w.add(said.K).mul(said.per);
-      const inside = layer.greaterThanEqual(0).and(layer.lessThanEqual(said.layers - 1));
+      /*
+       * And nothing where the table has nothing: off the end of the stack, and off the EDGE of the
+       * piece.  The texture would clamp to its edge instead and draw the last row again for every
+       * row past it — a cut swept past the piece it was marched on showed the same row over and
+       * over, standing still under a moving hand, and then jumped when the next piece arrived.
+       * An honest blank fills in when the piece does.
+       */
+      const inside = layer
+        .greaterThanEqual(0)
+        .and(layer.lessThanEqual(said.layers - 1))
+        .and(window_.x.greaterThanEqual(0))
+        .and(window_.x.lessThanEqual(said.nu - 1))
+        .and(window_.y.greaterThanEqual(0))
+        .and(window_.y.lessThanEqual(said.nv - 1));
       const place = marchAt(vec3(window_.x, window_.y, layer.clamp(0, said.layers - 1))).toVar();
 
       /*
@@ -223,6 +238,9 @@ export function surfaceOf(
        * branch that was not taken.
        */
       const out = vec4(grey, grey, grey, found).toVar();
+      // What the table has nothing for stays blank in every mode, so that a measurement of where
+      // the picture is does not read the texture's clamped edge as papyrus.
+      const there = inside.select(float(1), float(0));
       If(show.equal(TELL.card), () => out.assign(vec4(a, b, float(0.5), float(1))));
       If(show.equal(TELL.grid), () =>
         out.assign(
@@ -230,7 +248,7 @@ export function surfaceOf(
             window_.x.div(Math.max(1, said.nu - 1)),
             window_.y.div(Math.max(1, said.nv - 1)),
             w.div(said.K).mul(0.5).add(0.5),
-            float(1),
+            there,
           ),
         ),
       );
@@ -250,7 +268,7 @@ export function surfaceOf(
       );
       If(show.equal(TELL.place), () =>
         out.assign(
-          vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), float(1)),
+          vec4(place.x.div(64).fract(), place.y.div(64).fract(), place.z.div(64).fract(), there),
         ),
       );
       return out;
@@ -270,7 +288,11 @@ export function surfaceOf(
     },
     before() {
       if (field.generation !== built) build();
-      at.value.set(want.at[0], want.at[1], want.at[2]);
+      // Onto the grid of the march being drawn, which is where on the plane it was marched.
+      const lattice = field.now?.said.lattice ?? [0, 0];
+      // Kept where a measurement can read it: which piece of the plane is actually being drawn.
+      (globalThis as unknown as { __drawing?: unknown }).__drawing = { lattice, waiting: field.waiting, generation: field.generation };
+      at.value.set(want.at[0] - lattice[1], want.at[1] - lattice[0], want.at[2]);
       right.value.set(want.right[0], want.right[1], want.right[2]);
       down.value.set(want.down[0], want.down[1], want.down[2]);
       from.value = want.through?.from ?? 0;

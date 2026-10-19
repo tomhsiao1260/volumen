@@ -45,10 +45,16 @@ export interface ChainSaid {
  * piece rather than grid points, so that a card can put it in its frame knowing only its own plane
  * and the sheet it is on.
  */
+/*
+ * A place on the papyrus as the card's plane has it: the sheet, counted from the one the card was
+ * opened on, and the node of the plane's lattice, row and column, both fractional.  Said on the
+ * plane rather than as a fraction of the piece so that it stays true as pieces slide under the
+ * card: a dot answered about one piece is drawn on the next by arithmetic, not asked again.
+ */
 export interface PieceSpot {
   w: number;
-  fu: number;
-  fv: number;
+  i: number;
+  j: number;
 }
 
 // Opens a surface card: finds the sheet at `seed` and builds the piece of it the card covers, with
@@ -80,6 +86,8 @@ export interface OpenRequest {
   // `?charts=no`, which is how the fit is held against itself: the same board drawn both ways has
   // to come out the same, or a chart is not the march it claims to be.
   charts: boolean;
+  // `?slide=no`: every move stands a new plane, as every move used to.  For measuring the jump.
+  slide: boolean;
   // The voxel the card was opened on, in voxels of the full-resolution scan.
   seed: { x: number; y: number; z: number };
   // The sheet to show: sheets from the one at `seed`, fractional, positive outward.
@@ -131,8 +139,14 @@ export interface ShowRequest {
   id: string;
   w: number;
   plane: SurfacePlane;
-  // Where along the axis a cut does not show it is taken, 0 to 1 (`mapping` in `render.ts`).
-  pin?: number;
+  /*
+   * Where a cut is taken: a node of the lattice of the plane the card's pieces are laid on, counted
+   * from where the plane was stood — the row for a cut along u, the column for one along v.  Said
+   * on the plane rather than as a fraction of the piece in hand, because the piece slides under
+   * the card as the cut is swept (`along` in the worker), and a fraction of the piece it was sent
+   * about is not the same place on the one it arrives at.  Left out, the cut is through the middle.
+   */
+  along?: [number, number];
 }
 
 export interface CloseRequest {
@@ -170,6 +184,9 @@ export interface FieldEvent {
   // how much of the stack a cut shows.
   alongU: number;
   alongV: number;
+  // Where this piece's grid sits on the plane, in nodes — what a place said on the plane is
+  // counted against to find it on this piece.
+  lattice: [number, number];
   // The walk the other way round — the distance at each winding — so the card can turn the sheet it
   // is asked for into the place the window starts at, without asking anybody.
   sheets: ArrayBuffer;
@@ -192,12 +209,12 @@ export interface WantEvent {
   /*
    * And where along the papyrus the cut is taken, 0 to 1 across the grid.
    *
-   * Normally the card's own, handed straight back.  But a cut swept past the row its piece was built
-   * around is answered by building the piece again around the row it is now at (`along`), and then
-   * this is the middle — so the card has to be told, or it would go on counting from a row of a
-   * piece that no longer exists.
+   * Only when a NEW plane was stood (`stand` in the worker): where the cut the card asked about
+   * (`from`, on the old plane) is on the new one (`to`).  A piece slid along the plane needs none
+   * of this — the place the card said is the same place on the new piece — and that is most of why
+   * the plane is kept.
    */
-  pin: number;
+  moved?: { from: [number, number]; to: [number, number] };
   wanted: { level: number; factor: number; chunks: ArrayBuffer }[];
 }
 

@@ -51,6 +51,13 @@ export interface ChartOf {
   // The relative windings by id and revision, sorted: they set `apart`, which is the step the march
   // takes, so a chart walked before one of them was drawn is not this chart.
   steps: string[];
+  /*
+   * Where the grid sits on the plane it is laid on, in nodes from where the plane was stood, and
+   * which sheet it stands on.  All zero for a first piece — whose `seed` is on the sheet and whose
+   * `towards` is only a direction to agree with — and for every later piece `seed` is a point of the
+   * plane and `towards` its normal, kept.
+   */
+  lattice: [number, number, number];
 }
 
 export async function chartId(of: ChartOf) {
@@ -68,6 +75,8 @@ export async function chartId(of: ChartOf) {
     of.per,
     of.spacing.toFixed(3),
     [...of.steps].sort().join(","),
+    // Left out when zero, so that the charts of first pieces keep the names they were written under.
+    ...(of.lattice.some((v) => v !== 0) ? [of.lattice.join(",")] : []),
   ].join("|");
   const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(said));
   return [...new Uint8Array(digest)]
@@ -187,11 +196,12 @@ export async function readChart(id: string): Promise<Walk | undefined> {
     n0: meta.normal,
     right: meta.right,
     down: meta.down,
+    origin: meta.anchor,
   };
 }
 
 /** Keeps a march under this name.  `meta.json` goes last, which is what makes the chart whole. */
-export async function writeChart(id: string, walk: Walk, of: ChartOf, anchor: Vec3) {
+export async function writeChart(id: string, walk: Walk, of: ChartOf) {
   if (!LITTLE) return;
   const { nu, nv, reach, per, P, A } = walk;
   const layers = 2 * reach + 1;
@@ -220,7 +230,7 @@ export async function writeChart(id: string, walk: Walk, of: ChartOf, anchor: Ve
     hu: walk.hu,
     hv: walk.hv,
     apart: walk.apart,
-    anchor,
+    anchor: walk.origin,
     right: walk.right,
     down: walk.down,
     normal: walk.n0,

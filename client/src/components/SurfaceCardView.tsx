@@ -226,7 +226,7 @@ export function SurfaceCardView({
   // The sheets drawn over a cut across them, and what is being pulled.
   const lines = useRef<HTMLCanvasElement>(null);
   const pulling = useRef<
-    { from: number; zoomed: number; pin: number; perPixel: number } | undefined
+    { from: number; zoomed: number; along: [number, number]; perPixel: number } | undefined
   >(undefined);
   // The sheet last drawn, which is not the one asked for while a frame for it is on its way.
   const shown = useRef<number>(undefined);
@@ -299,15 +299,22 @@ export function SurfaceCardView({
    */
   const far = useRef<number | undefined>(undefined);
   /*
-   * Where along the papyrus a cut is taken, 0 to 1 across the grid.
+   * Where along the papyrus a cut is taken: a node of the lattice of the plane the card's pieces
+   * are laid on, row and column, counted from where the plane was stood.
    *
    * This is what a pull on a cut moves.  A cut already shows the whole stack the piece holds, so
    * travelling through the stack shows nothing that was not already on the card; what it cannot show
    * is the rest of the papyrus, one row of the grid at a time.  The flat card is the other way
    * round — it shows one sheet and travels through them — so each card moves along the axis it
    * cannot otherwise reach.
+   *
+   * Said on the plane and not as a fraction of the piece, because the piece slides under the card as
+   * the cut is swept: a fraction of the piece this was sent about is another place on the piece that
+   * arrives, and the card and the worker were each correcting the other's — measured, a pull that
+   * crossed the edge of a piece slid it twice.  A node of the plane is the same node on every piece
+   * laid on it.  Unknown until the first piece says where its grid sits (`lattice`).
    */
-  const pin = useRef(0.5);
+  const along = useRef<[number, number] | undefined>(undefined);
   /*
    * Drawn on the GPU, where the march is a texture and a pixel of the card is two texture reads.
    *
@@ -343,6 +350,8 @@ export function SurfaceCardView({
       nu: number;
       nv: number;
       K: number;
+      // Where the grid sits on the plane the card's pieces are laid on, in nodes.
+      lattice: [number, number];
       walk: { sheets: number[]; walked: number[] };
     }
     | undefined
@@ -350,6 +359,7 @@ export function SurfaceCardView({
   // Both are set up once, in handlers that must still reach the ones of the render they run in.
   const glideRef = useRef<() => void>(() => {});
   const markSheetsRef = useRef<() => void>(() => {});
+  const askAboutRef = useRef<(onlyNew: boolean) => void>(() => {});
   /*
    * How much papyrus a pixel of a cut card is worth.
    *
@@ -370,8 +380,31 @@ export function SurfaceCardView({
     const across = wantedPlane.current === "uw";
     const reach = across ? have.alongV : have.alongU;
     if (!(reach > 0) || !(element.clientWidth > 0)) return undefined;
-    return { reach, wide: (across ? have.alongU : have.alongV) / element.clientWidth };
+    return {
+      reach,
+      wide: (across ? have.alongU : have.alongV) / element.clientWidth,
+      nodes: across ? have.nv - 1 : have.nu - 1,
+    };
   };
+
+  // Where the cut is taken across the piece in hand, 0 to 1 along the axis it does not show.
+  const pinOf = () => {
+    const have = piece.current, at = along.current;
+    if (have === undefined || at === undefined) return 0.5;
+    return wantedPlane.current === "uw"
+      ? (at[0] - have.lattice[0]) / (have.nv - 1)
+      : (at[1] - have.lattice[1]) / (have.nu - 1);
+  };
+  // The same, on the plane: the node asked for, or the middle of the piece in hand.
+  const alongNow = (): [number, number] => {
+    const have = piece.current;
+    if (along.current !== undefined) return along.current;
+    if (have === undefined) return [0, 0];
+    return [have.lattice[0] + (have.nv - 1) / 2, have.lattice[1] + (have.nu - 1) / 2];
+  };
+  // A place on the plane moved this many nodes along the axis the cut is swept along.
+  const slid = (at: [number, number], nodes: number): [number, number] =>
+    wantedPlane.current === "uw" ? [at[0] + nodes, at[1]] : [at[0], at[1] + nodes];
 
   const shownAcross = () => {
     const have = piece.current;
@@ -397,6 +430,7 @@ export function SurfaceCardView({
     const have = piece.current;
     if (view === undefined || element === null || have === undefined) return;
     const own = wanted.current - baseW.current;
+    const pin = pinOf();
     /*
      * The new renderer is told an affine window on the flattening rather than which of three planes.
      *
@@ -404,19 +438,26 @@ export function SurfaceCardView({
      * `mapping` worked them out a pixel at a time because the drawing was a pixel at a time.  A
      * fourth way of cutting the piece — oblique, or along a chain — needs no new code here and none
      * at all in the shader.
+     *
+     * Said on the PLANE the pieces are laid on, not on the piece: the window starts where the
+     * latest piece's grid starts and runs the length of it, and a cut is taken at the node the
+     * hand has got to.  The renderer takes that against the piece it is actually drawing, which
+     * while a new one waits for its scan is still the old one — a window said on the piece was
+     * twenty-five rows off during that wait, every time the piece slid.
      */
     const lastU = have.nu - 1;
     const lastV = have.nv - 1;
+    const [row, column] = alongNow();
     if (wantedPlane.current === "uv") {
       if (ON_GPU2) {
         view.show({
-          at: [0, 0, own],
+          at: [have.lattice[1], have.lattice[0], own],
           right: [lastU, 0, 0],
           down: [0, lastV, 0],
           show: gpuShow,
         });
       } else {
-        view.show({ plane: "uv", w: own, from: 0, across: 1, pin: pin.current, show: gpuShow });
+        view.show({ plane: "uv", w: own, from: 0, across: 1, pin, show: gpuShow });
       }
       shown.current = wanted.current;
       return;
@@ -442,7 +483,7 @@ export function SurfaceCardView({
       // held where the pin says.
       const alongU = wantedPlane.current === "uw";
       view.show({
-        at: [alongU ? 0 : pin.current * lastU, alongU ? pin.current * lastV : 0, 0],
+        at: [alongU ? have.lattice[1] : column, alongU ? row : have.lattice[0], 0],
         right: alongU ? [lastU, 0, 0] : [0, lastV, 0],
         down: [0, 0, 0],
         through: { from: middle - across / 2, across },
@@ -454,7 +495,7 @@ export function SurfaceCardView({
         w: own,
         from: middle - across / 2,
         across,
-        pin: pin.current,
+        pin,
         show: gpuShow,
       });
     }
@@ -474,7 +515,7 @@ export function SurfaceCardView({
         perPixel: scale.wide / scale.reach,
         plane: wantedPlane.current,
         w: own,
-        pin: pin.current,
+        pin,
         from: middle - across / 2,
         across,
       });
@@ -486,7 +527,7 @@ export function SurfaceCardView({
       cardId: id,
       piece: surfaceEngine().pieceOf(id) ?? id,
       plane: wantedPlane.current,
-      pin: pin.current,
+      along: alongNow(),
     });
   };
 
@@ -506,7 +547,10 @@ export function SurfaceCardView({
     let current = true;
     setStatus("loading");
     setDrawn(false);
-    setLoading(true);
+    // With a clock on it, as every other ask has.  A sheet that never settles — a piece over a hole
+    // in the scan, or a card that is never drawn because it is off the board — would otherwise say
+    // "loading" for ever, and anything waiting for it to stop would wait with it.
+    waitFor();
     const engine = surfaceEngine();
     getLasagna(sourceId).then(
       (lasagna) => {
@@ -537,6 +581,7 @@ export function SurfaceCardView({
             lasagna,
             normals: lasagna === null || asked === "scan" ? "scan" : "prediction",
             charts: new URLSearchParams(window.location.search).get("charts") !== "no",
+            slide: new URLSearchParams(window.location.search).get("slide") !== "no",
             march: new URLSearchParams(window.location.search).get("march") !== "cpu",
             seed,
             w: wanted.current,
@@ -566,6 +611,7 @@ export function SurfaceCardView({
                 layers: event.layers,
                 per: event.per,
                 K: event.K,
+                lattice: event.lattice,
                 data: new Float32Array(event.data),
                 walk: new Float32Array(event.walk),
                 lo: event.lo,
@@ -583,11 +629,14 @@ export function SurfaceCardView({
                 nu: event.nu,
                 nv: event.nv,
                 K: event.K,
+                lattice: event.lattice,
                 walk: {
                   sheets: Array.from(new Float32Array(event.sheets)),
                   walked: Array.from(new Float32Array(event.walked)),
                 },
               };
+              // The first piece says where the middle is; after that the card knows where it is.
+              along.current ??= alongNow();
               showOnGpu();
               setDrawn(true);
               return;
@@ -598,24 +647,33 @@ export function SurfaceCardView({
               // the card really came to rest.
               if (event.limited) dispatch({ type: "setSurfaceLayer", id, w: event.w });
               /*
-               * And where the cut is taken, if the piece moved along the papyrus to meet it
-               * (`along` in the worker): the row the card was asking for is the middle of the new
-               * piece, so it counts from there now.
+               * And where the cut is, if a NEW plane was stood under it (`stand` in the worker):
+               * the place the card asked about is somewhere else on the new plane's lattice, and
+               * the card counts from there now.  A piece merely slid along the plane says nothing
+               * here, because the place is the same place.
                *
-               * A hand may still be down while that happens.  A pull reads from where it took hold,
-               * so that base is carried by the same amount — the papyrus goes on following the hand
-               * across the join instead of snapping back to where the hand started.
+               * A hand may still be down while that happens, and may have moved on since the card
+               * asked: what is carried across is the DIFFERENCE, applied to wherever the hand has
+               * got to, and to where the pull took hold — so the papyrus goes on following the
+               * hand across the join instead of snapping back to where the hand started.
                */
-              if (Math.abs(event.pin - pin.current) > 1e-6) {
+              if (event.moved !== undefined) {
+                const { from, to } = event.moved;
+                const carry = (at: [number, number]): [number, number] => [
+                  to[0] + (at[0] - from[0]),
+                  to[1] + (at[1] - from[1]),
+                ];
                 if (pulling.current !== undefined) {
-                  pulling.current.pin += event.pin - pin.current;
+                  pulling.current.along = carry(pulling.current.along);
                   const scale = cutScale();
-                  if (scale !== undefined) pulling.current.perPixel = scale.wide / scale.reach;
+                  if (scale !== undefined) pulling.current.perPixel = (scale.wide / scale.reach) * scale.nodes;
                 }
-                pin.current = event.pin;
+                along.current = carry(along.current ?? from);
                 far.current = undefined;
                 showOnGpu();
                 markSheets();
+                // And every dot is about the old plane now.
+                askAboutRef.current(false);
               }
               const wanted = event.wanted.map((one) => ({
                 level: one.level,
@@ -696,7 +754,7 @@ export function SurfaceCardView({
     far.current = undefined;
     // The cut the card holds already covers this sheet, so it is shown before anybody is asked.
     glideRef.current();
-    surfaceEngine().show(id, w, plane, pin.current);
+    surfaceEngine().show(id, w, plane, along.current);
     waitFor();
     // `waitFor` is the same work every time and is not worth being a dependency.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -723,9 +781,9 @@ export function SurfaceCardView({
   const sweep = (by: number) => {
     const scale = cutScale();
     if (scale === undefined) return;
-    pin.current = Math.min(1, Math.max(0, pin.current + (by * scale.wide) / scale.reach));
+    along.current = slid(alongNow(), ((by * scale.wide) / scale.reach) * scale.nodes);
     glide();
-    surfaceEngine().show(id, wanted.current, wantedPlane.current, pin.current);
+    surfaceEngine().show(id, wanted.current, wantedPlane.current, along.current);
     waitFor();
   };
 
@@ -734,7 +792,7 @@ export function SurfaceCardView({
     far.current = undefined;
     // The picture goes there straight away, out of the cut the card holds; the sharp one follows.
     glide();
-    surfaceEngine().show(id, next, wantedPlane.current, pin.current);
+    surfaceEngine().show(id, next, wantedPlane.current, along.current);
     waitFor();
     if (settling.current !== undefined) clearTimeout(settling.current);
     settling.current = setTimeout(() => {
@@ -873,12 +931,17 @@ export function SurfaceCardView({
           if (held === undefined && wantedPlane.current !== "uv") continue;
           const sideways =
             held === undefined ? 0.5 : (farOf(held.walk, found.w - held.base) - held.from) / held.wide;
+          // The place is a node of the plane; where that is on the piece in hand is arithmetic.
+          const laid = piece.current;
+          if (laid === undefined) continue;
+          const fu = (found.j - laid.lattice[1]) / (laid.nu - 1);
+          const fv = (found.i - laid.lattice[0]) / (laid.nv - 1);
           const at =
             wantedPlane.current === "uv"
-              ? [found.fu, found.fv]
+              ? [fu, fv]
               : wantedPlane.current === "uw"
-                ? [found.fu, sideways]
-                : [found.fv, sideways];
+                ? [fu, sideways]
+                : [fv, sideways];
           if (at[0] < 0 || at[0] > 1 || at[1] < 0 || at[1] > 1) continue;
           /*
            * How far along the papyrus the place is from the cut itself, in voxels.
@@ -895,8 +958,8 @@ export function SurfaceCardView({
            */
           let off = 0;
           if (held !== undefined) {
-            const hidden = wantedPlane.current === "uw" ? found.fv : found.fu;
-            off = Math.abs(hidden - pin.current) * held.reach;
+            const hidden = wantedPlane.current === "uw" ? fv : fu;
+            off = Math.abs(hidden - pinOf()) * held.reach;
             if (off > held.wide * NEAR_CUT) continue;
           }
           /*
@@ -977,10 +1040,16 @@ export function SurfaceCardView({
        * is the one place the whole sheet is visible at once, so the line belongs here — a cut along
        * u is a row, a cut along v is a column.
        */
+      const have = piece.current;
       for (const cut of cutsOf(surfaceEngine().pieceOf(id))) {
-        if (cut.cardId === id) continue;
+        if (cut.cardId === id || have === undefined) continue;
         const across = cut.plane === "uw";
-        const at = Math.round((across ? cut.pin * height : cut.pin * width)) + 0.5;
+        // The cut's place on the plane, against where THIS card's grid sits on it.
+        const f = across
+          ? (cut.along[0] - have.lattice[0]) / (have.nv - 1)
+          : (cut.along[1] - have.lattice[1]) / (have.nu - 1);
+        if (f < 0 || f > 1) continue;
+        const at = Math.round(across ? f * height : f * width) + 0.5;
         context.beginPath();
         if (across) {
           context.moveTo(0, at);
@@ -1055,7 +1124,9 @@ export function SurfaceCardView({
     for (const was of [...dots.current.keys()]) if (!living.has(was)) dots.current.delete(was);
     setSpotted((count) => count + 1);
   }, [id, scan]);
-  // A new piece: every answer about the old one is about a different piece.
+  askAboutRef.current = askAbout;
+  // A new plane: every answer about the old one is about a different plane.  A piece slid on the
+  // same plane is not that — the answers are nodes of the plane, and still true.
   useEffect(() => {
     if (status === "ready") askAbout(false);
   }, [status, askAbout]);
@@ -1227,8 +1298,8 @@ export function SurfaceCardView({
       pulling.current = {
         from: event.clientY,
         zoomed: here.zoomed,
-        pin: pin.current,
-        perPixel: scale.wide / scale.reach,
+        along: alongNow(),
+        perPixel: (scale.wide / scale.reach) * scale.nodes,
       };
       let waiting = false;
       // The worker is not in this loop.  The picture comes from the flattened papyrus on this thread;
@@ -1240,10 +1311,7 @@ export function SurfaceCardView({
         if (hold === undefined) return;
         moved.preventDefault();
         const now = moved.clientY;
-        pin.current = Math.min(
-          1,
-          Math.max(0, hold.pin + ((now - hold.from) / hold.zoomed) * hold.perPixel),
-        );
+        along.current = slid(hold.along, ((now - hold.from) / hold.zoomed) * hold.perPixel);
         if (waiting) return;
         waiting = true;
         requestAnimationFrame(() => {
@@ -1252,7 +1320,7 @@ export function SurfaceCardView({
           glideRef.current();
           if (performance.now() - told > TELL_MS) {
             told = performance.now();
-            surfaceEngine().show(id, wanted.current, wantedPlane.current, pin.current);
+            surfaceEngine().show(id, wanted.current, wantedPlane.current, along.current);
           }
         });
       };
@@ -1263,7 +1331,7 @@ export function SurfaceCardView({
         pulling.current = undefined;
         glideRef.current();
         // And the sheet the hand came to rest on, which is the one worth drawing properly.
-        surfaceEngine().show(id, wanted.current, wantedPlane.current, pin.current);
+        surfaceEngine().show(id, wanted.current, wantedPlane.current, along.current);
         dispatch({ type: "setSurfaceLayer", id, w: wanted.current });
       };
       window.addEventListener("pointermove", move, true);

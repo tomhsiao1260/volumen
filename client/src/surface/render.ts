@@ -201,8 +201,10 @@ export function pieceAt(
   fy: number,
   // The same map the frame was drawn with, or the answer is about another picture.
   spread: number[],
+  // And the same row or column (`mapping`).
+  pin = 0.5,
 ) {
-  const [sheet, gi, gj] = mapping(patch, plane, w, 1, 1, spread)(fy - 0.5, fx - 0.5);
+  const [sheet, gi, gj] = mapping(patch, plane, w, 1, 1, spread, pin)(fy - 0.5, fx - 0.5);
   return { w: sheet, gi, gj };
 }
 

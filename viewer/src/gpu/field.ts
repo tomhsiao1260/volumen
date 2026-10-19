@@ -30,6 +30,15 @@ export interface Said {
   per: number;
   K: number;
   /*
+   * Where this march's grid sits on the plane it is laid on, in nodes (rows, then columns).
+   *
+   * A card's window is said on the PLANE, and the march is one piece of it: the piece slides under
+   * the card as the card moves, and the one being drawn is not always the one that arrived last —
+   * a new march waits here for its scan.  So the window is taken against the lattice of the march
+   * actually being drawn, in `surfaceOf`, and nothing on the page has to know which that is.
+   */
+  lattice: [number, number];
+  /*
    * RGBA, float32, laid out (layer, v, u) with u fastest: the place in the scroll in RGB — counted
    * (z, y, x), as the scan's array and the march both are — and in A whether the march reached.
    *
