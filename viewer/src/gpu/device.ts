@@ -54,6 +54,12 @@ export class Device extends RefCounted {
   readonly lost = new NullarySignal();
   /** Dispatched as a frame starts drawing, before any card is measured. */
   readonly frameStarted = new NullarySignal();
+  /**
+   * Dispatched once every card is measured and the frame is about to be drawn: everything on this
+   * thread that changes what the shaders read — pages ordered as the frame started, say — has
+   * happened by now, so this is when what they read goes up.
+   */
+  readonly frameMeasured = new NullarySignal();
   /*
    * Once the device is gone every texture and pipeline belongs to a device that is gone, so any
    * further call only produces errors — thousands of them, since drawing is driven by animation
@@ -212,6 +218,7 @@ export class Device extends RefCounted {
       drawing.push(card);
     }
     if (drawing.length === 0) return;
+    this.frameMeasured.dispatch();
     let asked = false;
     for (const card of drawing) {
       card.draw();

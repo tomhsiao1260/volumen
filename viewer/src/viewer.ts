@@ -43,6 +43,8 @@ import { Atlas, BYTES as ATLAS_BYTES } from "#src/gpu/atlas.js";
 import { CardView } from "#src/gpu/card.js";
 import { Cell } from "#src/gpu/cell.js";
 import type { Corners } from "#src/gpu/cell.js";
+import { Cells } from "#src/gpu/cells.js";
+import type { CellsOptions } from "#src/gpu/cells.js";
 import { CrossSection } from "#src/gpu/cross_section.js";
 import { Device } from "#src/gpu/device.js";
 import { FlatCard } from "#src/gpu/flat.js";
@@ -423,6 +425,13 @@ export class Viewer extends RefCounted {
       }),
     );
     /*
+     * Every card looks the scan up through the one table, so the table goes up once a frame, here,
+     * whatever kinds of card are drawn.  It used to go up from the slice and flat cards' own
+     * per-frame hooks, which left a scene card of cells, with no such card beside it, looking the
+     * pages up in a table that never left this thread: every page resident, none found.
+     */
+    this.registerDisposer(device.frameMeasured.add(() => gpu.shader.update()));
+    /*
      * A chunk arriving is the only thing that changes a card without the card asking.  Pages that
      * could not be written yet are offered again at the same moment, which is the one place both
      * things are known to have happened.
@@ -651,6 +660,21 @@ export class Viewer extends RefCounted {
     const cell = new Cell(gpu.device, this.chunkManager, volume.renderLayer, gpu.shader, scan, corners);
     this.registerDisposer(cell);
     return cell;
+  }
+
+  /**
+   * A board of cells: pools of positions in the scroll (`addSample`) and in the laid-out space
+   * (`addLaid`), cells naming eight of each (`addCell`), and two meshes drawing all of them in one
+   * pass — `cells.mesh`, the boxes in the scroll, and `cells.flat`, the cells laid flat at layer
+   * `setLayer(W)`.  Glue and tear by pointing cells at shared or separate indices (`setCell`).  Room
+   * is made once, for `cells`/`samples`/`laids` of them.  See `gpu/cells.ts`.
+   */
+  addCells({ volume, ...options }: { volume: Volume } & CellsOptions): Cells {
+    const gpu = this.started();
+    const scan = this.scanOf(gpu, volume);
+    const cells = new Cells(gpu.device, this.chunkManager, volume.renderLayer, gpu.shader, scan, options);
+    this.registerDisposer(cells);
+    return cells;
   }
 
   /**

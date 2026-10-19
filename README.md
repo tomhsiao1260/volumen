@@ -96,12 +96,17 @@ Brave. A browser without it shows the board, says so, and draws no data.
   the zarr and the decoding — feeds one WebGPU device: every resident chunk is paged into one atlas
   (`src/gpu/atlas.ts`), and a card is one TSL function that looks the scan up there, a cross-section
   (`src/gpu/slice.ts`) or papyrus laid flat (`src/gpu/surface.ts`). Every card is a WebGPU canvas of
-  its own, presented from the one device. `src/viewer.ts` is the API, and it has three things an
+  its own, presented from the one device. `src/viewer.ts` is the API, and it has four things an
   application of its own can build on: `addScene(element, { scene, camera })` draws a three.js scene
   of yours with the viewer's renderer, so that the scan is visible to it; `addCell({ volume, corners })`
   is eight corners in the scan's voxels and the scan seen through them — a box for your scene
   (`cell.mesh`), a card of it laid flat (`cell.flat(element)`), and `cell.setCorners` to pull it about
-  (`src/gpu/cell.ts`); and `viewer.ready` says whether the browser has WebGPU at all.
+  (`src/gpu/cell.ts`); `addCells({ volume })` is a board of such cells held the way an OBJ file holds
+  a mesh — pools of positions in the scroll (`addSample`) and in the laid-out space (`addLaid`), cells
+  naming eight of each (`addCell(samples, laids)`), glued and torn by pointing them at shared or
+  separate indices (`setCell`), and drawn in one pass as boxes (`cells.mesh`), as the layer `W` laid
+  flat (`cells.flat`, `setLayer`) and as that layer where it lies in the scroll (`cells.sheet`)
+  (`src/gpu/cells.ts`); and `viewer.ready` says whether the browser has WebGPU at all.
 - `scripts/start.js`: installs, builds, starts both and opens the page.
 - `docs/whiteboard.md`: what the viewer needed for this board, and what the board does not do yet.
 

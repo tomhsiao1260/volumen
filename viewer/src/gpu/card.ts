@@ -192,9 +192,16 @@ export class CardView extends RefCounted implements Drawn {
     this.view.before?.(width, height);
     const { renderer, stats } = device;
     const began = performance.now();
+    /*
+     * The renderer is pointed at this canvas BEFORE the canvas is sized.  It listens for the size of
+     * the one canvas target it is pointed at, and on hearing it drops the render pass it cached for
+     * that target — the depth buffer in it is the old size.  Sized first, this card's canvas told
+     * the previous card's listener, which heard nothing, and the card's next frame paired a new
+     * colour attachment with a stale depth buffer: a validation error, and a frame not drawn.
+     */
+    renderer.setCanvasTarget(this.target);
     // The canvas is the frame's size; a WebGPU canvas presents whatever size it is when asked.
     if (canvas.width !== width || canvas.height !== height) this.target.setSize(width, height, false);
-    renderer.setCanvasTarget(this.target);
     renderer.render(this.scene, this.camera);
     stats.renderMs += performance.now() - began;
     stats.pixels += width * height;
