@@ -1,12 +1,17 @@
 /**
  * @file A card: an element on the page, a canvas inside it, and whatever is drawn into it.
  *
- * The drawing happens in the device's one shared surface and is copied out into this card's own
- * 2-D canvas, so the card is an ordinary element — it can be styled, stacked, clipped and moved by
- * the board like anything else, and the surface only has to be as large as the largest card.
+ * Every card's canvas is a WebGPU canvas of its own, presented from the ONE device: three.js's
+ * `CanvasTarget` points the renderer at it for the card's turn, and the frame lands on it directly.
+ * There is no shared surface and no copy.  The renderer this replaces drew every card into one
+ * hidden canvas and copied each out with `drawImage` into a 2-D canvas, because a WebGL context is
+ * a scarce thing and textures do not cross them — neither of which is true of WebGPU, where any
+ * number of canvases can present from one device and the atlas is visible to all of them.  The
+ * copy was not free either: a 2-D canvas reading a WebGPU canvas goes the long way round.
  *
- * Nothing here knows what is being drawn.  A view is a material and a few uniforms; this is where
- * it is given a rectangle of the page and a share of the GPU.
+ * Nothing here knows what is being drawn.  A view is a material on a card-filling quad, or a scene
+ * and a camera of its own (a board of boxes in a 3-D scene, say); this is where it is given a
+ * rectangle of the page and a turn on the GPU.
  */
 import * as THREE from "three/webgpu";
 import type { Card as Drawn, Device } from "#src/gpu/device.js";
@@ -19,17 +24,29 @@ import { WatchableValue } from "#src/state/trackable_value.js";
  *
  * A board that magnifies a card shows the same data over more of the screen — the extent a card
  * shows is fixed by its own zoom — so drawing it with more than twice its layout pixels adds no
- * detail.  It only asks for memory and for a larger copy every frame, which is how a device is lost.
- * Looking closer at the data is what the card's own zoom is for; that asks for finer chunks instead.
+ * detail.  It only asks for memory and for a larger canvas every frame, which is how a device is
+ * lost.  Looking closer at the data is what the card's own zoom is for; that asks for finer chunks
+ * instead.
  */
 const MOST = 2048;
 const MOST_SCALE = 2;
 // How far outside the window a card is still worth fetching for, though not drawing.
 const NEAR = "200px";
 
-/** What a view has to give a card: a material to draw with, and a chance to set it up each frame. */
+/**
+ * What a view has to give a card: either a material, drawn over the whole card, or a scene and a
+ * camera of its own; and a chance to set either up each frame.
+ */
 export interface View {
-  material: THREE.Material;
+  material?: THREE.Material;
+  scene?: THREE.Scene;
+  camera?: THREE.Camera;
+  /*
+   * Whether this view may ask the GPU for pages it could not find (`sample.ts`), so that the frame
+   * is read back after it.  A view whose pages are ordered ahead on this thread (`pages.ts`) does
+   * not need the readback, and a frame of such views alone is not read.
+   */
+  asks?: boolean;
   // Called once per frame before drawing, with the size it is being drawn at.
   before?(width: number, height: number): void;
   dispose?(): void;
@@ -42,7 +59,7 @@ export interface View {
  * Only ever a power of two: halving and doubling keeps the shape of what is drawn exactly, so the
  * card's canvas can simply be stretched over it, and leaves the size alone until the magnification
  * has really changed.  A size that changed with every frame of a zoom reallocated every card's
- * canvas and the surface sixty times a second, and that is what cost the WebGL context before this.
+ * canvas sixty times a second, and that is what cost the WebGL context before this.
  */
 function fitScale(shown: number, layoutSize: number) {
   let scale = 2 ** Math.round(Math.log2(Math.max(shown, 1e-3)));
@@ -54,16 +71,17 @@ function fitScale(shown: number, layoutSize: number) {
 
 export class CardView extends RefCounted implements Drawn {
   private canvas = document.createElement("canvas");
-  private context: CanvasRenderingContext2D;
-  private scene = new THREE.Scene();
-  private camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-  private quad: THREE.Mesh;
+  private target = new THREE.CanvasTarget(this.canvas);
+  private scene: THREE.Scene;
+  private camera: THREE.Camera;
+  private quad: THREE.Mesh | undefined;
   private sized = -1;
   private onScreen = true;
   private nearScreen = true;
 
   readonly renderViewport = new RenderViewport();
   readonly visibility = new WatchableValue(Number.POSITIVE_INFINITY);
+  readonly asks: boolean;
 
   constructor(
     readonly element: HTMLElement,
@@ -78,13 +96,28 @@ export class CardView extends RefCounted implements Drawn {
     canvas.style.display = "block";
     if (getComputedStyle(element).position === "static") element.style.position = "relative";
     element.appendChild(canvas);
-    this.context = canvas.getContext("2d")!;
-    this.registerDisposer(() => canvas.remove());
-
-    this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), view.material);
-    this.scene.add(this.quad);
+    // Sizes are said in the pixels drawn; the canvas is stretched over the element by CSS.
+    this.target.setPixelRatio(1);
     this.registerDisposer(() => {
-      this.quad.geometry.dispose();
+      this.target.dispose();
+      canvas.remove();
+    });
+    this.asks = view.asks === true;
+
+    if (view.material !== undefined) {
+      // A material over the whole card: a quad that fills an orthographic camera.
+      this.scene = new THREE.Scene();
+      this.camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      this.quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), view.material);
+      this.scene.add(this.quad);
+    } else if (view.scene !== undefined && view.camera !== undefined) {
+      this.scene = view.scene;
+      this.camera = view.camera;
+    } else {
+      throw new Error("A view is a material, or a scene and a camera.");
+    }
+    this.registerDisposer(() => {
+      this.quad?.geometry.dispose();
       view.dispose?.();
     });
 
@@ -128,14 +161,17 @@ export class CardView extends RefCounted implements Drawn {
     const wide = Math.max(1, this.element.offsetWidth);
     const tall = Math.max(1, this.element.offsetHeight);
     /*
-     * How many pixels of the screen one of the card's own pixels covers: the board's magnification
-     * (`getBoundingClientRect` is scaled by a CSS transform on an ancestor and `offsetWidth` is not)
-     * times the screen's own density.  Drawn with that many, within the limits above, a card is as
-     * sharp as the screen shows it and no sharper.
+     * How many pixels one of the card's own layout pixels is drawn with: the board's magnification
+     * (`getBoundingClientRect` is scaled by a CSS transform on an ancestor and `offsetWidth` is not),
+     * within the limits above.
+     *
+     * NOT the screen's density.  Drawing a card at two pixels per layout pixel on a dense screen made
+     * it sharper and cost four times the pixels — and, because the asking divides the zoom by the
+     * pixels drawn, a scale finer by one level and the downloads to match.  Measured on a board of
+     * four cards: 60 frames a second at one, 38 at two.  Sharpness is what a card's own zoom is for.
      */
     const { width } = this.element.getBoundingClientRect();
-    const shown = (width / wide) * (window.devicePixelRatio || 1);
-    const scale = fitScale(shown, Math.max(wide, tall));
+    const scale = fitScale(width / wide, Math.max(wide, tall));
     this.renderViewport.width = Math.round(wide * scale);
     this.renderViewport.height = Math.round(tall * scale);
     // It is the pixels actually drawn that count, so that a card drawn with fewer of them than it
@@ -143,39 +179,24 @@ export class CardView extends RefCounted implements Drawn {
     this.renderViewport.pixelScale = scale;
   }
 
+  /** Gives up its pixels while it is off the board; the next draw sizes the canvas again. */
   release() {
+    if (this.canvas.width === 0 && this.canvas.height === 0) return;
     this.canvas.width = this.canvas.height = 0;
   }
 
   draw() {
-    const { canvas, context, device } = this;
+    const { canvas, device } = this;
     const { width, height } = this.renderViewport;
     if (width === 0 || height === 0) return;
     this.view.before?.(width, height);
-    /*
-     * Drawn into the top-left corner of the surface, which the device has sized to the largest card
-     * being drawn this frame and no larger — so two cards of different sizes do not have the surface
-     * change size twice a frame, which is the canvas being configured anew each time, and was two
-     * hundred times a second on a board of two cards.
-     *
-     * The viewport is set in three.js's own terms, where y counts from the bottom as WebGL does, and
-     * on the WebGPU backend the region it gives at (0, 0) is the canvas's top-left — measured by
-     * drawing a quarter of red and reading it back — which is where the copy below reads from.
-     */
-    const { renderer } = device;
-    renderer.setScissorTest(true);
-    renderer.setViewport(0, 0, width, height);
-    renderer.setScissor(0, 0, width, height);
+    const { renderer, stats } = device;
+    const began = performance.now();
+    // The canvas is the frame's size; a WebGPU canvas presents whatever size it is when asked.
+    if (canvas.width !== width || canvas.height !== height) this.target.setSize(width, height, false);
+    renderer.setCanvasTarget(this.target);
     renderer.render(this.scene, this.camera);
-    if (canvas.width !== width || canvas.height !== height) {
-      canvas.width = width;
-      canvas.height = height;
-    }
-    /*
-     * And copied out before this task ends.  A WebGPU canvas is presented when the task does, so a
-     * copy after an await would be copying a canvas that has already gone.
-     */
-    context.clearRect(0, 0, width, height);
-    context.drawImage(device.surface, 0, 0, width, height, 0, 0, width, height);
+    stats.renderMs += performance.now() - began;
+    stats.pixels += width * height;
   }
 }

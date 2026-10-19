@@ -48,6 +48,9 @@ export class FlatCard extends RefCounted {
     this.card = this.registerDisposer(
       new CardView(element, device, {
         material: view.material,
+        // The march is only the worker's to know, so the pages a sheet lands in are the shader's
+        // to ask for, and a frame with this card in it is read back.
+        asks: true,
         before: (width, height) => {
           /*
            * Asked once a frame, because a chunk arrives long after it was asked for.  This is both

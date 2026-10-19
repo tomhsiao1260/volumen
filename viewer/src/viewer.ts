@@ -390,12 +390,16 @@ export class Viewer extends RefCounted {
     let frames = 0;
     let answered: { frame: number; put: number } | undefined;
     let reading = false;
+    // Whether the last frame had a card in it that may have asked for pages.
+    let asking = false;
     const gpu: Gpu = (this.gpu = {
       device,
       atlas,
       shader: scanOf(atlas),
       scans,
-      quiet: () => !reading && answered !== undefined && answered.frame === frames && answered.put === 0,
+      quiet: () =>
+        !reading &&
+        (!asking || (answered !== undefined && answered.frame === frames && answered.put === 0)),
       frames: () => ({ frames, answered, reading }),
     });
     const { chunkQueueManager } = this;
@@ -422,16 +426,23 @@ export class Viewer extends RefCounted {
       chunkQueueManager.visibleChunksChanged.add(() => device.redraw()),
     );
     /*
-     * And after every frame, the pages the shader said it wanted and could not find.
+     * And after a frame that may have asked, the pages the shader said it wanted and could not find.
      *
      * Reading a buffer back is not instant, so one is in flight at a time and the rest of the frame
      * does not wait for it: a page asked for now is written a frame or two later, which is the same
      * bargain every chunk arriving already makes.  Whatever was asked is then cleared, so a page
      * that is still missing has to be asked for again — which is what keeps this a statement about
      * the frame just drawn rather than a list that only grows.
+     *
+     * A frame of cross-sections alone is not read back: their pages are ordered ahead on this
+     * thread (`pages.ts`), and a readback is a buffer, a submit and a wait on the GPU every frame
+     * for nothing.  Every so often one is read anyway, in case an order missed a page.
      */
-    device.drawn = () => {
+    const EVERY = 8;
+    device.drawn = (asked) => {
       frames++;
+      asking = asked;
+      if (!asked && frames % EVERY !== 0) return;
       if (reading || this.gpu === undefined || device.gone) return;
       reading = true;
       const frame = frames;
@@ -463,13 +474,13 @@ export class Viewer extends RefCounted {
           atlas.asks.fill(0);
           gpu.shader.asked.needsUpdate = true;
           /*
-           * Drawn again if a page went in — and if a frame was drawn while this one was being read.
-           * That frame's misses were never read: one readback is in flight at a time, and the zeros
-           * going up now overwrite them.  Without another frame they would be lost, and a card would
-           * stay on a coarser scale with every chunk it needs resident, waiting for an ask that
-           * nobody will make.
+           * Drawn again if a page went in — and if an asking frame was drawn while this one was
+           * being read.  That frame's misses were never read: one readback is in flight at a time,
+           * and the zeros going up now overwrite them.  Without another frame they would be lost,
+           * and a card would stay on a coarser scale with every chunk it needs resident, waiting
+           * for an ask that nobody will make.
            */
-          if (put > 0 || frames !== frame) device.redraw();
+          if (put > 0 || (asking && frames !== frame)) device.redraw();
         } catch (error) {
           if (!device.gone) {
             console.warn("The pages the shader asked for could not be read back:", error);
@@ -635,6 +646,14 @@ export class Viewer extends RefCounted {
    */
   lose() {
     this.gpu?.device.gpu.destroy();
+  }
+
+  /**
+   * Draws every card again on the next frame.  For tests, which read a card's pixels: a WebGPU
+   * canvas can be read only in the task that drew it, so a test asks for a frame and reads in it.
+   */
+  redraw() {
+    this.gpu?.device.redraw();
   }
 
   /**

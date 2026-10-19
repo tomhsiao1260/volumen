@@ -1,16 +1,11 @@
 /**
- * @file The one GPU device, and the surface every card is drawn in.
+ * @file The one GPU device, and the frame every card is drawn in.
  *
- * There is exactly one of these for a page.  A card is an ordinary element with an ordinary 2-D
- * canvas in it; the drawing happens once, off the page, and is copied into each card's canvas in
- * turn.  Giving every card its own WebGPU context instead would be the obvious thing and it is
- * wrong twice over: a browser allows only a handful of contexts, and nothing on one device is
- * visible to another — every card would hold its own copy of every chunk.
- *
- * Measured before this was built: three cards drawn and copied out inside one task all come out
- * right, so the scheme survives the move from WebGL to WebGPU unchanged.  That matters, because
- * WebGPU presents a canvas at the END of the current task — the copy has to happen before the task
- * yields, which is what `draw` below enforces by doing all of it in one go.
+ * There is exactly one of these for a page.  Every card has a WebGPU canvas of its own, and all of
+ * them present from this one device (`card.ts`): the atlas, the shaders and every texture are
+ * shared, and a card is drawn straight onto its own canvas.  Giving every card its own device would
+ * be the obvious thing and it is wrong: nothing on one device is visible to another, so every card
+ * would hold its own copy of every chunk.
  *
  * Two things here are deliberate and easy to lose:
  *
@@ -39,16 +34,18 @@ export interface Card {
    */
   visibility: { value: number };
   renderViewport: RenderViewport;
-  // Works out how big it is now; called before anything is drawn so the surface can be sized once.
+  // Whether its shader may ask for pages it cannot find, so that the frame has to be read back.
+  asks: boolean;
+  // Works out how big it is now; called before anything is drawn.
   measure(): void;
   // Gives up its pixels while it is off the board.
   release(): void;
-  // Draws into the shared surface and copies its own rectangle out.  One task, no awaiting.
+  // Draws onto its own canvas.  One task, no awaiting.
   draw(): void;
 }
 
 export class Device extends RefCounted {
-  /** Where the cards are drawn before being copied into their own canvases.  Never in the page. */
+  /** The renderer's own canvas, never in the page and never drawn to: the cards have their own. */
   readonly surface: HTMLCanvasElement;
   readonly renderer: THREE.WebGPURenderer;
   /** The raw device, for what three.js's cover does not reach.  See the file comment. */
@@ -194,17 +191,15 @@ export class Device extends RefCounted {
   );
 
   /**
-   * One frame: measure every card, then draw and copy them one at a time.
+   * One frame: measure every card, then draw them one at a time, each onto its own canvas.
    *
-   * All of it in one task, with nothing awaited.  A WebGPU canvas is presented when the task ends,
-   * so a copy that happened after an await would be copying a canvas that had already gone.
+   * All of it in one task, with nothing awaited: a WebGPU canvas is presented when the task ends.
    */
   private draw() {
     if (this.gone) return;
     const began = performance.now();
     this.frameStarted.dispatch();
     const drawing: Card[] = [];
-    let width = 0, height = 0;
     for (const card of this.cards) {
       card.measure();
       if (card.visibility.value === Number.NEGATIVE_INFINITY) {
@@ -215,40 +210,30 @@ export class Device extends RefCounted {
       const seen = card.renderViewport;
       if (seen.width === 0 || seen.height === 0) continue;
       drawing.push(card);
-      width = Math.max(width, seen.width);
-      height = Math.max(height, seen.height);
     }
     if (drawing.length === 0) return;
-    // Sized once, to the largest card being drawn; each card then takes a corner of it.
-    this.fitSurface(width, height);
-    for (const card of drawing) card.draw();
+    let asked = false;
+    for (const card of drawing) {
+      card.draw();
+      asked ||= card.asks;
+    }
     const took = performance.now() - began;
     const { stats } = this;
     stats.frames++;
     stats.lastMs = took;
     stats.meanMs += (took - stats.meanMs) / Math.min(stats.frames, 60);
-    this.drawn?.();
+    this.drawn?.(asked);
   }
-
-  /** What a frame costs, for a measurement to look at: the last one, a running mean, and resizes. */
-  readonly stats = { frames: 0, lastMs: 0, meanMs: 0, resizes: 0 };
-
-  /** Called once every frame, after every card has been drawn and copied out. */
-  drawn: (() => void) | undefined;
 
   /**
-   * Makes the surface at least this size.  It is left alone while it is within twice the size
-   * needed, because configuring a canvas anew is not free — but it does come back down: a board
-   * zoomed far in would otherwise leave tens of megapixels allocated for good.
+   * Called once every frame, after every card has been drawn, with whether any of them may have
+   * asked the GPU for pages — which is when the frame is worth reading back.
    */
-  fitSurface(width: number, height: number) {
-    const { surface } = this;
-    if (surface.width >= width && surface.height >= height) {
-      if (surface.width <= width * 2 && surface.height <= height * 2) return;
-    }
-    this.stats.resizes++;
-    surface.width = width;
-    surface.height = height;
-    this.renderer.setSize(width, height, false);
-  }
+  drawn: ((asked: boolean) => void) | undefined;
+
+  /**
+   * What a frame costs, for a measurement to look at: the last one, a running mean, and over all
+   * frames the time spent rendering and the pixels drawn.
+   */
+  readonly stats = { frames: 0, lastMs: 0, meanMs: 0, renderMs: 0, pixels: 0 };
 }
